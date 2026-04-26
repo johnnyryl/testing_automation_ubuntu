@@ -1,0 +1,54 @@
+---
+- name: PowerShell DSC
+  hosts: "{{ _hosts | default('os_windows') }}"
+  gather_facts: false
+
+  tasks:
+    - name: Setup PsGallery
+      ansible.windows.win_powershell:
+        script: |
+          $nuget_version = (Get-PackageProvider -Name NuGet -ListAvailable).version
+          $nuget_target_version = [Version]::new('2.8.5.201')
+          if( $nuget_version -lt $nuget_target_version ){
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Install-PackageProvider -Name NuGet -MinimumVersion $nuget_target_version -Force
+            Install-Module -Name packagemanagement -Force
+            Install-Module -Name powershellget -Force
+          }
+
+    - name: Setup the SecurityPolicyDSC module
+      community.windows.win_psmodule:
+        name: SecurityPolicyDSC
+        module_version: 2.10.0.0
+        state: present
+        accept_license: true
+
+    - name: Set password history
+      ansible.windows.win_dsc:
+        resource_name: AccountPolicy
+        Name: Enforce_password_history
+        Enforce_password_history: 24
+
+    - name: Set maximum password age
+      ansible.windows.win_dsc:
+        resource_name: AccountPolicy
+        Name: Maximum_Password_Age
+        Maximum_Password_Age: 60
+
+    - name: Set minimum password age
+      ansible.windows.win_dsc:
+        resource_name: AccountPolicy
+        Name: Minimum_Password_Age
+        Maximum_Password_Age: 20
+
+    - name: Set minimum password length
+      ansible.windows.win_dsc:
+        resource_name: AccountPolicy
+        Name: Minimum_Password_Length
+        Maximum_Password_Age: 8
+
+    - name: Set password complexity requirements
+      ansible.windows.win_dsc:
+        resource_name: AccountPolicy
+        Name: Password_must_meet_complexity_requirements
+        Password_must_meet_complexity_requirements: Enabled

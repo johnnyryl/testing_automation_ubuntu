@@ -1,0 +1,41 @@
+---
+- name: Temporary Sudo
+  hosts: "{{ _hosts | default(omit) }}"
+  become: true
+  gather_facts: false
+  vars:
+    sudo_cleanup: true
+    sudo_user: undef
+    sudo_time: 10
+    sudo_units: minutes
+
+  tasks:
+    - name: Check if sudo user exists on system
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ sudo_user }}"
+
+    - name: Check Cleanup package
+      ansible.builtin.dnf:
+        name: at
+        state: present
+
+    - name: Check Cleanup Service
+      ansible.builtin.service:
+        name: atd
+        state: started
+
+    - name: Create Sudo Rule
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ sudo_user }}"
+        owner: root
+        group: root
+        mode: "0640"
+        content: "{{ sudo_user }} ALL=(ALL) NOPASSWD:ALL"
+
+    - name: Set Permission Cleanup
+      ansible.posix.at:
+        command: "rm /etc/sudoers.d/{{ sudo_user }}"
+        count: "{{ sudo_time }}"
+        units: "{{ sudo_units }}"
+      when: sudo_cleanup | bool

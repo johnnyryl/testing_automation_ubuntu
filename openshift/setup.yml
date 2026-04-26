@@ -1,0 +1,337 @@
+---
+controller_credentials:
+  - name: OpenShift Credential
+    organization: Ansible Product Demos (APD)
+    credential_type: OpenShift or Kubernetes API Bearer Token
+    update_secrets: false
+    state: exists
+    inputs:
+      host: CHANGEME
+      bearer_token: CHANGEME
+      verify_ssl: false
+
+controller_inventory_sources:
+  - name: OpenShift CNV Inventory
+    inventory: Ansible Product Demos Inventory
+    source: scm
+    source_project: Ansible Product Demos
+    source_path: openshift/inventory.kubevirt.yml
+    credential: OpenShift Credential
+    update_on_launch: false
+    overwrite: true
+
+controller_templates:
+  - name: OpenShift | EDA | Install Controller
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "openshift/eda/install.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    survey_enabled: true
+    credentials:
+      - OpenShift Credential
+      - AAP Credential
+
+  - name: OpenShift | CNV | Install Operator
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "openshift/cnv/install.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    survey_enabled: true
+    credentials:
+      - OpenShift Credential
+
+  - name: OpenShift | CNV | Create RHEL VM
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "openshift/cnv/provision_rhel.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    survey_enabled: true
+    allow_simultaneous: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: VM name
+          type: text
+          variable: vm_name
+          default: rhel9
+          required: true
+        - question_name: VM NameSpace
+          type: text
+          variable: vm_namespace
+          default: openshift-cnv
+          required: true
+        - question_name: SSH Authorized Key
+          type: textarea
+          variable: ssh_authorized_key
+          required: true
+        - question_name: OS Version
+          type: text
+          variable: os_version
+          default: rhel9
+          required: true
+        - question_name: RHEL Activation Key
+          type: text
+          variable: rh_subscription_key
+          required: true
+        - question_name: RHEL Organization ID
+          type: text
+          variable: rh_subscription_org
+          required: true
+    credentials:
+      - OpenShift Credential
+
+  - name: OpenShift | CNV | Create VM Snapshots
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "openshift/cnv/snapshot.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    extra_vars:
+      snapshot_operation: create
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          default: "openshift-cnv-rhel*"
+          required: true
+        - question_name: VM NameSpace
+          type: text
+          variable: vm_namespace
+          default: openshift-cnv
+          required: true
+    credentials:
+      - OpenShift Credential
+
+  - name: OpenShift | CNV | Restore Latest VM Snapshots
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "openshift/cnv/snapshot.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    extra_vars:
+      snapshot_operation: restore
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          default: "openshift-cnv-rhel*"
+          required: true
+        - question_name: VM NameSpace
+          type: text
+          variable: vm_namespace
+          default: openshift-cnv
+          required: true
+    credentials:
+      - OpenShift Credential
+
+  - name: OpenShift | CNV | Delete VM
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "openshift/cnv/delete.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    survey_enabled: true
+    extra_vars:
+      instance_state: absent
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: VM host string
+          type: text
+          variable: vm_host_string
+          required: true
+        - question_name: VM NameSpace
+          type: text
+          variable: vm_namespace
+          default: openshift-cnv
+          required: true
+
+    credentials:
+      - OpenShift Credential
+
+  - name: OpenShift | CNV | Patch
+    job_type: check
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "openshift/cnv/patch.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    ask_job_type_on_launch: true
+    credentials:
+      - OpenShift Credential
+      - APD Machine Credential
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          default: "openshift-cnv-rhel*"
+          required: true
+
+  - name: OpenShift | CNV | Wait Hosts
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "openshift/cnv/wait.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Wait hosts
+          type: text
+          variable: _hosts
+          default: "openshift-cnv-rhel*"
+          required: true
+
+  - name: OpenShift | Dev Spaces
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "openshift/devspaces.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    credentials:
+      - OpenShift Credential
+
+  - name: OpenShift | GitLab
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "openshift/gitlab.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    credentials:
+      - OpenShift Credential
+
+controller_workflows:
+  - name: OpenShift | CNV | Infra Stack
+    description: A workflow to deploy Virtualized infra in OCP Virtalization
+    organization: Ansible Product Demos (APD)
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: SSH Authorized Key
+          type: textarea
+          variable: ssh_authorized_key
+          required: true
+        - question_name: RHEL Activation Key
+          type: text
+          variable: rh_subscription_key
+          required: true
+        - question_name: RHEL Organization ID
+          type: text
+          variable: rh_subscription_org
+          required: true
+        - question_name: Email
+          type: text
+          variable: email
+          required: true
+    simplified_workflow_nodes:
+      - identifier: Deploy RHEL8 VM
+        unified_job_template: OpenShift | CNV | Create RHEL VM
+        extra_data:
+          vm_name: rhel8
+          os_version: rhel8
+        success_nodes:
+          - Update Inventory
+        failure_nodes:
+          - Ticket - Instance Failed
+      - identifier: Deploy RHEL9 VM
+        unified_job_template: OpenShift | CNV | Create RHEL VM
+        extra_data:
+          vm_name: rhel9
+          os_version: rhel9
+        success_nodes:
+          - Update Inventory
+        failure_nodes:
+          - Ticket - Instance Failed
+      - identifier: Update Inventory
+        unified_job_template: OpenShift CNV Inventory
+      - identifier: Ticket - Instance Failed
+        unified_job_template: 'SUBMIT FEEDBACK'
+        extra_data:
+          feedback: Failed to create CNV instance
+
+  - name: OpenShift | CNV | Patch CNV Workflow
+    description: A workflow to patch CNV instances with snapshot and restore on failure.
+    organization: Ansible Product Demos (APD)
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Specify target hosts
+          type: text
+          variable: _hosts
+          required: true
+          default: "openshift-cnv-rhel*"
+    simplified_workflow_nodes:
+      - identifier: Project Sync
+        unified_job_template: Ansible Product Demos
+        success_nodes:
+          - Patch Instance
+      # We need to do an invnetory sync *after* creating snapshots, as turning VMs on/off changes their IP
+      - identifier: Inventory Sync
+        unified_job_template: OpenShift CNV Inventory
+        success_nodes:
+          - Patch Instance
+      - identifier: Take Snapshot
+        unified_job_template: OpenShift | CNV | Create VM Snapshots
+        success_nodes:
+          - Project Sync
+          - Inventory Sync
+      - identifier: Patch Instance
+        unified_job_template: OpenShift | CNV | Patch
+        job_type: run
+        failure_nodes:
+          - Restore from Snapshot
+      - identifier: Restore from Snapshot
+        unified_job_template: OpenShift | CNV | Restore Latest VM Snapshots
+        failure_nodes:
+          - Ticket - Restore Failed
+      - identifier: Ticket - Restore Failed
+        unified_job_template: 'SUBMIT FEEDBACK'
+        extra_data:
+          feedback: OpenShift | CNV | Patch CNV Workflow | Failed to restore CNV VM from snapshot

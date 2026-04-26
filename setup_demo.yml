@@ -1,0 +1,48 @@
+---
+- name: Setup common prerequisites
+  hosts: localhost
+  gather_facts: false
+
+  # vars_files should be scoped to a play so variables defined in the
+  # files should not be available in subsequent plays, so certain
+  # resources won't be retried
+  vars_files:
+    - common/setup.yml
+
+  tasks:
+    - name: Create reusable deployment ID
+      ansible.builtin.set_fact:
+        _deployment_id: '{{ lookup("ansible.builtin.password", "{{ playbook_dir }}/.deployment_id", chars=["ascii_lowercase", "digits"], length=5) }}'
+
+    - name: Create common demo resources
+      ansible.builtin.include_role:
+        name: infra.aap_configuration.dispatch
+      vars:
+        controller_dependency_check: false  # noqa: var-naming[no-role-prefix]
+
+- name: Setup demo
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Include configuration for {{ demo }}
+      ansible.builtin.include_vars: "{{ demo }}/setup.yml"
+
+    - name: Demo Components
+      ansible.builtin.include_role:
+        name: infra.aap_configuration.dispatch
+      vars:
+        controller_dependency_check: false  # noqa: var-naming[no-role-prefix]
+
+    - name: Log Demo
+      ansible.builtin.uri:
+        url: https://docs.google.com/forms/d/e/1FAIpQLSdIZ77YpETjEfGOoYlXtMnQiU-6M7QFlb2hJA4ujo25QYb2jw/formResponse
+        method: POST
+        body: "ifq&entry.1569353616={{ demo }} &entry.498055740={{ lookup('ansible.builtin.env', 'AWX_HOST') }}&sumbit=Submit"
+      ignore_errors: true  # noqa: ignore-errors - connectivity should not fail play
+
+    - name: Print Message
+      ansible.builtin.debug:
+        msg: "{{ user_message }}"
+      when: user_message is defined
+
+...

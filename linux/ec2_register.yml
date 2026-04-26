@@ -1,0 +1,73 @@
+---
+- name: Register ec2 instance with subscription mangler
+  hosts: "{{ _hosts | default(omit)  }}"
+  become: true
+
+  tasks:
+    - name: Check for vars
+      ansible.builtin.assert:
+        that:
+          - org_id is defined
+          - activation_key is defined
+          - org_id != ''
+          - activation_key != ''
+          - org_id != 'undef'
+          - activation_key != 'undef'
+
+    - name: Set hostname
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname | regex_replace('_', '-') }}"
+
+    # Install subscription-manager if it's not there
+    - name: Install subscription-manager
+      ansible.builtin.dnf:
+        name: subscription-manager
+        state: present
+
+    - name: Remove rhui client packages
+      ansible.builtin.dnf:
+        name: rh-amazon-rhui-client*
+        state: removed
+
+    - name: Get current repos
+      ansible.builtin.command:
+        cmd: ls /etc/yum.repos.d/
+      register: repos
+      changed_when: false
+
+    - name: Remove existing rhui repos
+      ansible.builtin.file:
+        path: "/etc/yum.repos.d/{{ item }}"
+        state: absent
+      loop: "{{ repos.stdout_lines }}"
+      when: "'rhui' in item"
+
+    - name: Install katello package
+      ansible.builtin.dnf:
+        name: "https://{{ sat_url }}/pub/katello-ca-consumer-latest.noarch.rpm"
+        state: present
+        validate_certs: false
+        disable_gpg_check: true
+      when: sat_url is defined
+
+    - name: Manage repos with subscription mangler
+      ansible.builtin.lineinfile:
+        path: /etc/rhsm/rhsm.conf
+        regexp: '^manage_repos'
+        line: 'manage_repos = 1'
+
+    - name: Register subscription mangler
+      community.general.redhat_subscription:
+        state: present
+        activationkey: "{{ activation_key }}"
+        org_id: "{{ org_id }}"
+
+    - name: Configure Red Hat insights
+      ansible.builtin.import_role:
+        name: redhat.insights.insights_client
+      vars:  # noqa var-naming[no-role-prefix]
+        insights_display_name: "{{ inventory_hostname }}"
+        insights_tags:
+          env: "{{ env }}"
+          purpose: demo
+          group: "{{ insights_tag }}"

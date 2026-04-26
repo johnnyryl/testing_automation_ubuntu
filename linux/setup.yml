@@ -1,0 +1,569 @@
+---
+user_message:
+  - Update the 'activation_key' and 'org_id' extra variables for 'LINUX | Register with Insights'. https://access.redhat.com/management/activation_keys
+  - Update Credential for Insights Inventory with Red Hat account.
+  - Add variables for system_roles. https://console.redhat.com/ansible/automation-hub/repo/published/redhat/rhel_system_roles
+
+# "!unsafe" used to pass raw jinja2 through to the injector definition, see
+# https://github.com/redhat-cop/controller_configuration/tree/devel/roles/credential_types#formating-injectors
+controller_credential_types:
+  - name: Insights Collection
+    description: Insights credential that can be used with SCM-based inventory sources
+    kind: cloud
+    inputs:
+      fields:
+        - id: insights_user
+          type: string
+          label: Insights User
+        - id: insights_password
+          type: string
+          label: Insights Password
+          secret: true
+    injectors:
+      env:
+        INSIGHTS_USER: !unsafe '{{ insights_user }}'
+        INSIGHTS_PASSWORD: !unsafe '{{ insights_password }}'
+
+controller_credentials:
+  - name: Insights Inventory
+    credential_type: Insights Collection
+    organization: Ansible Product Demos (APD)
+    update_secrets: false
+    state: exists
+    inputs:
+      insights_user: REPLACEME
+      insights_password: REPLACEME
+
+controller_inventory_sources:
+  - name: Insights Inventory
+    inventory: Ansible Product Demos Inventory
+    source: scm
+    source_project: Ansible Product Demos
+    source_path: linux/inventory.insights.yml
+    credential: Insights Inventory
+
+controller_templates:
+  - name: "LINUX | Register with Insights"
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "linux/ec2_register.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    credentials:
+      - APD Machine Credential
+    survey_enabled: true
+    extra_vars:
+      activation_key: !unsafe "RHEL{{ ansible_distribution_major_version }}_{{ env }}"
+      org_id: REPLACEME
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+        - question_name: Choose Environment
+          type: multiplechoice
+          variable: env
+          choices:
+            - Dev
+            - QA
+            - Prod
+          required: true
+        - question_name: Ansible Inventory Group (and Insights tag) to be created
+          type: text
+          variable: insights_tag
+          required: true
+        - question_name: Org ID
+          type: text
+          variable: org_id
+          required: true
+
+  - name: "LINUX | Troubleshoot"
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "linux/tshoot.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    use_fact_cache: true
+    credentials:
+      - APD Machine Credential
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+
+  - name: "LINUX | Temporary Sudo"
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "linux/temp_sudo.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    credentials:
+      - APD Machine Credential
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+        - question_name: User Name
+          type: text
+          variable: sudo_user
+          required: true
+        - question_name: How long to grant access in minutes
+          type: integer
+          variable: sudo_time
+          default: 10
+          required: true
+
+  - name: "LINUX | Patching"
+    job_type: check
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "linux/patching.yml"
+    execution_environment: Default execution environment
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    use_fact_cache: true
+    ask_job_type_on_launch: true
+    credentials:
+      - APD Machine Credential
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+
+  - name: "LINUX | Start Service"
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "linux/service_start.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    use_fact_cache: true
+    credentials:
+      - APD Machine Credential
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+        - question_name: Service Name
+          type: text
+          variable: service_name
+          required: true
+
+  - name: "LINUX | Stop Service"
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "linux/service_stop.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    use_fact_cache: true
+    credentials:
+      - APD Machine Credential
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+        - question_name: Service Name
+          type: text
+          variable: service_name
+          required: true
+
+  - name: "LINUX | Run Shell Script"
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "linux/run_script.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    credentials:
+      - APD Machine Credential
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+        - question_name: Shell Script
+          type: textarea
+          variable: shell_script
+          required: true
+
+  - name: "LINUX | Fact Scan"
+    project: "Ansible Product Demos"
+    playbook: linux/fact_scan.yml
+    inventory: Ansible Product Demos Inventory
+    execution_environment: Default execution environment
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    use_fact_cache: true
+    credentials:
+      - APD Machine Credential
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+
+  - name: "LINUX | Podman Webserver"
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "linux/podman.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    credentials:
+      - APD Machine Credential
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+        - question_name: Web Page Message
+          type: textarea
+          variable: message
+          required: true
+          default: "This is Apache webserver running in a container with podman"
+
+  - name: "LINUX | System Roles"
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "linux/system_roles.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    diff_mode: true
+    ask_job_type_on_launch: true
+    extra_vars:
+      system_roles:
+        - selinux
+      selinux_policy: targeted
+      selinux_state: enforcing
+    credentials:
+      - APD Machine Credential
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+
+  - name: "LINUX | Install Web Console (cockpit)"
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "linux/system_roles.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    diff_mode: true
+    ask_job_type_on_launch: true
+    extra_vars:
+      system_roles:
+        - cockpit
+    credentials:
+      - APD Machine Credential
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+        - question_name: Cockpit package load
+          type: multiplechoice
+          variable: cockpit_packages
+          default: minimal
+          choices:
+            - default
+            - minimal
+            - full
+          required: true
+
+  - name: "LINUX | Compliance Enforce"
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "linux/remediate_out_of_compliance.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    credentials:
+      - APD Machine Credential
+    extra_vars:
+      sudo_remove_nopasswd: false
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+
+  - name: "LINUX | DISA STIG"
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "linux/disa_stig.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    credentials:
+      - APD Machine Credential
+    extra_vars:
+      sudo_remove_nopasswd: false
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+
+  - name: "LINUX | Multi-profile Compliance"
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "linux/multi_profile_compliance.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    credentials:
+      - APD Machine Credential
+      - "AWS"
+    extra_vars:
+      # used by CIS profile role
+      sudo_require_authentication: false
+      # used by STIG profile role
+      sudo_remove_nopasswd: false
+      sudo_remove_no_authenticate: false
+      # used by CIS and STIG profile role
+      accounts_password_set_max_life_existing: false
+      # used by the CJIS profile role
+      service_firewalld_enabled: false
+      firewalld_sshd_port_enabled: false
+      # used by the PCI-DSS profile role
+      firewalld_loopback_traffic_restricted: false
+      firewalld_loopback_traffic_trusted: false
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+        - question_name: Compliance Profile
+          type: multiplechoice
+          variable: compliance_profile
+          required: true
+          choices:
+            - cis
+            - cjis
+            - cui
+            - hipaa
+            - ospp
+            - pci-dss
+            - stig
+
+  - name: "LINUX | Multi-profile Compliance Report"
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "linux/multi_profile_compliance_report.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    credentials:
+      - APD Machine Credential
+      - "AWS"
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+        - question_name: Compliance Profile
+          type: multiplechoice
+          variable: compliance_profile
+          required: true
+          choices:
+            - cis
+            - cjis
+            - cui
+            - hipaa
+            - ospp
+            - pci_dss
+            - stig
+        - question_name: Use httpd on the target host(s) to access reports locally?
+          type: multiplechoice
+          variable: use_httpd
+          required: true
+          choices:
+            - "true"
+            - "false"
+          default: "true"
+
+  - name: "LINUX | Insights Compliance Scan"
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "linux/insights_compliance_scan.yml"
+    credentials:
+      - APD Machine Credential
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+        - question_name: Have you associated a compliance profile in the Insights Console for all hosts to be scanned?  If not, then the scan will fail.
+          type: multiplechoice
+          variable: compliance_profile_configured
+          required: true
+          choices:
+            - "Yes"
+            - "No"
+          default: "No"
+
+  - name: "LINUX | Deploy Application"
+    job_type: run
+    inventory: Ansible Product Demos Inventory
+    project: "Ansible Product Demos"
+    playbook: "linux/deploy_application.yml"
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    use_fact_cache: true
+    credentials:
+      - APD Machine Credential
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+        - question_name: Application Package Name
+          type: text
+          variable: application
+          required: true
+
+controller_workflows:
+  - name: "Linux | Compliance Workflow"
+    description: A workflow to generate a SCAP report and run enforce on findings
+    organization: Ansible Product Demos (APD)
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          default: aws_rhel*
+          variable: _hosts
+          required: true
+        - question_name: Compliance Profile
+          type: multiplechoice
+          variable: compliance_profile
+          required: true
+          choices:
+            - cis
+            - cjis
+            - cui
+            - hipaa
+            - ospp
+            - pci_dss
+            - stig
+        - question_name: Use httpd on the target host(s) to access reports locally?
+          type: multiplechoice
+          variable: use_httpd
+          required: true
+          choices:
+            - "true"
+            - "false"
+          default: "true"
+    simplified_workflow_nodes:
+      - identifier: Compliance Report
+        unified_job_template: "LINUX | Multi-profile Compliance Report"
+        success_nodes:
+          - Update Inventory
+      - identifier: Update Inventory
+        unified_job_template: AWS Inventory
+        success_nodes:
+          - Compliance Enforce
+      - identifier: Compliance Enforce
+        unified_job_template: "LINUX | Compliance Enforce"
+...
