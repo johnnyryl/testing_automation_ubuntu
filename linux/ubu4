@@ -20,13 +20,12 @@ collections_hub.tar
 repos/<repo>.tar
 ```
 
-The new component still supports those legacy inputs, but the preferred path is now `bundle_items`.
+The new component still supports those legacy inputs, but the preferred path is now a checked-in profile file referenced by `bundle_profile_path`. Inline `bundle_items` still works for quick tests.
 
-Example:
+Example profile file: `bundle_profiles/rhel8-full.yml`
 
 ```yaml
-bundle_items: |
-  - id: files
+- id: files
     source_type: nexus
     type: tar
     source: files/files.tar
@@ -42,6 +41,15 @@ bundle_items: |
     mode: extract
     destination_strategy: replace
 ```
+
+Then call that profile from the CI file:
+
+```yaml
+bundle_profile_name: rhel8-full
+bundle_profile_path: bundle_profiles/rhel8-full.yml
+```
+
+Use either `bundle_profile_path` or inline `bundle_items`, not both.
 
 ## Order matters
 
@@ -137,4 +145,4 @@ NEXUS_PACKAGE_FULL_BUNDLE_URL
 
 The component writes a small Python helper during the job. It uses only Python 3.6+ standard library modules and `curl`.
 
-It supports the simple readable YAML list shape shown in the examples, but not nested YAML objects.
+It supports the simple readable YAML list shape shown in the examples, but not nested YAML objects. The `bundle_profile_path` file is read from the checked-out GitLab project, then parsed by the same helper.
