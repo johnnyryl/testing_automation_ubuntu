@@ -6,6 +6,7 @@ spec:
 
     package_id: { description: "Short identifier used in the GitLab job name.", type: string, default: "bundle" }
     bundle_profile_name: { description: "Human-friendly profile name written into the generated manifest.", type: string, default: "custom" }
+    bundle_profile_path: { description: "Optional project-relative path to a checked-in bundle profile YAML file. If set, bundle_items must be empty.", type: string, default: "" }
     package_dir_name: { description: "Top-level directory name inside the generated archive.", type: string, default: "aerolit_bundle" }
     output_filename: { description: "Base final archive filename. The package version can be inserted before the archive suffix.", type: string, default: "aerolit_bundle.tar.gz" }
     manifest_filename: { description: "Base generated manifest filename.", type: string, default: "aerolit_bundle.contents.txt" }
@@ -93,6 +94,7 @@ spec:
 
       export AEROLIT_PACKAGE_ID="$[[ inputs.package_id ]]"
       export AEROLIT_BUNDLE_PROFILE_NAME="$[[ inputs.bundle_profile_name ]]"
+      export AEROLIT_BUNDLE_PROFILE_PATH="$[[ inputs.bundle_profile_path ]]"
       export AEROLIT_PACKAGE_DIR_NAME="$[[ inputs.package_dir_name ]]"
       export AEROLIT_OUTPUT_FILENAME="$[[ inputs.output_filename ]]"
       export AEROLIT_MANIFEST_FILENAME="$[[ inputs.manifest_filename ]]"
@@ -132,6 +134,28 @@ spec:
       cat > "${AEROLIT_BUNDLE_ITEMS_FILE}" <<'AEROLIT_BUNDLE_ITEMS_EOF'
 $[[ inputs.bundle_items ]]
 AEROLIT_BUNDLE_ITEMS_EOF
+
+      if [ -n "${AEROLIT_BUNDLE_PROFILE_PATH}" ]; then
+        case "${AEROLIT_BUNDLE_PROFILE_PATH}" in
+          /*|*\\*|*..*)
+            echo "ERROR: bundle_profile_path must be a safe project-relative path and may not contain '..' or backslashes: ${AEROLIT_BUNDLE_PROFILE_PATH}" >&2
+            exit 1
+            ;;
+        esac
+
+        if grep -Eq '^[[:space:]]*-' "${AEROLIT_BUNDLE_ITEMS_FILE}"; then
+          echo "ERROR: Set either bundle_profile_path or inline bundle_items, not both." >&2
+          exit 1
+        fi
+
+        if [ ! -f "${CI_PROJECT_DIR}/${AEROLIT_BUNDLE_PROFILE_PATH}" ]; then
+          echo "ERROR: bundle_profile_path does not exist: ${CI_PROJECT_DIR}/${AEROLIT_BUNDLE_PROFILE_PATH}" >&2
+          exit 1
+        fi
+
+        cp "${CI_PROJECT_DIR}/${AEROLIT_BUNDLE_PROFILE_PATH}" "${AEROLIT_BUNDLE_ITEMS_FILE}"
+        echo "Using bundle profile file: ${AEROLIT_BUNDLE_PROFILE_PATH}"
+      fi
 
       cat > "${AEROLIT_BUNDLE_BUILDER}" <<'AEROLIT_BUNDLE_BUILDER_PY'
 #!/usr/bin/env python3
@@ -957,8 +981,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# UNCLASSIFIED
 
 AEROLIT_BUNDLE_BUILDER_PY
 
