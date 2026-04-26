@@ -1,0 +1,965 @@
+spec:
+  inputs:
+    stage: { type: string, default: "bundle" }
+    job_needs: { type: array, default: [] }
+    disable_bundle: { type: boolean, default: false }
+
+    package_id: { description: "Short identifier used in the GitLab job name.", type: string, default: "bundle" }
+    bundle_profile_name: { description: "Human-friendly profile name written into the generated manifest.", type: string, default: "custom" }
+    package_dir_name: { description: "Top-level directory name inside the generated archive.", type: string, default: "aerolit_bundle" }
+    output_filename: { description: "Base final archive filename. The package version can be inserted before the archive suffix.", type: string, default: "aerolit_bundle.tar.gz" }
+    manifest_filename: { description: "Base generated manifest filename.", type: string, default: "aerolit_bundle.contents.txt" }
+
+    source_components_url: { description: "Base Nexus URL where reusable package components live, such as offline_package/package_components.", type: string, default: "$NEXUS_PACKAGE_COMPONENTS_URL" }
+    destination_url: { description: "Base Nexus URL where the final generated package should be uploaded.", type: string, default: "$NEXUS_PACKAGE_FULL_BUNDLE_URL" }
+
+    package_version: { description: "Optional explicit package version. If omitted, uses COLLECTIONS_HUB_VERSION, then derives from collections-hub source filename when possible.", type: string, default: "" }
+    require_package_version: { description: "If true, fail when no package version can be determined.", type: boolean, default: true }
+
+    append_version_to_output_filename: { description: "If true, append the derived or explicit version to the output filename.", type: boolean, default: true }
+    append_version_to_manifest_filename: { description: "If true, append the derived or explicit version to the manifest filename.", type: boolean, default: true }
+    append_version_to_package_dir_name: { description: "If true, append the derived or explicit version to the archive root directory name.", type: boolean, default: false }
+
+    upload_manifest: { description: "Upload the generated manifest alongside the final tar.gz.", type: boolean, default: true }
+    curl_insecure: { description: "Pass --insecure to curl for internal/self-signed TLS.", type: boolean, default: false }
+
+    verify_max_attempts: { description: "Maximum remote verification attempts after upload.", type: string, default: "60" }
+    verify_sleep_seconds: { description: "Seconds between remote verification attempts.", type: string, default: "10" }
+    verify_initial_wait_seconds: { description: "Initial seconds to wait after upload before verification.", type: string, default: "20" }
+
+    bundle_include_ids: { description: "Optional whitespace/comma-separated list of bundle item IDs to include. Empty means include all enabled items.", type: string, default: "" }
+    bundle_exclude_ids: { description: "Optional whitespace/comma-separated list of bundle item IDs to exclude.", type: string, default: "" }
+    bundle_items:
+      description: "YAML list of dynamic bundle items. If empty, legacy files/collections-hub/repos inputs are used."
+      type: string
+      default: ""
+
+    # Legacy inputs kept so existing jobs can still run while migrating to bundle_items.
+    files_tar_relative_path: { description: "[Legacy] Path under source_components_url for files tar.", type: string, default: "files/files.tar" }
+    collections_hub_tar_relative_path: { description: "[Legacy] Optional explicit path under source_components_url for collections hub tar.", type: string, default: "" }
+    repos_relative_dir: { description: "[Legacy] Path under source_components_url where repo tar files live.", type: string, default: "repos" }
+    repo_tar_names: { description: "[Legacy] Space-separated repo tar base names to include, without .tar suffix.", type: string, default: "" }
+    files_dir_name: { description: "[Legacy] Final directory name for files tar contents.", type: string, default: "files" }
+    collections_hub_dir_name: { description: "[Legacy] Final directory name for collections hub tar contents.", type: string, default: "collections-hub" }
+    repos_dir_name: { description: "[Legacy] Final parent directory name for repo contents.", type: string, default: "repos" }
+
+---
+
+"create_and_upload_$[[ inputs.package_id ]]":
+  stage: $[[ inputs.stage ]]
+  needs: $[[ inputs.job_needs ]]
+  retry: 2
+
+  artifacts:
+    when: always
+    paths:
+      - dist/
+    exclude:
+      - dist/*.tar.gz
+      - dist/*.tgz
+      - dist/*.tar
+    expire_in: 1 week
+
+  variables:
+    DISABLE_BUNDLE: "$[[ inputs.disable_bundle ]]"
+
+  rules:
+    - if: '$CI_COMMIT_TAG'
+      when: never
+    - if: '$DISABLE_BUNDLE == "true"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "pipeline"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: always
+    - when: never
+
+  script:
+    - |
+      set -eu
+
+      : "${NEXUS_USERNAME:?NEXUS_USERNAME is required}"
+      : "${NEXUS_PASSWORD:?NEXUS_PASSWORD is required}"
+      : "${CI_PROJECT_DIR:?CI_PROJECT_DIR is required}"
+
+      for required_tool in python3 curl; do
+        command -v "${required_tool}" >/dev/null 2>&1 || {
+          echo "Missing required tool: ${required_tool}"
+          exit 1
+        }
+      done
+
+      export AEROLIT_PACKAGE_ID="$[[ inputs.package_id ]]"
+      export AEROLIT_BUNDLE_PROFILE_NAME="$[[ inputs.bundle_profile_name ]]"
+      export AEROLIT_PACKAGE_DIR_NAME="$[[ inputs.package_dir_name ]]"
+      export AEROLIT_OUTPUT_FILENAME="$[[ inputs.output_filename ]]"
+      export AEROLIT_MANIFEST_FILENAME="$[[ inputs.manifest_filename ]]"
+
+      export AEROLIT_SOURCE_COMPONENTS_URL="$[[ inputs.source_components_url ]]"
+      export AEROLIT_DESTINATION_URL="$[[ inputs.destination_url ]]"
+
+      export AEROLIT_PACKAGE_VERSION="$[[ inputs.package_version ]]"
+      export AEROLIT_REQUIRE_PACKAGE_VERSION="$[[ inputs.require_package_version ]]"
+
+      export AEROLIT_APPEND_VERSION_TO_OUTPUT_FILENAME="$[[ inputs.append_version_to_output_filename ]]"
+      export AEROLIT_APPEND_VERSION_TO_MANIFEST_FILENAME="$[[ inputs.append_version_to_manifest_filename ]]"
+      export AEROLIT_APPEND_VERSION_TO_PACKAGE_DIR_NAME="$[[ inputs.append_version_to_package_dir_name ]]"
+
+      export AEROLIT_UPLOAD_MANIFEST="$[[ inputs.upload_manifest ]]"
+      export AEROLIT_CURL_INSECURE="$[[ inputs.curl_insecure ]]"
+
+      export AEROLIT_VERIFY_MAX_ATTEMPTS="$[[ inputs.verify_max_attempts ]]"
+      export AEROLIT_VERIFY_SLEEP_SECONDS="$[[ inputs.verify_sleep_seconds ]]"
+      export AEROLIT_VERIFY_INITIAL_WAIT_SECONDS="$[[ inputs.verify_initial_wait_seconds ]]"
+
+      export AEROLIT_BUNDLE_INCLUDE_IDS="$[[ inputs.bundle_include_ids ]]"
+      export AEROLIT_BUNDLE_EXCLUDE_IDS="$[[ inputs.bundle_exclude_ids ]]"
+
+      export AEROLIT_FILES_TAR_RELATIVE_PATH="$[[ inputs.files_tar_relative_path ]]"
+      export AEROLIT_COLLECTIONS_HUB_TAR_RELATIVE_PATH="$[[ inputs.collections_hub_tar_relative_path ]]"
+      export AEROLIT_REPOS_RELATIVE_DIR="$[[ inputs.repos_relative_dir ]]"
+      export AEROLIT_REPO_TAR_NAMES="$[[ inputs.repo_tar_names ]]"
+      export AEROLIT_FILES_DIR_NAME="$[[ inputs.files_dir_name ]]"
+      export AEROLIT_COLLECTIONS_HUB_DIR_NAME="$[[ inputs.collections_hub_dir_name ]]"
+      export AEROLIT_REPOS_DIR_NAME="$[[ inputs.repos_dir_name ]]"
+
+      AEROLIT_BUNDLE_ITEMS_FILE="${CI_PROJECT_DIR}/.aerolit_bundle_items.yml"
+      AEROLIT_BUNDLE_BUILDER="${CI_PROJECT_DIR}/.aerolit_dynamic_bundle_builder.py"
+      export AEROLIT_BUNDLE_ITEMS_FILE
+
+      cat > "${AEROLIT_BUNDLE_ITEMS_FILE}" <<'AEROLIT_BUNDLE_ITEMS_EOF'
+$[[ inputs.bundle_items ]]
+AEROLIT_BUNDLE_ITEMS_EOF
+
+      cat > "${AEROLIT_BUNDLE_BUILDER}" <<'AEROLIT_BUNDLE_BUILDER_PY'
+#!/usr/bin/env python3
+# UNCLASSIFIED
+"""
+AeroLIT dynamic offline bundle builder.
+
+Python 3.6+ compatible. No PyYAML dependency required.
+
+Supported bundle_items shape:
+
+- id: files
+  enabled: true
+  required: true
+  source_type: nexus
+  type: tar
+  source: files/files.tar
+  destination: files
+  mode: extract
+  destination_strategy: replace
+
+This parser supports a simple YAML list of scalar key/value pairs. It does not
+support nested YAML objects/lists inside each item.
+"""
+
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import time
+from pathlib import Path, PurePosixPath
+
+
+SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def log(message):
+    print(message, flush=True)
+
+
+def fail(message, code=1):
+    print("ERROR: {0}".format(message), file=sys.stderr, flush=True)
+    raise SystemExit(code)
+
+
+def env(name, default=""):
+    return os.environ.get(name, default)
+
+
+def env_bool(name, default=False):
+    value = env(name, str(default)).strip().lower()
+    return value in ("1", "true", "yes", "y", "on")
+
+
+def trim_trailing_slash(value):
+    while value.endswith("/"):
+        value = value[:-1]
+    return value
+
+
+def split_ids(value):
+    return set(x for x in re.split(r"[\s,]+", value.strip()) if x)
+
+
+def strip_quotes(value):
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    return value
+
+
+def parse_scalar(value):
+    value = strip_quotes(value.strip())
+    low = value.lower()
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    if low in ("null", "none", "~"):
+        return ""
+    return value
+
+
+def remove_inline_comment(value):
+    """
+    Remove comments from unquoted scalar values.
+
+    This is intentionally simple. If you need # inside a value, quote the value.
+    """
+    in_single = False
+    in_double = False
+    for i, char in enumerate(value):
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif char == "#" and not in_single and not in_double:
+            if i == 0 or value[i - 1].isspace():
+                return value[:i].rstrip()
+    return value.rstrip()
+
+
+def parse_simple_bundle_items_yaml(text):
+    items = []
+    current = None
+
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.rstrip()
+        stripped = line.strip()
+
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        item_match = re.match(r"^\s*-\s*(.*)$", line)
+        if item_match:
+            current = {}
+            items.append(current)
+            remainder = item_match.group(1).strip()
+            if remainder:
+                if ":" not in remainder:
+                    fail("Invalid bundle_items line {0}: {1}".format(line_number, raw_line))
+                key, value = remainder.split(":", 1)
+                current[key.strip().replace("-", "_")] = parse_scalar(remove_inline_comment(value))
+            continue
+
+        if current is None:
+            fail("bundle_items must be a YAML list. Bad line {0}: {1}".format(line_number, raw_line))
+
+        field_match = re.match(r"^\s+([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$", line)
+        if not field_match:
+            fail("Invalid bundle_items line {0}: {1}".format(line_number, raw_line))
+
+        key = field_match.group(1).strip().replace("-", "_")
+        value = remove_inline_comment(field_match.group(2))
+        current[key] = parse_scalar(value)
+
+    return items
+
+
+def validate_safe_name(value, label):
+    if not value:
+        fail("{0} is required".format(label))
+    if not SAFE_NAME_RE.match(value):
+        fail("Invalid {0}: {1!r}. Allowed: letters, numbers, dot, underscore, dash".format(label, value))
+
+
+def is_safe_relative_path(value):
+    if not value:
+        return False
+    if "\\" in value:
+        return False
+    if value.startswith(("/", "~")):
+        return False
+    if "\x00" in value:
+        return False
+
+    path = PurePosixPath(value)
+    for part in path.parts:
+        if part in ("", ".", ".."):
+            return False
+    return True
+
+
+def validate_relative_path(value, label):
+    value = value.strip()
+    if not is_safe_relative_path(value):
+        fail("Invalid {0}: {1!r}. Must be a safe relative path under the bundle root.".format(label, value))
+    return value
+
+
+def resolve_tokens(value, package_version):
+    value = value.replace("{version}", package_version)
+    value = value.replace("{package_version}", package_version)
+    value = os.path.expandvars(value)
+
+    if "$" in value:
+        fail("Unresolved environment variable in path: {0!r}".format(value))
+
+    return value
+
+
+def strip_archive_suffix(filename):
+    for suffix in (".tar.gz", ".tgz", ".tar"):
+        if filename.endswith(suffix):
+            return filename[: -len(suffix)]
+    return filename
+
+
+def insert_version_into_filename(filename, version):
+    if not version:
+        return filename
+
+    suffixes = [".contents.txt", ".tar.gz", ".tgz", ".tar"]
+    for suffix in suffixes:
+        if filename.endswith(suffix):
+            return "{0}-{1}{2}".format(filename[:-len(suffix)], version, suffix)
+
+    return "{0}-{1}".format(filename, version)
+
+
+def derive_version_from_collection_source(source):
+    """
+    Tries to derive versions from names like:
+      collections_hub-1.7.0.tar
+      collections-hub-1.7.0.tar.gz
+      collections_hub-v1.7.0.tgz
+    """
+    name = Path(source).name
+    name = strip_archive_suffix(name)
+    match = re.search(r"collections[-_]hub[-_]?v?([0-9][A-Za-z0-9._-]*)$", name)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def remove_prefix(value, prefix):
+    if value.startswith(prefix):
+        return value[len(prefix):]
+    return value
+
+
+def normalize_version(raw_version):
+    version = raw_version.strip()
+    version = remove_prefix(version, "refs/tags/")
+    version = remove_prefix(version, "v")
+    return version
+
+
+def require_tool(tool):
+    if shutil.which(tool) is None:
+        fail("Missing required tool: {0}".format(tool))
+
+
+def curl_command_base():
+    username = env("NEXUS_USERNAME")
+    password = env("NEXUS_PASSWORD")
+    if not username:
+        fail("NEXUS_USERNAME is required")
+    if not password:
+        fail("NEXUS_PASSWORD is required")
+
+    command = ["curl", "--location", "--fail", "--show-error"]
+    if env_bool("AEROLIT_CURL_INSECURE"):
+        command.append("--insecure")
+    command.extend(["-u", "{0}:{1}".format(username, password)])
+    return command
+
+
+def download_file(url, destination, required):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    log("Downloading {0}".format(url))
+
+    command = curl_command_base() + ["--output", str(destination), url]
+    result = subprocess.run(command, universal_newlines=True)
+
+    if result.returncode == 0 and destination.is_file() and destination.stat().st_size > 0:
+        log("Downloaded {0} ({1} bytes)".format(destination, destination.stat().st_size))
+        return True
+
+    if destination.exists():
+        destination.unlink()
+
+    if required:
+        fail("Required file could not be downloaded: {0}".format(url))
+
+    log("Optional file not available, skipping: {0}".format(url))
+    return False
+
+
+def remote_file_exists(url):
+    command = curl_command_base()
+    command = command + [
+        "--silent",
+        "--output",
+        "/dev/null",
+        "--range",
+        "0-0",
+        url,
+    ]
+    return subprocess.run(command, universal_newlines=True).returncode == 0
+
+
+def upload_file(file_path, url):
+    if not file_path.is_file() or file_path.stat().st_size == 0:
+        fail("Upload file is missing or empty: {0}".format(file_path))
+
+    initial_wait = int(env("AEROLIT_VERIFY_INITIAL_WAIT_SECONDS", "20"))
+    sleep_seconds = int(env("AEROLIT_VERIFY_SLEEP_SECONDS", "10"))
+    max_attempts = int(env("AEROLIT_VERIFY_MAX_ATTEMPTS", "60"))
+
+    log("Uploading {0} to {1}".format(file_path, url))
+    log("Local file size: {0} bytes".format(file_path.stat().st_size))
+
+    command = curl_command_base() + ["--upload-file", str(file_path), url]
+    upload_result = subprocess.run(command, universal_newlines=True)
+
+    if upload_result.returncode == 0:
+        log("Upload command completed. Waiting {0}s for Nexus to expose the file.".format(initial_wait))
+    else:
+        log(
+            "Initial upload returned rc={0}. Waiting {1}s before verification because Nexus may still expose the file.".format(
+                upload_result.returncode,
+                initial_wait,
+            )
+        )
+
+    time.sleep(initial_wait)
+
+    for attempt in range(1, max_attempts + 1):
+        log("Remote verification attempt {0}/{1}: {2}".format(attempt, max_attempts, url))
+        if remote_file_exists(url):
+            log("Remote file verified after upload: {0}".format(url))
+            return
+        log("Remote file not visible yet; sleeping {0}s".format(sleep_seconds))
+        time.sleep(sleep_seconds)
+
+    fail("Remote file was not verified after upload: {0}".format(url))
+
+
+def validate_tar_member(member, archive):
+    name = member.name
+
+    if not is_safe_relative_path(name):
+        fail("Unsafe tar entry detected in {0}: {1!r}".format(archive, name))
+
+    if member.issym() or member.islnk():
+        linkname = member.linkname
+        if not is_safe_relative_path(linkname):
+            fail("Unsafe tar link detected in {0}: {1!r} -> {2!r}".format(archive, name, linkname))
+
+
+def validate_tar_archive(archive):
+    try:
+        with tarfile.open(str(archive), "r:*") as tar:
+            members = tar.getmembers()
+            if not members:
+                fail("Tar archive is empty: {0}".format(archive))
+            for member in members:
+                validate_tar_member(member, archive)
+    except tarfile.TarError as exc:
+        fail("Invalid tar archive {0}: {1}".format(archive, exc))
+
+
+def remove_path(path):
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(str(path))
+
+
+def copy_file_or_symlink(source, destination):
+    if destination.exists() or destination.is_symlink():
+        remove_path(destination)
+    shutil.copy2(str(source), str(destination), follow_symlinks=False)
+
+
+def copy_tree_merge(source_dir, destination_dir):
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    for child in source_dir.iterdir():
+        target = destination_dir / child.name
+        if child.is_dir() and not child.is_symlink():
+            copy_tree_merge(child, target)
+        else:
+            copy_file_or_symlink(child, target)
+
+
+def copy_path(source, destination):
+    if source.is_dir() and not source.is_symlink():
+        copy_tree_merge(source, destination)
+    else:
+        copy_file_or_symlink(source, destination)
+
+
+def copy_contents(source_dir, destination_dir):
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    for child in source_dir.iterdir():
+        copy_path(child, destination_dir / child.name)
+
+
+def apply_destination_strategy(destination, strategy):
+    if strategy == "replace":
+        if destination.exists() or destination.is_symlink():
+            remove_path(destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        return
+
+    if strategy == "merge":
+        destination.mkdir(parents=True, exist_ok=True)
+        return
+
+    if strategy == "fail_if_exists":
+        if destination.exists() or destination.is_symlink():
+            fail("Destination already exists and strategy is fail_if_exists: {0}".format(destination))
+        destination.mkdir(parents=True, exist_ok=True)
+        return
+
+    fail("Unsupported destination_strategy: {0}".format(strategy))
+
+
+def extract_tar_into_named_dir(archive, destination, work_dir, strategy):
+    validate_tar_archive(archive)
+
+    temp_dir = work_dir / "extract_{0}_{1}".format(archive.stem, int(time.time() * 1000))
+    if temp_dir.exists():
+        shutil.rmtree(str(temp_dir))
+    temp_dir.mkdir(parents=True)
+
+    apply_destination_strategy(destination, strategy)
+
+    with tarfile.open(str(archive), "r:*") as tar:
+        tar.extractall(str(temp_dir))
+
+    entries = list(temp_dir.iterdir())
+    if len(entries) == 1 and entries[0].is_dir() and not entries[0].is_symlink():
+        copy_contents(entries[0], destination)
+    else:
+        copy_contents(temp_dir, destination)
+
+    shutil.rmtree(str(temp_dir))
+
+
+def safe_project_source(project_dir, source):
+    source = validate_relative_path(source, "project source")
+    candidate = (project_dir / source).resolve()
+    project_dir_text = str(project_dir)
+    candidate_text = str(candidate)
+    if not (candidate_text == project_dir_text or candidate_text.startswith(project_dir_text + os.sep)):
+        fail("Project source escapes CI_PROJECT_DIR: {0}".format(source))
+    return candidate
+
+
+def path_is_ancestor_or_same(parent, child):
+    parent_path = PurePosixPath(parent)
+    child_path = PurePosixPath(child)
+    return child_path == parent_path or parent_path in child_path.parents
+
+
+def ensure_replace_does_not_wipe_previous(destination, written_destinations, item_id):
+    for previous in written_destinations:
+        if path_is_ancestor_or_same(destination, previous):
+            fail(
+                "Unsafe bundle item order detected. "
+                "Item {0!r} wants to replace {1!r}, "
+                "but a previous item already wrote under {2!r}. "
+                "Move the broader replace item earlier or change destination_strategy to merge.".format(
+                    item_id,
+                    destination,
+                    previous,
+                )
+            )
+
+
+def build_legacy_items():
+    files_tar = env("AEROLIT_FILES_TAR_RELATIVE_PATH", "files/files.tar")
+    collections_hub_tar = env("AEROLIT_COLLECTIONS_HUB_TAR_RELATIVE_PATH", "")
+    if not collections_hub_tar:
+        collections_hub_tar = "collections_hub-{version}.tar"
+
+    repos_relative_dir = env("AEROLIT_REPOS_RELATIVE_DIR", "repos")
+    repo_tar_names = split_ids(env("AEROLIT_REPO_TAR_NAMES", ""))
+    files_dir_name = env("AEROLIT_FILES_DIR_NAME", "files")
+    collections_hub_dir_name = env("AEROLIT_COLLECTIONS_HUB_DIR_NAME", "collections-hub")
+    repos_dir_name = env("AEROLIT_REPOS_DIR_NAME", "repos")
+
+    items = [
+        {
+            "id": "files",
+            "description": "Legacy base files tar",
+            "enabled": True,
+            "required": True,
+            "source_type": "nexus",
+            "type": "tar",
+            "source": files_tar,
+            "destination": files_dir_name,
+            "mode": "extract",
+            "destination_strategy": "replace",
+        },
+        {
+            "id": "collections-hub",
+            "description": "Legacy collections hub tar",
+            "enabled": True,
+            "required": True,
+            "source_type": "nexus",
+            "type": "tar",
+            "source": collections_hub_tar,
+            "destination": collections_hub_dir_name,
+            "mode": "extract",
+            "destination_strategy": "replace",
+        },
+    ]
+
+    for repo_name in sorted(repo_tar_names):
+        validate_safe_name(repo_name, "repo tar name")
+        items.append(
+            {
+                "id": "repo-{0}".format(repo_name),
+                "description": "Legacy repo tar {0}".format(repo_name),
+                "enabled": True,
+                "required": True,
+                "source_type": "nexus",
+                "type": "tar",
+                "source": "{0}/{1}.tar".format(repos_relative_dir, repo_name),
+                "destination": "{0}/{1}".format(repos_dir_name, repo_name),
+                "mode": "extract",
+                "destination_strategy": "replace",
+            }
+        )
+
+    return items
+
+
+def normalize_item(raw_item):
+    item = dict(raw_item)
+
+    item["id"] = str(item.get("id", "")).strip()
+    validate_safe_name(item["id"], "bundle item id")
+
+    item["enabled"] = bool(item.get("enabled", True))
+    item["required"] = bool(item.get("required", True))
+
+    item["source_type"] = str(item.get("source_type", "nexus")).strip().lower()
+    if item["source_type"] == "local":
+        item["source_type"] = "project"
+    if item["source_type"] not in ("nexus", "project"):
+        fail("Unsupported source_type for item {0}: {1}".format(item["id"], item["source_type"]))
+
+    item["type"] = str(item.get("type", "tar")).strip().lower()
+    if item["type"] not in ("tar", "file"):
+        fail("Unsupported type for item {0}: {1}".format(item["id"], item["type"]))
+
+    default_mode = "extract" if item["type"] == "tar" else "copy"
+    item["mode"] = str(item.get("mode", default_mode)).strip().lower()
+
+    if item["type"] == "tar" and item["mode"] != "extract":
+        fail("Tar item {0} must use mode: extract".format(item["id"]))
+    if item["type"] == "file" and item["mode"] not in ("copy", "copy_executable"):
+        fail("File item {0} must use mode: copy or copy_executable".format(item["id"]))
+
+    item["source"] = str(item.get("source", "")).strip()
+    if not item["source"]:
+        fail("source is required for item {0}".format(item["id"]))
+
+    item["destination"] = str(item.get("destination", "")).strip()
+    if not item["destination"]:
+        fail("destination is required for item {0}".format(item["id"]))
+
+    item["destination_strategy"] = str(item.get("destination_strategy", "replace")).strip().lower()
+    if item["destination_strategy"] not in ("replace", "merge", "fail_if_exists"):
+        fail("Unsupported destination_strategy for item {0}: {1}".format(item["id"], item["destination_strategy"]))
+
+    return item
+
+
+def collect_tree(package_root):
+    lines = []
+    for path in sorted(package_root.rglob("*")):
+        rel = path.relative_to(package_root).as_posix()
+        if path.is_dir():
+            lines.append("DIR  {0}/".format(rel))
+        else:
+            mode = stat.S_IMODE(path.lstat().st_mode)
+            size = path.lstat().st_size
+            lines.append("FILE {0} {1} bytes mode={2:o}".format(rel, size, mode))
+    return lines
+
+
+def create_tar_gz(source_root, archive_root_name, output_path):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        output_path.unlink()
+
+    with tarfile.open(str(output_path), "w:gz") as tar:
+        tar.add(str(source_root), arcname=archive_root_name)
+
+    if not output_path.is_file() or output_path.stat().st_size == 0:
+        fail("Generated archive is empty: {0}".format(output_path))
+
+
+def main():
+    require_tool("curl")
+
+    ci_project_dir = Path(env("CI_PROJECT_DIR", ".")).resolve()
+    source_components_url = trim_trailing_slash(env("AEROLIT_SOURCE_COMPONENTS_URL"))
+    destination_url = trim_trailing_slash(env("AEROLIT_DESTINATION_URL"))
+
+    if not source_components_url:
+        fail("AEROLIT_SOURCE_COMPONENTS_URL is required")
+    if not destination_url:
+        fail("AEROLIT_DESTINATION_URL is required")
+
+    package_id = env("AEROLIT_PACKAGE_ID", "bundle")
+    validate_safe_name(package_id, "package_id")
+
+    bundle_profile_name = env("AEROLIT_BUNDLE_PROFILE_NAME", "custom")
+    validate_safe_name(bundle_profile_name, "bundle_profile_name")
+
+    base_package_dir_name = env("AEROLIT_PACKAGE_DIR_NAME", "aerolit_bundle")
+    validate_safe_name(base_package_dir_name, "package_dir_name")
+
+    base_output_filename = env("AEROLIT_OUTPUT_FILENAME", "aerolit_bundle.tar.gz")
+    validate_relative_path(base_output_filename, "output_filename")
+    if "/" in base_output_filename:
+        fail("output_filename must be a filename, not a path")
+
+    base_manifest_filename = env("AEROLIT_MANIFEST_FILENAME", "aerolit_bundle.contents.txt")
+    validate_relative_path(base_manifest_filename, "manifest_filename")
+    if "/" in base_manifest_filename:
+        fail("manifest_filename must be a filename, not a path")
+
+    package_version = normalize_version(env("AEROLIT_PACKAGE_VERSION", ""))
+    if not package_version:
+        package_version = normalize_version(env("COLLECTIONS_HUB_VERSION", ""))
+
+    bundle_items_file = Path(env("AEROLIT_BUNDLE_ITEMS_FILE", ".aerolit_bundle_items.yml"))
+    bundle_items_text = bundle_items_file.read_text(encoding="utf-8") if bundle_items_file.is_file() else ""
+
+    raw_items = parse_simple_bundle_items_yaml(bundle_items_text) if bundle_items_text.strip() else build_legacy_items()
+
+    if not package_version:
+        for raw_item in raw_items:
+            raw_source = str(raw_item.get("source", ""))
+            derived = derive_version_from_collection_source(raw_source)
+            if derived:
+                package_version = normalize_version(derived)
+                break
+
+    if package_version:
+        validate_safe_name(package_version, "package_version")
+    elif env_bool("AEROLIT_REQUIRE_PACKAGE_VERSION", True):
+        fail(
+            "Failed to determine package version. Set package_version, set COLLECTIONS_HUB_VERSION, "
+            "or use a collections_hub source filename that includes a version."
+        )
+
+    append_output_version = env_bool("AEROLIT_APPEND_VERSION_TO_OUTPUT_FILENAME", True)
+    append_manifest_version = env_bool("AEROLIT_APPEND_VERSION_TO_MANIFEST_FILENAME", True)
+    append_dir_version = env_bool("AEROLIT_APPEND_VERSION_TO_PACKAGE_DIR_NAME", False)
+
+    final_output_filename = (
+        insert_version_into_filename(base_output_filename, package_version)
+        if append_output_version
+        else base_output_filename
+    )
+    final_manifest_filename = (
+        insert_version_into_filename(base_manifest_filename, package_version)
+        if append_manifest_version
+        else base_manifest_filename
+    )
+    final_package_dir_name = (
+        "{0}-{1}".format(base_package_dir_name, package_version)
+        if append_dir_version and package_version
+        else base_package_dir_name
+    )
+
+    validate_safe_name(final_package_dir_name, "final package dir name")
+
+    work_dir = ci_project_dir / ".aerolit_bundle_work" / package_id
+    download_dir = work_dir / "downloads"
+    build_root = work_dir / "build"
+    package_root = build_root / final_package_dir_name
+    dist_dir = ci_project_dir / "dist"
+
+    if work_dir.exists():
+        shutil.rmtree(str(work_dir))
+    if dist_dir.exists():
+        shutil.rmtree(str(dist_dir))
+
+    download_dir.mkdir(parents=True, exist_ok=True)
+    package_root.mkdir(parents=True, exist_ok=True)
+    dist_dir.mkdir(parents=True, exist_ok=True)
+
+    include_ids = split_ids(env("AEROLIT_BUNDLE_INCLUDE_IDS", ""))
+    exclude_ids = split_ids(env("AEROLIT_BUNDLE_EXCLUDE_IDS", ""))
+
+    items = [normalize_item(item) for item in raw_items]
+    written_destinations = []
+    included_items = []
+    skipped_items = []
+
+    log("Package ID: {0}".format(package_id))
+    log("Bundle profile: {0}".format(bundle_profile_name))
+    log("Package version: {0}".format(package_version or "(none)"))
+    log("Archive root: {0}".format(final_package_dir_name))
+    log("Output filename: {0}".format(final_output_filename))
+    log("Manifest filename: {0}".format(final_manifest_filename))
+
+    for item in items:
+        item_id = item["id"]
+
+        if not item["enabled"]:
+            skipped_items.append({"id": item_id, "reason": "enabled=false"})
+            continue
+        if include_ids and item_id not in include_ids:
+            skipped_items.append({"id": item_id, "reason": "not in bundle_include_ids"})
+            continue
+        if item_id in exclude_ids:
+            skipped_items.append({"id": item_id, "reason": "in bundle_exclude_ids"})
+            continue
+
+        source = resolve_tokens(item["source"], package_version)
+        destination = resolve_tokens(item["destination"], package_version)
+        source = validate_relative_path(source, "source for item {0}".format(item_id))
+        destination = validate_relative_path(destination, "destination for item {0}".format(item_id))
+
+        destination_path = package_root / destination
+        strategy = item["destination_strategy"]
+
+        if strategy == "replace":
+            ensure_replace_does_not_wipe_previous(destination, written_destinations, item_id)
+
+        item_url = ""
+
+        if item["source_type"] == "nexus":
+            item_url = "{0}/{1}".format(source_components_url, source)
+            suffixes = "".join(Path(source).suffixes) or ".download"
+            local_input = download_dir / "{0}{1}".format(item_id, suffixes)
+            if not download_file(item_url, local_input, item["required"]):
+                skipped_items.append({"id": item_id, "reason": "optional source missing"})
+                continue
+        else:
+            local_input = safe_project_source(ci_project_dir, source)
+            if not local_input.exists():
+                if item["required"]:
+                    fail("Required project source does not exist for item {0}: {1}".format(item_id, source))
+                skipped_items.append({"id": item_id, "reason": "optional project source missing"})
+                continue
+
+        if item["type"] == "tar":
+            log("Extracting item {0}: {1} -> {2}".format(item_id, source, destination))
+            extract_tar_into_named_dir(local_input, destination_path, work_dir, strategy)
+        else:
+            log("Copying item {0}: {1} -> {2}".format(item_id, source, destination))
+            if strategy == "replace":
+                if destination_path.exists() or destination_path.is_symlink():
+                    remove_path(destination_path)
+            elif strategy == "fail_if_exists" and (destination_path.exists() or destination_path.is_symlink()):
+                fail("Destination already exists and strategy is fail_if_exists: {0}".format(destination_path))
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(local_input), str(destination_path), follow_symlinks=False)
+            if item["mode"] == "copy_executable":
+                destination_path.chmod(
+                    destination_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+                )
+
+        written_destinations.append(destination)
+        included_items.append(
+            {
+                "id": item_id,
+                "source_type": item["source_type"],
+                "type": item["type"],
+                "mode": item["mode"],
+                "source": source,
+                "source_url": item_url,
+                "destination": destination,
+                "destination_strategy": strategy,
+            }
+        )
+
+    if not included_items:
+        fail("No bundle items were included. Check bundle_items, bundle_include_ids, and bundle_exclude_ids.")
+
+    output_path = dist_dir / final_output_filename
+    manifest_path = dist_dir / final_manifest_filename
+
+    manifest_lines = [
+        "# UNCLASSIFIED",
+        "",
+        "PACKAGE_ID {0}".format(package_id),
+        "BUNDLE_PROFILE {0}".format(bundle_profile_name),
+        "PACKAGE_VERSION {0}".format(package_version),
+        "SOURCE_COMPONENTS_URL {0}".format(source_components_url),
+        "DESTINATION_URL {0}".format(destination_url),
+        "OUTPUT_URL {0}/{1}".format(destination_url, final_output_filename),
+        "MANIFEST_URL {0}/{1}".format(destination_url, final_manifest_filename),
+        "ARCHIVE_ROOT {0}".format(final_package_dir_name),
+        "",
+        "INCLUDED_ITEMS",
+    ]
+
+    for item in included_items:
+        source_display = item["source_url"] or item["source"]
+        manifest_lines.append(
+            "ITEM {id} type={type} mode={mode} strategy={strategy} source={source} destination={destination}".format(
+                id=item["id"],
+                type=item["type"],
+                mode=item["mode"],
+                strategy=item["destination_strategy"],
+                source=source_display,
+                destination=item["destination"],
+            )
+        )
+
+    manifest_lines.append("")
+    manifest_lines.append("SKIPPED_ITEMS")
+    if skipped_items:
+        for item in skipped_items:
+            manifest_lines.append("SKIPPED {0} reason={1}".format(item["id"], item["reason"]))
+    else:
+        manifest_lines.append("NONE")
+
+    manifest_lines.append("")
+    manifest_lines.append("TREE")
+    manifest_lines.extend(collect_tree(package_root))
+    manifest_lines.append("")
+    manifest_lines.append("# UNCLASSIFIED")
+    manifest_lines.append("")
+
+    manifest_path.write_text("\n".join(manifest_lines), encoding="utf-8")
+
+    create_tar_gz(package_root, final_package_dir_name, output_path)
+
+    log("Built archive size: {0} bytes".format(output_path.stat().st_size))
+    log("Built manifest: {0}".format(manifest_path))
+
+    upload_file(output_path, "{0}/{1}".format(destination_url, final_output_filename))
+
+    if env_bool("AEROLIT_UPLOAD_MANIFEST", True):
+        upload_file(manifest_path, "{0}/{1}".format(destination_url, final_manifest_filename))
+
+
+if __name__ == "__main__":
+    main()
+
+# UNCLASSIFIED
+
+AEROLIT_BUNDLE_BUILDER_PY
+
+      python3 "${AEROLIT_BUNDLE_BUILDER}"
