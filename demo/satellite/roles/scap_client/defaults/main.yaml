@@ -1,0 +1,13 @@
+---
+foreman_server_url: "{{ lookup('env', 'SATELLITE_SERVER') }}"   # noqa var-naming[no-role-prefix] - TODO : we should rework roles to use variable prefix, until scope is defined, silence is the way
+foreman_username: "{{ lookup('env', 'SATELLITE_USERNAME') }}"   # noqa var-naming[no-role-prefix] - TODO : we should rework roles to use variable prefix, until scope is defined, silence is the way
+foreman_password: "{{ lookup('env', 'SATELLITE_PASSWORD') }}"   # noqa var-naming[no-role-prefix] - TODO : we should rework roles to use variable prefix, until scope is defined, silence is the way
+foreman_validate_certs: "{{ lookup('env', 'FOREMAN_VALIDATE_CERTS') | default(true) }}"   # noqa var-naming[no-role-prefix] - TODO : we should rework roles to use variable prefix, until scope is defined, silence is the way
+capsule_server: "{{ foreman_server_url }}"   # noqa var-naming[no-role-prefix] - TODO : we should rework roles to use variable prefix, until scope is defined, silence is the way
+capsule_port: '9090'   # noqa var-naming[no-role-prefix] - TODO : we should rework roles to use variable prefix, until scope is defined, silence is the way
+policy_name: 'all'   # noqa var-naming[no-role-prefix] - TODO : we should rework roles to use variable prefix, until scope is defined, silence is the way
+policy_scan: "{{ policy_name }}"   # noqa var-naming[no-role-prefix] - TODO : we should rework roles to use variable prefix, until scope is defined, silence is the way
+crontab_hour: 2   # noqa var-naming[no-role-prefix] - TODO : we should rework roles to use variable prefix, until scope is defined, silence is the way
+crontab_minute: 0   # noqa var-naming[no-role-prefix] - TODO : we should rework roles to use variable prefix, until scope is defined, silence is the way
+crontab_weekdays: 0  # noqa var-naming[no-role-prefix] - TODO : we should rework roles to use variable prefix, until scope is defined, silence is the way
+foreman_operations_scap_client_secure_logging: true   # noqa var-naming[no-role-prefix] - TODO : we should rework roles to use variable prefix, until scope is defined, silence is the way

@@ -1,0 +1,393 @@
+---
+_deployment_id: "{{ lookup('file', playbook_dir + '/.deployment_id') }}"
+
+user_message:
+
+controller_templates:
+  - name: Cloud | AWS | Create Peer Infrastructure
+    job_type: run
+    organization: Ansible Product Demos (APD)
+    credentials:
+      - AWS
+    project: Ansible Cloud Content Lab - AWS
+    playbook: playbooks/create_peer_network.yml
+    inventory: Ansible Product Demos Inventory
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    extra_vars:
+      aws_region: us-east-1
+      dmz_ssh_key_name: aws-test-key
+      priv_network_ssh_key_name: aws-test-key
+
+  - name: Cloud | AWS | Delete Peer Infrastructure
+    job_type: run
+    organization: Ansible Product Demos (APD)
+    credentials:
+      - AWS
+    project: Ansible Cloud Content Lab - AWS
+    playbook: playbooks/delete_peer_network.yml
+    inventory: Ansible Product Demos Inventory
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    extra_vars:
+      aws_region: us-east-1
+
+  - name: Cloud | AWS | Create Transit Infrastructure
+    job_type: run
+    organization: Ansible Product Demos (APD)
+    credentials:
+      - AWS
+    project: Ansible Cloud Content Lab - AWS
+    playbook: playbooks/create_transit_network.yml
+    inventory: Ansible Product Demos Inventory
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    extra_vars:
+      aws_region: us-east-1
+      dmz_ssh_key_name: aws-test-key
+      priv_network_ssh_key_name: aws-test-key
+
+  - name: Cloud | AWS | Delete Transit Infrastructure
+    job_type: run
+    organization: Ansible Product Demos (APD)
+    credentials:
+      - AWS
+    project: Ansible Cloud Content Lab - AWS
+    playbook: playbooks/delete_transit_network.yml
+    inventory: Ansible Product Demos Inventory
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    extra_vars:
+      aws_region: us-east-1
+
+  - name: Cloud | AWS | VPC Report
+    job_type: run
+    organization: Ansible Product Demos (APD)
+    credentials:
+      - AWS
+    project: Ansible Cloud AWS Demos
+    playbook: playbooks/cloud_report.yml
+    inventory: Ansible Product Demos Inventory
+    execution_environment: Cloud Services Execution Environment
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    extra_vars:
+      reports_aws_bucket_name: reports-pd-{{ _deployment_id }}
+      reports_aws_region: "us-east-1"
+
+  - name: Cloud | AWS | Tags Report
+    job_type: run
+    organization: Ansible Product Demos (APD)
+    credentials:
+      - AWS
+    project: Ansible Cloud Content Lab - AWS
+    playbook: playbooks/create_reports.yml
+    inventory: Ansible Product Demos Inventory
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    extra_vars:
+      aws_report: tags
+      reports_aws_bucket_name: reports-pd-{{ _deployment_id }}
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: AWS Region
+          type: multiplechoice
+          variable: create_vm_aws_region
+          required: true
+          choices:
+            - us-east-1
+            - us-east-2
+            - us-west-1
+            - us-west-2
+
+  - name: Cloud | AWS | Snapshot EC2
+    job_type: run
+    organization: Ansible Product Demos (APD)
+    credentials:
+      - AWS
+    project: Ansible Product Demos
+    playbook: cloud/snapshot_ec2.yml
+    inventory: Ansible Product Demos Inventory
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: AWS Region
+          type: multiplechoice
+          variable: aws_region
+          required: true
+          default: us-east-1
+          choices:
+            - us-east-1
+            - us-east-2
+            - us-west-1
+            - us-west-2
+        - question_name: Specify target hosts
+          type: text
+          variable: _hosts
+          required: false
+
+  - name: Cloud | AWS | Restore EC2 from Snapshot
+    job_type: run
+    organization: Ansible Product Demos (APD)
+    credentials:
+      - AWS
+    project: Ansible Product Demos
+    playbook: cloud/restore_ec2.yml
+    inventory: Ansible Product Demos Inventory
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: AWS Region
+          type: multiplechoice
+          variable: aws_region
+          required: true
+          default: us-east-1
+          choices:
+            - us-east-1
+            - us-east-2
+            - us-west-1
+            - us-west-2
+        - question_name: Specify target hosts
+          type: text
+          variable: _hosts
+          required: false
+
+  - name: Cloud | AWS | Display EC2 Stats
+    job_type: run
+    organization: Ansible Product Demos (APD)
+    credentials:
+      - AWS
+    project: Ansible Product Demos
+    playbook: cloud/display-ec2-stats.yml
+    inventory: Ansible Product Demos Inventory
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+
+  - name: LINUX | Patching
+    job_type: check
+    inventory: Ansible Product Demos Inventory
+    project: Ansible Product Demos
+    playbook: linux/patching.yml
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    use_fact_cache: true
+    ask_job_type_on_launch: true
+    credentials:
+      - APD Machine Credential
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: _hosts
+          required: true
+
+controller_workflows:
+  - name: Deploy Cloud Stack in AWS
+    description: A workflow to deploy a cloud stack
+    organization: Ansible Product Demos (APD)
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    extra_vars:
+      vm_deployment: cloud_stack
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: AWS Region
+          type: multiplechoice
+          variable: create_vm_aws_region
+          required: true
+          choices:
+            - us-east-1
+            - us-east-2
+            - us-west-1
+            - us-west-2
+        - question_name: Owner
+          type: text
+          variable: create_vm_aws_owner_tag
+          required: true
+        - question_name: Environment
+          type: multiplechoice
+          variable: vm_environment
+          required: true
+          choices:
+            - Dev
+            - QA
+            - Prod
+        - question_name: Keypair Public Key
+          type: textarea
+          variable: aws_public_key
+          required: true
+        - question_name: Email
+          type: text
+          variable: email
+          required: true
+    simplified_workflow_nodes:
+      - identifier: Create Keypair
+        unified_job_template: Cloud | AWS | Create Keypair
+        success_nodes:
+          - EC2 Stats
+        failure_nodes:
+          - Ticket - Keypair Failed
+      - identifier: Create VPC
+        unified_job_template: Cloud | AWS | Create VPC
+        success_nodes:
+          - EC2 Stats
+        failure_nodes:
+          - Ticket - VPC Failed
+      - identifier: Ticket - Keypair Failed
+        unified_job_template: 'SUBMIT FEEDBACK'
+        extra_data:
+          feedback: Failed to create AWS keypair
+      - identifier: EC2 Stats
+        unified_job_template: Cloud | AWS | Display EC2 Stats
+        all_parents_must_converge: true
+        always_nodes:
+          - VPC Report
+      - identifier: VPC Report
+        unified_job_template: Cloud | AWS | VPC Report
+        all_parents_must_converge: true
+        always_nodes:
+          - Deploy Windows GUI Blueprint
+          - Deploy RHEL8 Blueprint
+          - Deploy RHEL9 Blueprint
+          - Deploy Windows Core Blueprint
+          - Deploy Report Server
+      - identifier: Deploy Windows GUI Blueprint
+        unified_job_template: Cloud | AWS | Create VM
+        extra_data:
+          create_vm_vm_name: aws-dc
+          vm_blueprint: windows_full
+        success_nodes:
+          - Update Inventory
+        failure_nodes:
+          - Ticket - Instance Failed
+      - identifier: Deploy Windows Core Blueprint
+        unified_job_template: Cloud | AWS | Create VM
+        extra_data:
+          create_vm_vm_name: aws_win1
+          vm_blueprint: windows_core
+        success_nodes:
+          - Update Inventory
+        failure_nodes:
+          - Ticket - Instance Failed
+      - identifier: Deploy RHEL8 Blueprint
+        unified_job_template: Cloud | AWS | Create VM
+        extra_data:
+          create_vm_vm_name: aws_rhel8
+          vm_blueprint: rhel8
+        success_nodes:
+          - Update Inventory
+        failure_nodes:
+          - Ticket - Instance Failed
+      - identifier: Deploy RHEL9 Blueprint
+        unified_job_template: Cloud | AWS | Create VM
+        extra_data:
+          create_vm_vm_name: aws_rhel9
+          vm_blueprint: rhel9
+        success_nodes:
+          - Update Inventory
+        failure_nodes:
+          - Ticket - Instance Failed
+      - identifier: Deploy Report Server
+        unified_job_template: Cloud | AWS | Create VM
+        extra_data:
+          create_vm_vm_name: reports
+          vm_blueprint: rhel9
+        success_nodes:
+          - Update Inventory
+        failure_nodes:
+          - Ticket - Instance Failed
+      - identifier: Update Inventory
+        unified_job_template: AWS Inventory
+        success_nodes:
+          - Tag Report
+      - identifier: Ticket - Instance Failed
+        unified_job_template: 'SUBMIT FEEDBACK'
+        extra_data:
+          feedback: Failed to create AWS instance
+      - identifier: Tag Report
+        unified_job_template: Cloud | AWS | Tags Report
+      - identifier: Ticket - VPC Failed
+        unified_job_template: 'SUBMIT FEEDBACK'
+        extra_data:
+          feedback: Failed to create AWS VPC
+
+  - name: Cloud | AWS | Patch EC2 Workflow
+    description: A workflow to patch ec2 instances with snapshot and restore on failure.
+    organization: Ansible Product Demos (APD)
+    notification_templates_started: Telemetry
+    notification_templates_success: Telemetry
+    notification_templates_error: Telemetry
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: AWS Region
+          type: multiplechoice
+          variable: aws_region
+          required: true
+          default: us-east-1
+          choices:
+            - us-east-1
+            - us-east-2
+            - us-west-1
+            - us-west-2
+        - question_name: Specify target hosts
+          type: text
+          variable: _hosts
+          required: true
+          default: os_linux
+    simplified_workflow_nodes:
+      - identifier: Project Sync
+        unified_job_template: Ansible Product Demos
+        success_nodes:
+          - Take Snapshot
+      - identifier: Inventory Sync
+        unified_job_template: AWS Inventory
+        success_nodes:
+          - Take Snapshot
+      - identifier: Take Snapshot
+        unified_job_template: Cloud | AWS | Snapshot EC2
+        success_nodes:
+          - Patch Instance
+      - identifier: Patch Instance
+        unified_job_template: LINUX | Patching
+        job_type: run
+        failure_nodes:
+          - Restore from Snapshot
+      - identifier: Restore from Snapshot
+        unified_job_template: Cloud | AWS | Restore EC2 from Snapshot
+        failure_nodes:
+          - Ticket - Restore Failed
+      - identifier: Ticket - Restore Failed
+        unified_job_template: 'SUBMIT FEEDBACK'
+        extra_data:
+          feedback: Cloud | AWS | Patch EC2 Workflow | Failed to restore ec2 from snapshot
