@@ -1,0 +1,82 @@
+# Example bundle_items profile for an AeroLIT RHEL 8 full package.
+# Copy this content into the component's bundle_items input, or use it as the
+# source of truth for a wrapper include/template.
+#
+# Supported fields:
+#   id: unique item name
+#   enabled: true/false
+#   required: true/false
+#   source_type: nexus/project
+#   type: tar/file
+#   source: source path under source_components_url, or project path for source_type: project
+#   destination: destination path inside the final bundle root
+#   mode: extract/copy/copy_executable
+#   destination_strategy: replace/merge/fail_if_exists
+#
+# UNCLASSIFIED
+
+- id: files
+  description: Base shared files directory used by AeroLIT roles
+  enabled: true
+  required: true
+  source_type: nexus
+  type: tar
+  source: files/files.tar
+  destination: files
+  mode: extract
+  destination_strategy: replace
+
+- id: collections-hub
+  description: AeroLIT collections hub content
+  enabled: true
+  required: true
+  source_type: nexus
+  type: tar
+  source: collections_hub-{version}.tar
+  destination: collections-hub
+  mode: extract
+  destination_strategy: replace
+
+- id: rhel8iso
+  description: Extracted RHEL 8 ISO tree used by PXE/kickstart/bootstrap workflows
+  enabled: true
+  required: true
+  source_type: nexus
+  type: tar
+  source: extracted_isos/rhel8iso.tar
+  destination: extracted_isos/rhel8iso
+  mode: extract
+  destination_strategy: replace
+
+- id: rhel8-extra-repo
+  description: Optional RHEL 8 repo with added RPMs/packages
+  enabled: true
+  required: false
+  source_type: nexus
+  type: tar
+  source: repos/rhel8-extra.tar
+  destination: repos/rhel8-extra
+  mode: extract
+  destination_strategy: replace
+
+- id: jse-package
+  description: JSE/JAR container package added under the existing files directory
+  enabled: true
+  required: false
+  source_type: nexus
+  type: tar
+  source: products/jse/jse-package.tar
+  destination: files/jse
+  mode: extract
+  destination_strategy: replace
+
+- id: bootstrap
+  description: Top-level bootstrap launcher script from this GitLab project
+  enabled: true
+  required: true
+  source_type: project
+  type: file
+  source: bootstrap.sh
+  destination: bootstrap.sh
+  mode: copy_executable
+  destination_strategy: replace
