@@ -1,0 +1,82 @@
+
+stages:
+  - bundle
+
+include:
+  - component: $CI_SERVER_FQDN/lit/offline-package/offline-package-bundler/templates/aerolit-bundler/template.yml@main
+    inputs:
+      stage: bundle
+      package_id: rhel8_full
+      bundle_profile_name: rhel8-full
+
+      package_dir_name: aerolit_rhel8
+      output_filename: aerolit_rhel8.tar.gz
+      manifest_filename: aerolit_rhel8.contents.txt
+
+      source_components_url: "$NEXUS_PACKAGE_COMPONENTS_URL"
+      destination_url: "$NEXUS_PACKAGE_FULL_BUNDLE_URL"
+
+      package_version: "1.7.0"
+      require_package_version: true
+
+      append_version_to_output_filename: true
+      append_version_to_manifest_filename: true
+      append_version_to_package_dir_name: false
+      upload_manifest: true
+
+      bundle_items: |
+        - id: files
+          description: Base shared files directory used by AeroLIT roles
+          enabled: true
+          required: true
+          source_type: nexus
+          type: tar
+          source: files/files.tar
+          destination: files
+          mode: extract
+          destination_strategy: replace
+
+        - id: collections-hub
+          description: AeroLIT collections hub content
+          enabled: true
+          required: true
+          source_type: nexus
+          type: tar
+          source: collections_hub-{version}.tar
+          destination: collections-hub
+          mode: extract
+          destination_strategy: replace
+
+        - id: rhel8iso
+          description: Extracted RHEL 8 ISO tree
+          enabled: true
+          required: true
+          source_type: nexus
+          type: tar
+          source: extracted_isos/rhel8iso.tar
+          destination: extracted_isos/rhel8iso
+          mode: extract
+          destination_strategy: replace
+
+        - id: jse-package
+          description: Optional JSE/JAR package placed under files/jse
+          enabled: true
+          required: false
+          source_type: nexus
+          type: tar
+          source: products/jse/jse-package.tar
+          destination: files/jse
+          mode: extract
+          destination_strategy: replace
+
+        - id: bootstrap
+          description: Top-level bootstrap script from this GitLab project
+          enabled: true
+          required: true
+          source_type: project
+          type: file
+          source: bootstrap.sh
+          destination: bootstrap.sh
+          mode: copy_executable
+          destination_strategy: replace
+
