@@ -1,0 +1,140 @@
+# AeroLIT Dynamic Offline Bundle Builder Update
+
+This update refactors the offline package bundler from a mostly hardcoded bundle layout into a manifest-driven builder.
+
+## Files in this patch
+
+```text
+templates/aerolit-bundler/template.yml
+bundle_profiles/rhel8-full.yml
+examples/rhel8-full.gitlab-ci.yml
+```
+
+## Main change
+
+The old component had hardcoded concepts like:
+
+```text
+files.tar
+collections_hub.tar
+repos/<repo>.tar
+```
+
+The new component still supports those legacy inputs, but the preferred path is now `bundle_items`.
+
+Example:
+
+```yaml
+bundle_items: |
+  - id: files
+    source_type: nexus
+    type: tar
+    source: files/files.tar
+    destination: files
+    mode: extract
+    destination_strategy: replace
+
+  - id: jse-package
+    source_type: nexus
+    type: tar
+    source: products/jse/jse-package.tar
+    destination: files/jse
+    mode: extract
+    destination_strategy: replace
+```
+
+## Order matters
+
+The builder processes `bundle_items` in the order listed.
+
+For your `files.tar` case, put the base files item first:
+
+```text
+1. files.tar -> files/
+2. jse-package.tar -> files/jse/
+```
+
+That prevents a later broad `files/` replacement from wiping out `files/jse/`.
+
+The builder has protection for this. If a later item tries to `replace` a parent directory that already received content from an earlier item, it fails instead of silently deleting content.
+
+## Destination strategies
+
+```text
+replace         Delete the exact destination first, then place content there.
+merge           Keep the destination and merge/overwrite files into it.
+fail_if_exists  Fail if the destination already exists.
+```
+
+Recommended pattern:
+
+```text
+Base directories first with replace.
+Add-ons second with replace into subdirectories.
+Overlays last with merge only when intentional.
+```
+
+## Source types
+
+```text
+source_type: nexus
+```
+
+Downloads from:
+
+```text
+${source_components_url}/${source}
+```
+
+```text
+source_type: project
+```
+
+Copies from the checked-out GitLab project at:
+
+```text
+${CI_PROJECT_DIR}/${source}
+```
+
+This is useful for `bootstrap.sh` or other project-owned files.
+
+## Final output settings
+
+These still control where the generated bundle is uploaded and what it is called:
+
+```yaml
+destination_url: "$NEXUS_PACKAGE_FULL_BUNDLE_URL"
+package_dir_name: aerolit_rhel8
+output_filename: aerolit_rhel8.tar.gz
+manifest_filename: aerolit_rhel8.contents.txt
+package_version: "1.7.0"
+append_version_to_output_filename: true
+append_version_to_manifest_filename: true
+append_version_to_package_dir_name: false
+```
+
+With those settings, the output becomes:
+
+```text
+${destination_url}/aerolit_rhel8-1.7.0.tar.gz
+${destination_url}/aerolit_rhel8-1.7.0.contents.txt
+```
+
+## Required CI variables
+
+The job expects these to exist:
+
+```text
+NEXUS_USERNAME
+NEXUS_PASSWORD
+NEXUS_PACKAGE_COMPONENTS_URL
+NEXUS_PACKAGE_FULL_BUNDLE_URL
+```
+
+`NEXUS_USERNAME` and `NEXUS_PASSWORD` are used for both downloading components and uploading the final package.
+
+## No PyYAML required
+
+The component writes a small Python helper during the job. It uses only Python 3.6+ standard library modules and `curl`.
+
+It supports the simple readable YAML list shape shown in the examples, but not nested YAML objects.
