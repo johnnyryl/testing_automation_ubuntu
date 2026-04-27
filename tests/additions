@@ -1,0 +1,14 @@
+job_image: { description: "Container image used to run the bundle job. Must include python3, curl, tar, find, sed, grep, wc, cp, rm, mkdir, and head.", type: string, default: "$_BUNDLER_IMAGE" }
+
+
+"create_and_upload_$[[ inputs.package_id ]]":
+  stage: $[[ inputs.stage ]]
+  image: $[[ inputs.job_image ]]
+  needs: $[[ inputs.job_needs ]]
+  retry: 2
+
+
+inputs:
+  stage: bundle
+  job_image: "$_BUNDLER_IMAGE"
+  package_id: rhel8_standard
