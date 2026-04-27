@@ -1,0 +1,331 @@
+You do not need to send the other photos. I can help you add this as a spot fix to the current v3-style template.
+
+What we are adding is:
+
+bundle-items/
+├── files.yml
+├── collections-hub.yml
+├── rhel8iso.yml
+├── rhel9iso.yml
+├── bootstrap.yml
+└── third-party-rhel8-rpms.yml
+
+Then in .gitlab-ci.yml, you can call them like this:
+
+bundle_item_ids: |
+  files
+  collections-hub
+  rhel8iso
+  third-party-rhel8-rpms
+  bootstrap
+
+That means you do not have to repeat the full item definition in every profile.
+
+⸻
+
+1. Add these inputs to spec: inputs:
+
+Put these near your existing bundle_profile_path, bundle_include_ids, bundle_exclude_ids, and bundle_items inputs:
+
+bundle_item_catalog_dir: { description: "Project-relative directory containing reusable bundle item YAML files.", type: string, default: "bundle-items" }
+bundle_item_ids: { description: "Optional whitespace/comma-separated list of bundle item IDs to load from bundle_item_catalog_dir. Can be written as a multi-line block list.", type: string, default: "" }
+
+So that section becomes conceptually:
+
+bundle_profile_path: { description: "Optional project-relative path to a checked-in bundle profile YAML file. If set, bundle_items must be empty.", type: string, default: "" }
+bundle_item_catalog_dir: { description: "Project-relative directory containing reusable bundle item YAML files.", type: string, default: "bundle-items" }
+bundle_item_ids: { description: "Optional whitespace/comma-separated list of bundle item IDs to load from bundle_item_catalog_dir. Can be written as a multi-line block list.", type: string, default: "" }
+bundle_include_ids: { description: "Optional whitespace/comma-separated list of bundle item IDs to include. Empty means include all enabled items.", type: string, default: "" }
+bundle_exclude_ids: { description: "Optional whitespace/comma-separated list of bundle item IDs to exclude.", type: string, default: "" }
+bundle_items:
+  description: "YAML list of dynamic bundle items. If empty, legacy files/collections-hub/repos inputs are used."
+  type: string
+  default: ""
+
+⸻
+
+2. Add these exports in the script section
+
+Near your current exports:
+
+export AEROLIT_BUNDLE_INCLUDE_IDS="$[[ inputs.bundle_include_ids ]]"
+export AEROLIT_BUNDLE_EXCLUDE_IDS="$[[ inputs.bundle_exclude_ids ]]"
+
+add:
+
+export AEROLIT_BUNDLE_ITEM_CATALOG_DIR="$[[ inputs.bundle_item_catalog_dir ]]"
+export AEROLIT_BUNDLE_ITEM_IDS="$[[ inputs.bundle_item_ids ]]"
+
+⸻
+
+3. Replace your current profile-selection block
+
+Replace the block that currently writes AEROLIT_BUNDLE_ITEMS_FILE, checks AEROLIT_BUNDLE_PROFILE_PATH, and copies the profile file.
+
+Use this whole block instead.
+
+Paste it at the same indentation level as your current block, still inside:
+
+script:
+  - |
+AEROLIT_BUNDLE_ITEMS_FILE="${CI_PROJECT_DIR}/.aerolit_bundle_items.yml"
+AEROLIT_BUNDLE_BUILDER="${CI_PROJECT_DIR}/.aerolit_dynamic_bundle_builder.py"
+export AEROLIT_BUNDLE_ITEMS_FILE
+cat > "${AEROLIT_BUNDLE_ITEMS_FILE}" <<'AEROLIT_BUNDLE_ITEMS_EOF'
+$[[ inputs.bundle_items ]]
+AEROLIT_BUNDLE_ITEMS_EOF
+inline_bundle_items_present="false"
+if grep -Eq '^[[:space:]]*-' "${AEROLIT_BUNDLE_ITEMS_FILE}"; then
+  inline_bundle_items_present="true"
+fi
+profile_source_count=0
+if [ -n "${AEROLIT_BUNDLE_PROFILE_PATH}" ]; then
+  profile_source_count=$((profile_source_count + 1))
+fi
+if [ "${inline_bundle_items_present}" = "true" ]; then
+  profile_source_count=$((profile_source_count + 1))
+fi
+if [ -n "${AEROLIT_BUNDLE_ITEM_IDS}" ]; then
+  profile_source_count=$((profile_source_count + 1))
+fi
+if [ "${profile_source_count}" -gt 1 ]; then
+  echo "ERROR: Use only one of bundle_profile_path, inline bundle_items, or bundle_item_ids." >&2
+  exit 1
+fi
+if [ -n "${AEROLIT_BUNDLE_ITEM_IDS}" ]; then
+  : > "${AEROLIT_BUNDLE_ITEMS_FILE}"
+  case "${AEROLIT_BUNDLE_ITEM_CATALOG_DIR}" in
+    ""|/*|*..*|*\\*)
+      echo "ERROR: bundle_item_catalog_dir must be a safe project-relative path: ${AEROLIT_BUNDLE_ITEM_CATALOG_DIR}" >&2
+      exit 1
+      ;;
+  esac
+  loaded_count=0
+  for item_id in $(printf '%s\n' "${AEROLIT_BUNDLE_ITEM_IDS}" | tr ',\r\t' '   '); do
+    [ -n "${item_id}" ] || continue
+    case "${item_id}" in
+      ""|*/*|*..*|*\\*|*[!A-Za-z0-9._-]*)
+        echo "ERROR: Invalid bundle item id: ${item_id}" >&2
+        exit 1
+        ;;
+    esac
+    item_path="${CI_PROJECT_DIR}/${AEROLIT_BUNDLE_ITEM_CATALOG_DIR}/${item_id}.yml"
+    if [ ! -f "${item_path}" ]; then
+      echo "ERROR: bundle item file does not exist: ${item_path}" >&2
+      exit 1
+    fi
+    echo "# Loaded bundle item: ${item_id}" >> "${AEROLIT_BUNDLE_ITEMS_FILE}"
+    cat "${item_path}" >> "${AEROLIT_BUNDLE_ITEMS_FILE}"
+    printf '\n' >> "${AEROLIT_BUNDLE_ITEMS_FILE}"
+    loaded_count=$((loaded_count + 1))
+  done
+  if [ "${loaded_count}" -eq 0 ]; then
+    echo "ERROR: bundle_item_ids was set, but no item IDs were loaded." >&2
+    exit 1
+  fi
+  echo "Using bundle item catalog directory: ${AEROLIT_BUNDLE_ITEM_CATALOG_DIR}"
+  echo "Using bundle item IDs: ${AEROLIT_BUNDLE_ITEM_IDS}"
+elif [ -n "${AEROLIT_BUNDLE_PROFILE_PATH}" ]; then
+  case "${AEROLIT_BUNDLE_PROFILE_PATH}" in
+    ""|/*|*..*|*\\*)
+      echo "ERROR: bundle_profile_path must be a safe project-relative path and may not contain '..' or backslashes: ${AEROLIT_BUNDLE_PROFILE_PATH}" >&2
+      exit 1
+      ;;
+  esac
+  if [ ! -f "${CI_PROJECT_DIR}/${AEROLIT_BUNDLE_PROFILE_PATH}" ]; then
+    echo "ERROR: bundle_profile_path does not exist: ${CI_PROJECT_DIR}/${AEROLIT_BUNDLE_PROFILE_PATH}" >&2
+    exit 1
+  fi
+  cp "${CI_PROJECT_DIR}/${AEROLIT_BUNDLE_PROFILE_PATH}" "${AEROLIT_BUNDLE_ITEMS_FILE}"
+  echo "Using bundle profile file: ${AEROLIT_BUNDLE_PROFILE_PATH}"
+elif [ "${inline_bundle_items_present}" = "true" ]; then
+  echo "Using inline bundle_items input."
+else
+  echo "No dynamic bundle items/profile/catalog selected. Falling back to legacy inputs."
+fi
+
+That keeps all three modes:
+
+bundle_profile_path = use a full profile file
+bundle_items        = inline full item list
+bundle_item_ids     = dynamically load item files by ID
+none of the above   = old legacy behavior
+
+⸻
+
+4. Create the new bundle-items/ files
+
+At the top level of the project, create:
+
+bundle-items/
+
+bundle-items/files.yml
+
+- id: files
+  description: Base shared files directory used by AeroLIT roles
+  enabled: true
+  required: true
+  source_type: nexus
+  type: tar
+  source: files/files.tar
+  destination: files
+  mode: extract
+  destination_strategy: replace
+
+bundle-items/collections-hub.yml
+
+Use the source path that matches your Nexus layout.
+
+From your screenshot, this looks like the one you want:
+
+- id: collections-hub
+  description: AeroLIT collections hub content
+  enabled: true
+  required: true
+  source_type: nexus
+  type: tar
+  source: collections_hub/collections_hub-{version}.tar
+  destination: collections-hub
+  mode: extract
+  destination_strategy: replace
+
+bundle-items/rhel8iso.yml
+
+- id: rhel8iso
+  description: Extracted RHEL 8 ISO tree used by PXE/kickstart/bootstrap workflows
+  enabled: true
+  required: true
+  source_type: nexus
+  type: tar
+  source: extracted_isos/rhel8iso.tar
+  destination: extracted_isos/rhel8iso
+  mode: extract
+  destination_strategy: replace
+
+bundle-items/rhel9iso.yml
+
+- id: rhel9iso
+  description: Extracted RHEL 9 ISO tree used by PXE/kickstart/bootstrap workflows
+  enabled: true
+  required: true
+  source_type: nexus
+  type: tar
+  source: extracted_isos/rhel9iso.tar
+  destination: extracted_isos/rhel9iso
+  mode: extract
+  destination_strategy: replace
+
+bundle-items/rhel10iso.yml
+
+- id: rhel10iso
+  description: Extracted RHEL 10 ISO tree used by PXE/kickstart/bootstrap workflows
+  enabled: true
+  required: true
+  source_type: nexus
+  type: tar
+  source: extracted_isos/rhel10iso.tar
+  destination: extracted_isos/rhel10iso
+  mode: extract
+  destination_strategy: replace
+
+bundle-items/third-party-rhel8-rpms.yml
+
+- id: third-party-rhel8-rpms
+  description: Optional RHEL 8 repo with added RPMs/packages
+  enabled: true
+  required: false
+  source_type: nexus
+  type: tar
+  source: repos/third-party-rhel8-rpms.tar
+  destination: repos/third-party-rhel8-rpms
+  mode: extract
+  destination_strategy: replace
+
+bundle-items/bootstrap.yml
+
+Since you said you can put the raw bootstrap.sh in Nexus, use this:
+
+- id: bootstrap
+  description: Top-level bootstrap launcher script from Nexus
+  enabled: true
+  required: true
+  source_type: nexus
+  type: file
+  source: bootstrap/bootstrap.sh
+  destination: bootstrap.sh
+  mode: copy_executable
+  destination_strategy: replace
+
+⸻
+
+5. Change your .gitlab-ci.yml bundle job
+
+Instead of:
+
+bundle_profile_path: bundle-profiles/rhel8_standard.yml
+
+use:
+
+bundle_item_catalog_dir: bundle-items
+bundle_item_ids: |
+  files
+  collections-hub
+  rhel8iso
+  third-party-rhel8-rpms
+  bootstrap
+
+Example:
+
+- component: $CI_SERVER_FQDN/$CI_PROJECT_PATH/aerolit-bundler@$CI_COMMIT_SHA
+  inputs:
+    stage: bundle
+    job_image: "registry.gitlab.us.lmco.com:443/lit/containers/images/python311:latest"
+    package_id: rhel8_standard
+    bundle_profile_name: rhel8-standard
+    package_dir_name: aerolit_rhel8_standard
+    output_filename: aerolit_rhel8_standard.tar.gz
+    manifest_filename: aerolit_rhel8_standard.contents.txt
+    source_components_url: "https://nexus-ent.us.lmco.com/repository/Aero.Linux-Integration-Team/offline_package/package_components"
+    destination_url: "https://nexus-ent.us.lmco.com/repository/Aero.Linux-Integration-Team/offline_package/offline_bundles/rhel8"
+    package_version: "1.7.0"
+    require_package_version: true
+    append_version_to_output_filename: true
+    append_version_to_manifest_filename: true
+    append_version_to_package_dir_name: false
+    upload_manifest: true
+    bundle_item_catalog_dir: bundle-items
+    bundle_item_ids: |
+      files
+      collections-hub
+      rhel8iso
+      third-party-rhel8-rpms
+      bootstrap
+
+For RHEL 9:
+
+bundle_item_ids: |
+  files
+  collections-hub
+  rhel9iso
+  third-party-rhel9-rpms
+  bootstrap
+
+For a minimal package:
+
+bundle_item_ids: |
+  collections-hub
+  bootstrap
+
+⸻
+
+Important
+
+Once you use bundle_item_ids, do not also set:
+
+bundle_profile_path:
+
+in that same component include.
+
+Use one or the other. Otherwise the template should fail with:
+
+ERROR: Use only one of bundle_profile_path, inline bundle_items, or bundle_item_ids.
