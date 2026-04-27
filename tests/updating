@@ -1,3 +1,11 @@
+base_manifest_filename = env("AEROLIT_MANIFEST_FILENAME", "").strip()
+if not base_manifest_filename:
+    base_manifest_filename = "{0}.contents.txt".format(base_package_dir_name)
+
+validate_required_relative_path(base_manifest_filename, "manifest_filename")
+if "/" in base_manifest_filename:
+    fail("manifest_filename must be a filename, not a path")
+
 You do not need to send the other photos. I can help you add this as a spot fix to the current v3-style template.
 
 What we are adding is:
