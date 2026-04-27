@@ -1,0 +1,461 @@
+#!/usr/bin/env bash
+# UNCLASSIFIED
+
+set -Eeuo pipefail
+
+OUT_DIR="${OUT_DIR:-image-inventory}"
+PODMAN_RUN_ARGS="${PODMAN_RUN_ARGS:---network none --pull=never}"
+
+TOOL_LIST="${TOOL_LIST:-bash sh python3 python pip3 pip curl wget git tar gzip xz unzip zip find sed grep awk wc cp rm mkdir head jq yq node npm ansible ansible-playbook ansible-lint podman buildah skopeo glab release-cli ssh rsync make gcc java mvn helm kubectl kustomize createrepo_c reposync dnf yum microdnf}"
+
+SUMMARY_CSV="${OUT_DIR}/image-summary.csv"
+
+mkdir -p "${OUT_DIR}/markdown" "${OUT_DIR}/raw"
+
+require_host_tool() {
+  local tool="$1"
+
+  if ! command -v "${tool}" >/dev/null 2>&1; then
+    echo "Missing required host tool: ${tool}" >&2
+    exit 1
+  fi
+}
+
+for required_host_tool in podman awk sed sort cut mktemp cat; do
+  require_host_tool "${required_host_tool}"
+done
+
+sanitize_name() {
+  printf '%s' "$1" \
+    | sed 's#[/:@ ]#_#g' \
+    | sed 's#[^A-Za-z0-9._-]#_#g'
+}
+
+csv_escape() {
+  local value="${1:-}"
+
+  value="${value//$'\r'/ }"
+  value="${value//$'\n'/ }"
+  value="${value//\"/\"\"}"
+
+  printf '"%s"' "${value}"
+}
+
+csv_row() {
+  local first="true"
+  local value
+
+  for value in "$@"; do
+    if [ "${first}" = "true" ]; then
+      first="false"
+    else
+      printf ','
+    fi
+
+    csv_escape "${value}"
+  done
+
+  printf '\n'
+}
+
+write_csv_header() {
+  local header=(
+    image
+    image_id
+    created
+    scan_status
+    os
+    package_manager
+    package_count
+  )
+
+  local tool
+  for tool in ${TOOL_LIST}; do
+    header+=("has_${tool}")
+  done
+
+  csv_row "${header[@]}" > "${SUMMARY_CSV}"
+}
+
+write_probe_script() {
+  local probe_script="$1"
+
+  cat > "${probe_script}" <<'EOF'
+set -eu
+
+TOOL_LIST="${AEROLIT_TOOL_LIST:-bash sh python3 python curl git tar find sed grep awk wc cp rm mkdir head}"
+
+echo "===== OS RELEASE ====="
+if [ -f /etc/os-release ]; then
+  cat /etc/os-release
+else
+  echo "No /etc/os-release found"
+fi
+
+echo
+echo "===== PACKAGE MANAGER ====="
+if command -v rpm >/dev/null 2>&1; then
+  echo "rpm"
+elif command -v dpkg-query >/dev/null 2>&1; then
+  echo "dpkg"
+elif command -v apk >/dev/null 2>&1; then
+  echo "apk"
+else
+  echo "unknown"
+fi
+
+echo
+echo "===== TOOL VERSIONS ====="
+for tool in ${TOOL_LIST}; do
+  if command -v "${tool}" >/dev/null 2>&1; then
+    printf '%s: ' "${tool}"
+
+    case "${tool}" in
+      java)
+        "${tool}" -version 2>&1 | head -n 1 || true
+        ;;
+      *)
+        "${tool}" --version 2>&1 | head -n 1 || true
+        ;;
+    esac
+  fi
+done
+
+echo
+echo "===== COMMAND AVAILABILITY ====="
+for tool in ${TOOL_LIST}; do
+  if command -v "${tool}" >/dev/null 2>&1; then
+    echo "${tool}=yes"
+  else
+    echo "${tool}=no"
+  fi
+done
+
+echo
+echo "===== INSTALLED PACKAGES ====="
+if command -v rpm >/dev/null 2>&1; then
+  rpm -qa --qf '%{NAME}|%{VERSION}-%{RELEASE}|%{ARCH}\n' | sort
+elif command -v dpkg-query >/dev/null 2>&1; then
+  dpkg-query -W -f='${Package}|${Version}|${Architecture}\n' | sort
+elif command -v apk >/dev/null 2>&1; then
+  apk info -vv | sort
+else
+  echo "No supported package database found"
+fi
+EOF
+}
+
+run_probe() {
+  local image="$1"
+  local shell_path="$2"
+  local probe_script="$3"
+  local raw="$4"
+
+  # shellcheck disable=SC2086
+  podman run --rm ${PODMAN_RUN_ARGS} \
+    -e "AEROLIT_TOOL_LIST=${TOOL_LIST}" \
+    --entrypoint "${shell_path}" \
+    "${image}" \
+    -s < "${probe_script}" > "${raw}" 2>&1
+}
+
+scan_image() {
+  local image="$1"
+  local safe
+  safe="$(sanitize_name "${image}")"
+
+  local md="${OUT_DIR}/markdown/${safe}.md"
+  local raw="${OUT_DIR}/raw/${safe}.txt"
+
+  echo "Scanning ${image}"
+
+  local image_id
+  image_id="$(podman image inspect "${image}" --format '{{.Id}}' 2>/dev/null | cut -c1-12 || true)"
+
+  local created
+  created="$(podman image inspect "${image}" --format '{{.Created}}' 2>/dev/null || true)"
+
+  local labels
+  labels="$(podman image inspect "${image}" --format '{{json .Labels}}' 2>/dev/null || true)"
+
+  cat > "${md}" <<EOF
+# Container Image Inventory
+
+## Image
+
+\`\`\`text
+${image}
+\`\`\`
+
+| Field | Value |
+|---|---|
+| Image ID | ${image_id} |
+| Created | ${created} |
+
+## Labels
+
+\`\`\`json
+${labels}
+\`\`\`
+
+EOF
+
+  local probe_script
+  probe_script="$(mktemp)"
+
+  write_probe_script "${probe_script}"
+
+  local rc=0
+
+  if run_probe "${image}" /bin/sh "${probe_script}" "${raw}"; then
+    rc=0
+  elif run_probe "${image}" /bin/bash "${probe_script}" "${raw}"; then
+    rc=0
+  else
+    rc=1
+    {
+      echo "Failed to run inventory inside image."
+      echo
+      echo "The image may not have /bin/sh or /bin/bash, or it may not support the requested Podman run options."
+      echo
+      echo "Image: ${image}"
+      echo "PODMAN_RUN_ARGS: ${PODMAN_RUN_ARGS}"
+    } > "${raw}"
+  fi
+
+  rm -f "${probe_script}"
+
+  if [ "${rc}" -ne 0 ]; then
+    cat >> "${md}" <<EOF
+
+## Scan Error
+
+\`\`\`text
+$(cat "${raw}")
+\`\`\`
+EOF
+
+    local failed_row=(
+      "${image}"
+      "${image_id}"
+      "${created}"
+      "failed"
+      "unknown"
+      "unknown"
+      "0"
+    )
+
+    local tool
+    for tool in ${TOOL_LIST}; do
+      failed_row+=("unknown")
+    done
+
+    csv_row "${failed_row[@]}" >> "${SUMMARY_CSV}"
+    return 0
+  fi
+
+  local os
+  os="$(awk -F= '/^PRETTY_NAME=/{gsub(/"/, "", $2); print $2; exit}' "${raw}" || true)"
+  [ -n "${os}" ] || os="unknown"
+
+  local pkg_mgr
+  pkg_mgr="$(awk '/===== PACKAGE MANAGER =====/{getline; print; exit}' "${raw}" || true)"
+  [ -n "${pkg_mgr}" ] || pkg_mgr="unknown"
+
+  local pkg_count
+  pkg_count="$(awk '
+    found && NF && $0 !~ /^No supported package database found$/ {count++}
+    /===== INSTALLED PACKAGES =====/ {found=1; next}
+    END {print count+0}
+  ' "${raw}")"
+
+  has_tool() {
+    local tool="$1"
+
+    awk -F= -v t="${tool}" '
+      $1 == t {
+        print $2
+        found=1
+      }
+      END {
+        if (!found) {
+          print "no"
+        }
+      }
+    ' "${raw}" | head -n 1
+  }
+
+  local tool_versions
+  tool_versions="$(awk '
+    /===== TOOL VERSIONS =====/ {
+      flag=1
+      next
+    }
+    /===== COMMAND AVAILABILITY =====/ {
+      flag=0
+    }
+    flag
+  ' "${raw}")"
+
+  local command_availability
+  command_availability="$(awk '
+    /===== COMMAND AVAILABILITY =====/ {
+      flag=1
+      next
+    }
+    /===== INSTALLED PACKAGES =====/ {
+      flag=0
+    }
+    flag
+  ' "${raw}")"
+
+  local installed_packages
+  installed_packages="$(awk '
+    /===== INSTALLED PACKAGES =====/ {
+      flag=1
+      next
+    }
+    flag
+  ' "${raw}")"
+
+  cat >> "${md}" <<EOF
+
+## OS
+
+\`\`\`text
+${os}
+\`\`\`
+
+## Package Manager
+
+\`\`\`text
+${pkg_mgr}
+\`\`\`
+
+## Package Count
+
+\`\`\`text
+${pkg_count}
+\`\`\`
+
+## Tool Versions
+
+\`\`\`text
+${tool_versions}
+\`\`\`
+
+## Command Availability
+
+\`\`\`text
+${command_availability}
+\`\`\`
+
+## Installed Packages
+
+\`\`\`text
+${installed_packages}
+\`\`\`
+EOF
+
+  local row=(
+    "${image}"
+    "${image_id}"
+    "${created}"
+    "ok"
+    "${os}"
+    "${pkg_mgr}"
+    "${pkg_count}"
+  )
+
+  local tool
+  for tool in ${TOOL_LIST}; do
+    row+=("$(has_tool "${tool}")")
+  done
+
+  csv_row "${row[@]}" >> "${SUMMARY_CSV}"
+}
+
+write_csv_header
+
+if [ "$#" -gt 0 ]; then
+  for image in "$@"; do
+    scan_image "${image}"
+  done
+else
+  podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
+    | sort -u \
+    | while read -r image image_short_id; do
+        [ -n "${image}" ] || continue
+
+        if [ "${image}" = "<none>:<none>" ]; then
+          image="${image_short_id}"
+        fi
+
+        scan_image "${image}"
+      done
+fi
+
+cat > "${OUT_DIR}/README.md" <<EOF
+# Container Image Inventory
+
+Generated by \`scripts/inventory_podman_images.sh\`.
+
+## Summary
+
+See:
+
+\`\`\`text
+image-summary.csv
+\`\`\`
+
+## Per-image Markdown Reports
+
+See:
+
+\`\`\`text
+markdown/
+\`\`\`
+
+## Raw Scan Logs
+
+See:
+
+\`\`\`text
+raw/
+\`\`\`
+
+## Notes
+
+The summary CSV includes one column per tool in \`TOOL_LIST\`.
+
+To scan a single image:
+
+\`\`\`bash
+./scripts/inventory_podman_images.sh registry.example.com/group/image:tag
+\`\`\`
+
+To scan all local Podman images:
+
+\`\`\`bash
+./scripts/inventory_podman_images.sh
+\`\`\`
+
+To customize the tool list:
+
+\`\`\`bash
+TOOL_LIST="python3 curl tar git ansible-playbook" ./scripts/inventory_podman_images.sh
+\`\`\`
+
+To customize Podman run options:
+
+\`\`\`bash
+PODMAN_RUN_ARGS="--pull=never" ./scripts/inventory_podman_images.sh
+\`\`\`
+EOF
+
+echo
+echo "Inventory complete:"
+echo "  ${SUMMARY_CSV}"
+echo "  ${OUT_DIR}/README.md"
+echo "  ${OUT_DIR}/markdown/"
+echo "  ${OUT_DIR}/raw/"
