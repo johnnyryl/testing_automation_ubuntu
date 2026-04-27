@@ -12,3 +12,66 @@ inputs:
   stage: bundle
   job_image: "$_BUNDLER_IMAGE"
   package_id: rhel8_standard
+
+
+def archive_path_stays_inside_root(path):
+    normalized = PurePosixPath(path)
+
+    if normalized.is_absolute():
+        return False
+
+    normalized_text = str(normalized)
+
+    if normalized_text in ("", "."):
+        return False
+
+    if normalized_text == ".." or normalized_text.startswith("../"):
+        return False
+
+    return True
+
+
+def normalize_archive_path(path):
+    return str(PurePosixPath(path))
+
+
+def validate_tar_link_target(member, archive):
+    name = member.name
+    linkname = member.linkname
+
+    if not linkname:
+        fail("Unsafe empty tar link target detected in {0}: {1!r}".format(archive, name))
+
+    if "\x00" in linkname or "\\" in linkname:
+        fail("Unsafe tar link target detected in {0}: {1!r} -> {2!r}".format(archive, name, linkname))
+
+    if PurePosixPath(linkname).is_absolute():
+        fail("Unsafe absolute tar link target detected in {0}: {1!r} -> {2!r}".format(archive, name, linkname))
+
+    if member.issym():
+        # Symlink targets are relative to the directory containing the symlink.
+        candidate = PurePosixPath(name).parent / PurePosixPath(linkname)
+    else:
+        # Hardlink targets are archive-relative.
+        candidate = PurePosixPath(linkname)
+
+    normalized_candidate = PurePosixPath(os.path.normpath(str(candidate)))
+
+    if not archive_path_stays_inside_root(normalized_candidate):
+        fail(
+            "Unsafe tar link target escapes archive root in {0}: {1!r} -> {2!r}".format(
+                archive,
+                name,
+                linkname,
+            )
+        )
+
+
+def validate_tar_member(member, archive):
+    name = member.name
+
+    if not is_safe_relative_path(name):
+        fail("Unsafe tar entry detected in {0}: {1!r}".format(archive, name))
+
+    if member.issym() or member.islnk():
+        validate_tar_link_target(member, archive)
