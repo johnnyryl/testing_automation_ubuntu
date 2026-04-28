@@ -1,0 +1,25 @@
+set -Eeuo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "${SOURCE}" ]]; do
+  SCRIPT_DIR="$(cd -P "$(dirname "${SOURCE}")" && pwd)"
+  SOURCE="$(readlink "${SOURCE}")"
+  [[ "${SOURCE}" != /* ]] && SOURCE="${SCRIPT_DIR}/${SOURCE}"
+done
+
+SCRIPT_DIR="$(cd -P "$(dirname "${SOURCE}")" && pwd)"
+CONTROLLER_SCRIPT="${SCRIPT_DIR}/collections-hub/scripts/bootstrap_controller.sh"
+
+if [[ ! -f "${CONTROLLER_SCRIPT}" ]]; then
+  echo "ERROR: bootstrap controller script not found: ${CONTROLLER_SCRIPT}" >&2
+  echo "Expected layout:" >&2
+  echo "  <bundle-root>/bootstrap.sh" >&2
+  echo "  <bundle-root>/collections-hub/scripts/bootstrap_controller.sh" >&2
+  exit 1
+fi
+
+if [[ ! -x "${CONTROLLER_SCRIPT}" ]]; then
+  chmod +x "${CONTROLLER_SCRIPT}" 2>/dev/null || true
+fi
+
+exec "${CONTROLLER_SCRIPT}" "$@"
