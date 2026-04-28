@@ -1,3 +1,103 @@
+AEROLIT_BUNDLE_ITEMS_FILE="${CI_PROJECT_DIR}/.aerolit_bundle_items.yml"
+AEROLIT_BUNDLE_BUILDER="${CI_PROJECT_DIR}/.aerolit_dynamic_bundle_builder.py"
+export AEROLIT_BUNDLE_ITEMS_FILE
+
+cat > "${AEROLIT_BUNDLE_ITEMS_FILE}" <<'AEROLIT_BUNDLE_ITEMS_EOF'
+$[[ inputs.bundle_items ]]
+AEROLIT_BUNDLE_ITEMS_EOF
+
+inline_bundle_items_present="false"
+if grep -Eq '^[[:space:]]*-' "${AEROLIT_BUNDLE_ITEMS_FILE}"; then
+  inline_bundle_items_present="true"
+fi
+
+profile_source_count=0
+
+if [ -n "${AEROLIT_BUNDLE_PROFILE_PATH}" ]; then
+  profile_source_count=$((profile_source_count + 1))
+fi
+
+if [ "${inline_bundle_items_present}" = "true" ]; then
+  profile_source_count=$((profile_source_count + 1))
+fi
+
+if [ -n "${AEROLIT_BUNDLE_ITEM_IDS}" ]; then
+  profile_source_count=$((profile_source_count + 1))
+fi
+
+if [ "${profile_source_count}" -gt 1 ]; then
+  echo "ERROR: Use only one of bundle_profile_path, inline bundle_items, or bundle_item_ids." >&2
+  exit 1
+fi
+
+if [ -n "${AEROLIT_BUNDLE_ITEM_IDS}" ]; then
+  : > "${AEROLIT_BUNDLE_ITEMS_FILE}"
+
+  case "${AEROLIT_BUNDLE_ITEM_CATALOG_DIR}" in
+    ""|/*|*..*|*\\*)
+      echo "ERROR: bundle_item_catalog_dir must be a safe project-relative path: ${AEROLIT_BUNDLE_ITEM_CATALOG_DIR}" >&2
+      exit 1
+      ;;
+  esac
+
+  loaded_count=0
+
+  for item_id in $(printf '%s\n' "${AEROLIT_BUNDLE_ITEM_IDS}" | tr ',[:space:]' '\n'); do
+    [ -n "${item_id}" ] || continue
+
+    case "${item_id}" in
+      ""|*/*|*..*|*\\*|*[!A-Za-z0-9._-]*)
+        echo "ERROR: Invalid bundle item id: ${item_id}" >&2
+        exit 1
+        ;;
+    esac
+
+    item_path="${CI_PROJECT_DIR}/${AEROLIT_BUNDLE_ITEM_CATALOG_DIR}/${item_id}.yml"
+
+    if [ ! -f "${item_path}" ]; then
+      echo "ERROR: bundle item file does not exist: ${item_path}" >&2
+      exit 1
+    fi
+
+    echo "# Loaded bundle item: ${item_id}" >> "${AEROLIT_BUNDLE_ITEMS_FILE}"
+    cat "${item_path}" >> "${AEROLIT_BUNDLE_ITEMS_FILE}"
+    printf '\n' >> "${AEROLIT_BUNDLE_ITEMS_FILE}"
+
+    loaded_count=$((loaded_count + 1))
+  done
+
+  if [ "${loaded_count}" -eq 0 ]; then
+    echo "ERROR: bundle_item_ids was set, but no item IDs were loaded." >&2
+    exit 1
+  fi
+
+  echo "Using bundle item catalog directory: ${AEROLIT_BUNDLE_ITEM_CATALOG_DIR}"
+  echo "Using bundle item IDs: ${AEROLIT_BUNDLE_ITEM_IDS}"
+
+elif [ -n "${AEROLIT_BUNDLE_PROFILE_PATH}" ]; then
+  case "${AEROLIT_BUNDLE_PROFILE_PATH}" in
+    ""|/*|*..*|*\\*)
+      echo "ERROR: bundle_profile_path must be a safe project-relative path and may not contain '..' or backslashes: ${AEROLIT_BUNDLE_PROFILE_PATH}" >&2
+      exit 1
+      ;;
+  esac
+
+  if [ ! -f "${CI_PROJECT_DIR}/${AEROLIT_BUNDLE_PROFILE_PATH}" ]; then
+    echo "ERROR: bundle_profile_path does not exist: ${CI_PROJECT_DIR}/${AEROLIT_BUNDLE_PROFILE_PATH}" >&2
+    exit 1
+  fi
+
+  cp "${CI_PROJECT_DIR}/${AEROLIT_BUNDLE_PROFILE_PATH}" "${AEROLIT_BUNDLE_ITEMS_FILE}"
+  echo "Using bundle profile file: ${AEROLIT_BUNDLE_PROFILE_PATH}"
+
+elif [ "${inline_bundle_items_present}" = "true" ]; then
+  echo "Using inline bundle_items input."
+
+else
+  echo "No dynamic bundle items/profile/catalog selected. Falling back to legacy inputs."
+fi
+
+
 base_manifest_filename = env("AEROLIT_MANIFEST_FILENAME", "").strip()
 if not base_manifest_filename:
     base_manifest_filename = "{0}.contents.txt".format(base_package_dir_name)
