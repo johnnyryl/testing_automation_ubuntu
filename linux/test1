@@ -1,0 +1,21 @@
+- name: Render processed fragment files
+  ansible.builtin.copy:
+    dest: >-
+      {{ repo_environment_init_gitlab_ci_tmpdir.path }}/
+      {{ '%02d' | format(repo_environment_init_fragment_index + 1) }}-{{ item.item.name }}.yml
+    mode: "0644"
+    content: |
+      {%- set lines = (item.content | b64decode).splitlines() -%}
+      {%- if item.item.trim == 'drop_last' -%}
+      {{ (lines[:-1] | join('\n')) ~ '\n' }}
+      {%- elif item.item.trim == 'drop_first_last' -%}
+      {{ (lines[1:-1] | join('\n')) ~ '\n' }}
+      {%- elif item.item.trim == 'drop_first' -%}
+      {{ (lines[1:] | join('\n')) ~ '\n' }}
+      {%- else -%}
+      {{ (lines | join('\n')) ~ '\n' }}
+      {%- endif -%}
+  loop: "{{ repo_environment_init_fragment_slurps.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+    index_var: repo_environment_init_fragment_index
