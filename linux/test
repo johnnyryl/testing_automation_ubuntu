@@ -1,22 +1,311 @@
-    - name: Render processed fragment files
-      copy:
-        dest: >-
-          {{ repo_environment_init_gitlab_ci_tmpdir.path }}/
-          {{ '%02d' | format(item + 1) }}-{{ repo_environment_init_fragment_result.item.name }}.yml
-        mode: "0644"
-        content: |
-          {%- set lines = (repo_environment_init_fragment_result.content | b64decode).splitlines() -%}
-          {%- if repo_environment_init_fragment_result.item.trim == 'drop_last' -%}
-          {{ (lines[:-1] | join('\n')) ~ '\n' }}
-          {%- elif repo_environment_init_fragment_result.item.trim == 'drop_first_last' -%}
-          {{ (lines[1:-1] | join('\n')) ~ '\n' }}
-          {%- elif repo_environment_init_fragment_result.item.trim == 'drop_first' -%}
-          {{ (lines[1:] | join('\n')) ~ '\n' }}
-          {%- else -%}
-          {{ (lines | join('\n')) ~ '\n' }}
-          {%- endif -%}
-      loop: "{{ range(0, repo_environment_init_fragment_slurps.results | length) | list }}"
-      loop_control:
-        label: "{{ repo_environment_init_fragment_result.item.name }}"
-      vars:
-        repo_environment_init_fragment_result: "{{ repo_environment_init_fragment_slurps.results[item] }}"
+You were right to ask. The plan was mostly correct, but it was not complete enough yet. I would make two important refinements before you implement it:
+
+1. The previous fix protected ansible/inventory, ansible/group_vars, and ansible/ansible.cfg, but it did not fully protect .gitlab-ci.yml, because .gitlab-ci.yml is managed in a separate task file.
+2. Your role already hit an ansible_loop is undefined issue, so I would also fix the GitLab CI fragment loop at the same time by using index_var instead of ansible_loop.index0.
+
+So the better answer is: yes, the idea is right, but use this corrected version.
+
+⸻
+
+Final behavior you want
+
+Default rerun:
+
+Create missing initialized files.
+Do not overwrite preserved files already listed in .sync-preserve.
+
+Force overwrite:
+
+./bootstrap.sh --overwrite-initialized-files
+
+That should allow the role to back up and replace initialized files.
+
+⸻
+
+1. Add these defaults
+
+Add to defaults/main.yml:
+
+###############################################################################
+# Preserve / overwrite behavior
+###############################################################################
+# Default safe behavior:
+# Existing managed files listed in .sync-preserve are not replaced.
+repo_environment_init_respect_preserve_file: true
+# Set true only when intentionally refreshing/resetting initialized files.
+repo_environment_init_overwrite_existing: false
+# Populated at runtime by tasks/load_preserve_rules.yml.
+repo_environment_init_active_preserve_entries: []
+
+Keep your existing preserve entries:
+
+repo_environment_init_preserve_core_entries:
+  - ".gitlab-ci.yml"
+  - "ansible/ansible.cfg"
+  - "ansible/inventory/"
+  - "ansible/group_vars/"
+
+⸻
+
+2. Update tasks/main.yml
+
+Use this order:
+
+# UNCLASSIFIED
+- name: Validate repo_environment_init role inputs
+  import_tasks: validate.yml
+- name: Prepare derived values
+  import_tasks: prepare.yml
+- name: Manage .sync-preserve
+  import_tasks: manage_preserve.yml
+  when: repo_environment_init_manage_preserve_file | bool
+- name: Load preserve rules
+  import_tasks: load_preserve_rules.yml
+  when: repo_environment_init_respect_preserve_file | bool
+- name: Manage ansible files from templates
+  import_tasks: manage_ansible_files.yml
+  when: repo_environment_init_manage_ansible_files | bool
+- name: Check root .gitlab-ci.yml for preserve handling
+  ansible.builtin.stat:
+    path: "{{ repo_environment_init_gitlab_ci_file }}"
+  register: repo_environment_init_gitlab_ci_preserve_stat
+  when:
+    - repo_environment_init_manage_gitlab_ci | bool
+    - repo_environment_init_respect_preserve_file | bool
+- name: Skip preserved root .gitlab-ci.yml
+  ansible.builtin.debug:
+    msg: "Preserving existing root .gitlab-ci.yml because it is listed in .sync-preserve"
+  when:
+    - repo_environment_init_manage_gitlab_ci | bool
+    - repo_environment_init_respect_preserve_file | bool
+    - not repo_environment_init_overwrite_existing | bool
+    - repo_environment_init_gitlab_ci_preserve_stat.stat.exists | default(false)
+    - "'.gitlab-ci.yml' in (repo_environment_init_active_preserve_entries | default([]))"
+- name: Manage root .gitlab-ci.yml
+  import_tasks: manage_gitlab_ci.yml
+  when:
+    - repo_environment_init_manage_gitlab_ci | bool
+    - >
+      repo_environment_init_overwrite_existing | bool
+      or not repo_environment_init_respect_preserve_file | bool
+      or not (repo_environment_init_gitlab_ci_preserve_stat.stat.exists | default(false))
+      or '.gitlab-ci.yml' not in (repo_environment_init_active_preserve_entries | default([]))
+# UNCLASSIFIED
+
+This is the missing piece from the earlier answer: .gitlab-ci.yml needs its own preserve check.
+
+⸻
+
+3. Add tasks/load_preserve_rules.yml
+
+Create this new file:
+
+# UNCLASSIFIED
+- name: Check .sync-preserve file
+  ansible.builtin.stat:
+    path: "{{ repo_environment_init_preserve_file }}"
+  register: repo_environment_init_preserve_file_stat
+- name: Read .sync-preserve file
+  ansible.builtin.slurp:
+    src: "{{ repo_environment_init_preserve_file }}"
+  register: repo_environment_init_preserve_file_slurp
+  when: repo_environment_init_preserve_file_stat.stat.exists
+- name: Set raw preserve entries
+  ansible.builtin.set_fact:
+    repo_environment_init_raw_preserve_entries: >-
+      {{
+        (
+          repo_environment_init_preserve_file_slurp.content
+          | default('')
+          | b64decode
+          | splitlines()
+        )
+        if repo_environment_init_preserve_file_stat.stat.exists
+        else repo_environment_init_preserve_core_entries
+      }}
+- name: Normalize active preserve entries
+  ansible.builtin.set_fact:
+    repo_environment_init_active_preserve_entries: >-
+      {{
+        repo_environment_init_raw_preserve_entries
+        | map('trim')
+        | reject('equalto', '')
+        | reject('match', '^#')
+        | map('regex_replace', '^\\./', '')
+        | map('regex_replace', '/+$', '')
+        | unique
+        | list
+      }}
+# UNCLASSIFIED
+
+This normalizes entries so these both match correctly:
+
+ansible/inventory
+ansible/inventory/
+
+⸻
+
+4. Update tasks/copy_managed_path.yml
+
+The important logic is: skip existing preserved paths unless overwrite is explicitly true.
+
+Use this pattern in copy_managed_path.yml:
+
+# UNCLASSIFIED
+- name: "Normalize managed path key {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.set_fact:
+    repo_environment_init_path_item_dest_rel_normalized: >-
+      {{
+        repo_environment_init_path_item.dest_rel
+        | regex_replace('^\\./', '')
+        | regex_replace('/+$', '')
+      }}
+- name: "Set preserve match state for {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.set_fact:
+    repo_environment_init_path_is_preserved: >-
+      {{
+        repo_environment_init_respect_preserve_file | bool
+        and not repo_environment_init_overwrite_existing | bool
+        and repo_environment_init_path_item_dest_rel_normalized in
+          (repo_environment_init_active_preserve_entries | default([]))
+      }}
+- name: "Check destination {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.stat:
+    path: "{{ repo_environment_init_path_item.dest }}"
+  register: repo_environment_init_dest_stat
+- name: "Skip preserved existing path {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.debug:
+    msg: "Preserving existing managed path because it is listed in .sync-preserve: {{ repo_environment_init_path_item.dest_rel }}"
+  when:
+    - repo_environment_init_path_is_preserved | bool
+    - repo_environment_init_dest_stat.stat.exists
+- name: "Back up existing managed path {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.include_tasks: backup_item.yml
+  vars:
+    repo_environment_init_backup_src: "{{ repo_environment_init_path_item.dest }}"
+    repo_environment_init_backup_rel: "{{ repo_environment_init_path_item.dest_rel }}"
+  when:
+    - repo_environment_init_backup | bool
+    - repo_environment_init_dest_stat.stat.exists
+    - not (repo_environment_init_path_is_preserved | bool and repo_environment_init_dest_stat.stat.exists)
+- name: "Ensure parent directory exists for {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.file:
+    path: "{{ repo_environment_init_path_item.dest | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - not (repo_environment_init_path_is_preserved | bool and repo_environment_init_dest_stat.stat.exists)
+- name: "Copy managed directory {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.copy:
+    src: "{{ repo_environment_init_path_item.src }}/"
+    dest: "{{ repo_environment_init_path_item.dest }}/"
+    owner: root
+    group: root
+    mode: preserve
+  when:
+    - repo_environment_init_path_item.expected_type == "directory"
+    - not (repo_environment_init_path_is_preserved | bool and repo_environment_init_dest_stat.stat.exists)
+- name: "Copy managed file {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.copy:
+    src: "{{ repo_environment_init_path_item.src }}"
+    dest: "{{ repo_environment_init_path_item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - repo_environment_init_path_item.expected_type == "file"
+    - not (repo_environment_init_path_is_preserved | bool and repo_environment_init_dest_stat.stat.exists)
+# UNCLASSIFIED
+
+⸻
+
+5. Fix manage_gitlab_ci.yml loop issue too
+
+Where you currently have this:
+
+dest: >-
+  {{ repo_environment_init_gitlab_ci_tmpdir.path }}/
+  {{ '%02d' | format(ansible_loop.index0 + 1) }}-{{ item.item.name }}.yml
+
+and:
+
+loop_control:
+  label: "{{ item.item.name }}"
+  extended: true
+
+Change it to this:
+
+dest: >-
+  {{ repo_environment_init_gitlab_ci_tmpdir.path }}/
+  {{ '%02d' | format(repo_environment_init_fragment_index + 1) }}-{{ item.item.name }}.yml
+
+and:
+
+loop_control:
+  label: "{{ item.item.name }}"
+  index_var: repo_environment_init_fragment_index
+
+That is safer than relying on ansible_loop.index0.
+
+⸻
+
+6. Update bootstrap_controller.sh
+
+Add this default near the top:
+
+OVERWRITE_INITIALIZED_FILES=false
+
+Add this argument parser block:
+
+--overwrite-initialized-files)
+  OVERWRITE_INITIALIZED_FILES=true
+  shift
+  ;;
+
+Add this to usage():
+
+Bootstrap repo environment options:
+  --overwrite-initialized-files
+      Allow bootstrap_repo_environment.yml to overwrite existing initialized
+      files that are normally protected by .sync-preserve.
+      Default behavior preserves existing files such as:
+        .gitlab-ci.yml
+        ansible/ansible.cfg
+        ansible/inventory/
+        ansible/group_vars/
+
+Then update write_bootstrap_vars_file():
+
+write_bootstrap_vars_file() {
+  local file
+  file="$(make_temp_file)"
+  {
+    echo "repo_environment_init_repo_root: $(yaml_quote "${COLLECTIONS_HUB_ROOT}")"
+    echo "repo_environment_init_respect_preserve_file: true"
+    echo "repo_environment_init_overwrite_existing: ${OVERWRITE_INITIALIZED_FILES}"
+  } > "${file}"
+  echo "${file}"
+}
+
+⸻
+
+What I would test after this
+
+bash -n bootstrap.sh
+bash -n collections-hub/scripts/bootstrap_controller.sh
+
+Then:
+
+./bootstrap.sh --bootstrap-only
+
+Then rerun it again. The second run should preserve existing initialized files.
+
+Then test overwrite:
+
+./bootstrap.sh --bootstrap-only --overwrite-initialized-files
+
+That run should back up and replace the initialized files.
+
+The key correction is this: the previous answer protected the managed Ansible paths, but .gitlab-ci.yml needed its own preserve logic.
