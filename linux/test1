@@ -19,3 +19,5 @@
   loop_control:
     label: "{{ item.item.name }}"
     index_var: repo_environment_init_fragment_index
+
+dest: "{{ repo_environment_init_gitlab_ci_tmpdir.path }}/{{ '%02d' | format(repo_environment_init_fragment_index + 1) }}-{{ item.item.name }}.yml"
