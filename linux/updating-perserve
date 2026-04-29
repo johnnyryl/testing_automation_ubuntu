@@ -1,3 +1,19 @@
+
+- name: "DEBUG preserve decision for {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.debug:
+    msg:
+      dest_rel: "{{ repo_environment_init_path_item.dest_rel }}"
+      normalized: "{{ repo_environment_init_path_item_dest_rel_normalized }}"
+      active_preserve_entries: "{{ repo_environment_init_active_preserve_entries | default([]) }}"
+      respect_preserve_file: "{{ repo_environment_init_respect_preserve_file }}"
+      overwrite_existing: "{{ repo_environment_init_overwrite_existing }}"
+      path_is_preserved: "{{ repo_environment_init_path_is_preserved }}"
+      dest_exists: "{{ repo_environment_init_dest_stat.stat.exists | default(false) }}"
+      skip_existing_preserved_path: "{{ repo_environment_init_skip_existing_preserved_path }}"
+
+
+
+
 Yes — these screenshots are enough. I would not make a bunch of new random changes. The proper final fix is mainly to clean up the preserve decision so the role has one clear variable that means:
 
 “This path exists and is protected, so do not back it up and do not copy over it.”
