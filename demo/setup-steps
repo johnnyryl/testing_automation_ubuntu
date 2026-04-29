@@ -1,0 +1,181 @@
+Yes — there are two real bootstrap script bugs showing before the workflow summary, and the rest of the green Ansible output that says failed: false is not a failure.
+
+failed: false means the task result object is saying “this task did not fail.” Same with changed: false. Those are good.
+
+The real issues are these:
+
+ERROR: --provision-extra-repo must be OS:ID=PATH_OR_URL
+grep: : No such file or directory
+WARNING: No provisioning repos were detected for group_vars.
+
+That is happening because the script is building the controller vars even during --bootstrap-only, and because the empty PROVISION_EXTRA_REPOS array is being looped over like it has one blank item.
+
+Fix 1 — only build PXE/controller vars when those playbooks run
+
+Replace this part near the bottom:
+
+BOOTSTRAP_VARS_FILE="$(write_bootstrap_vars_file)"
+PXE_VARS_FILE="$(write_pxe_vars_file)"
+CONTROLLER_VARS_FILE="$(write_controller_vars_file)"
+
+with this:
+
+BOOTSTRAP_VARS_FILE="$(write_bootstrap_vars_file)"
+PXE_VARS_FILE="$(make_temp_file)"
+CONTROLLER_VARS_FILE="$(make_temp_file)"
+if [[ "${RUN_PXE}" == true ]]; then
+  PXE_VARS_FILE="$(write_pxe_vars_file)"
+fi
+if [[ "${RUN_CONTROLLER}" == true ]]; then
+  CONTROLLER_VARS_FILE="$(write_controller_vars_file)"
+fi
+
+That prevents --bootstrap-only from touching provisioning repo/group-vars logic at all.
+
+Fix 2 — fix the empty PROVISION_EXTRA_REPOS loop
+
+Replace the first part of this function:
+
+add_extra_provision_repos_to_file() {
+  local file="$1"
+  local entry=""
+  local left=""
+
+with this:
+
+add_extra_provision_repos_to_file() {
+  local file="$1"
+  local entry=""
+  local left=""
+  local source=""
+  local os_key=""
+  local repo_short=""
+  local repo_id=""
+  local repo_name=""
+  local baseurl=""
+  if [[ ${#PROVISION_EXTRA_REPOS[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+Then make sure the loop is this:
+
+for entry in "${PROVISION_EXTRA_REPOS[@]}"; do
+
+not this:
+
+for entry in "${PROVISION_EXTRA_REPOS[@]:-}"; do
+
+That [@]:- pattern is what made Bash treat the empty array like one blank item.
+
+Fix 3 — guard the repo vars file before grep
+
+Inside write_controller_vars_file(), replace this block:
+
+repo_vars_file="$(detect_bundle_provision_repos)"
+if grep -q '^  rhel[0-9]' "${repo_vars_file}"; then
+  echo "group_vars_defaults_manage_extra_blocks: true" >> "${file}"
+
+with this:
+
+if ! repo_vars_file="$(detect_bundle_provision_repos)"; then
+  fail "Failed to build provisioning repo variable file."
+fi
+if [[ ! -f "${repo_vars_file}" ]]; then
+  fail "Provisioning repo variable file was not created correctly."
+fi
+if grep -q '^  rhel[0-9]' "${repo_vars_file}"; then
+  echo "group_vars_defaults_manage_extra_blocks: true" >> "${file}"
+
+That gets rid of the grep: : No such file or directory problem.
+
+Optional but worth adding — force bundle repos for Ansible install
+
+Your test installed ansible-core from existing repos first. That worked, but it pulled from repos like foreman-plugins and local-rh8app, which might not be what you want in a clean offline bundle test.
+
+I would add this default:
+
+PREFER_BUNDLE_REPOS=false
+
+Add this argument:
+
+--prefer-bundle-repos)
+  PREFER_BUNDLE_REPOS=true
+  shift
+  ;;
+
+Then in install_ansible_if_needed(), right after:
+
+info "ansible-playbook is not currently installed."
+info "Trying existing configured repositories first."
+
+add:
+
+if [[ "${PREFER_BUNDLE_REPOS}" == true ]]; then
+  info "Using bundle BaseOS/AppStream repos first because --prefer-bundle-repos was used."
+  resolve_repo_sources "${OS_MAJOR}" || fail "Unable to locate valid BaseOS/AppStream sources automatically. Use --repo-source or --baseos-source/--appstream-source."
+  baseos_baseurl="$(to_baseurl "${BASEOS_SOURCE}")"
+  appstream_baseurl="$(to_baseurl "${APPSTREAM_SOURCE}")"
+  configure_bootstrap_repo_file "${baseos_baseurl}" "${appstream_baseurl}"
+  if [[ "${DRY_RUN}" == true ]]; then
+    info "DRY RUN: would install ansible-core from bundle bootstrap repos."
+    return 0
+  fi
+  as_root dnf --disablerepo='*' \
+    --enablerepo='aerolit-bootstrap-baseos' \
+    --enablerepo='aerolit-bootstrap-appstream' \
+    install -y ansible-core
+  command -v ansible-playbook >/dev/null 2>&1 || fail "ansible-playbook is still not available after ansible-core installation"
+  return 0
+fi
+
+Then you can test the bundle-controlled path with:
+
+./bootstrap.sh \
+  --bootstrap-only \
+  --prefer-bundle-repos
+
+About the Ansible role syntax failure
+
+This one is separate from the bootstrap script. The error was from the role task name:
+
+- name: 01. Check destination {{ repo_environment_init_path_item.dest_rel }}
+
+You already fixed it, but make sure any task name with Jinja is quoted:
+
+- name: "01. Check destination {{ repo_environment_init_path_item.dest_rel }}"
+
+Check these files for the same issue:
+
+roles/repo_environment_init/tasks/copy_managed_path.yml
+roles/repo_environment_init/tasks/backup_item.yml
+
+Any task name with {{ ... }} should be wrapped in quotes.
+
+What I would test next
+
+Run these in order:
+
+bash -n bootstrap.sh
+bash -n collections-hub/scripts/bootstrap_controller.sh
+
+Then:
+
+./bootstrap.sh --help
+
+Then:
+
+./bootstrap.sh --bootstrap-only --prefer-bundle-repos
+
+Then dry-run the real flow:
+
+./bootstrap.sh \
+  --dry-run \
+  --pxe-server-ip 192.168.98.142 \
+  --pxe-interface ens160 \
+  --pxe-dhcp-start 192.168.109.100 \
+  --pxe-dhcp-end 192.168.109.200 \
+  --pxe-dhcp-netmask 255.255.255.0 \
+  --nfs-server-ip 192.168.98.142 \
+  --nfs-allow-clients 192.168.98.0/24
+
+The green failed: false lines are fine. The things to hunt for are actual red ERROR, fatal, or failed: true.
