@@ -1,6 +1,7 @@
 
 
 
+
 # UNCLASSIFIED
 
 - name: Check .sync-preserve file
@@ -10,9 +11,12 @@
 
 - name: Read .sync-preserve file
   ansible.builtin.command:
-    cmd: "cat {{ repo_environment_init_preserve_file }}"
+    argv:
+      - cat
+      - "{{ repo_environment_init_preserve_file }}"
   register: repo_environment_init_preserve_file_read
   changed_when: false
+  check_mode: false
   when: repo_environment_init_preserve_file_stat.stat.exists
 
 - name: Set raw preserve entries from .sync-preserve or defaults
