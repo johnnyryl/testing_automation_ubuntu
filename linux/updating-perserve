@@ -11,6 +11,56 @@
 
 
 
+
+
+# UNCLASSIFIED
+
+- name: Dry-run note for pxe-content service
+  ansible.builtin.debug:
+    msg: >-
+      DRY RUN: would enable and start {{ pxe_content_service_name }}.service,
+      then validate {{ pxe_content_validate_scheme }}://{{ pxe_content_validate_host }}:{{ pxe_content_host_port }}{{ pxe_content_validate_path }}.
+  when: ansible_check_mode
+
+- name: Enable and start pxe-content service
+  ansible.builtin.systemd:
+    name: "{{ pxe_content_service_name }}.service"
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+
+- name: Flush handlers before validation
+  ansible.builtin.meta: flush_handlers
+  when: not ansible_check_mode
+
+- name: Wait for pxe-content port to become reachable
+  ansible.builtin.wait_for:
+    host: "{{ pxe_content_validate_host }}"
+    port: "{{ pxe_content_host_port }}"
+    timeout: "{{ pxe_content_validate_timeout }}"
+  when:
+    - pxe_content_validate_deployment | bool
+    - not ansible_check_mode
+
+- name: Validate pxe-content is serving expected content
+  ansible.builtin.uri:
+    url: "{{ pxe_content_validate_scheme }}://{{ pxe_content_validate_host }}:{{ pxe_content_host_port }}{{ pxe_content_validate_path }}"
+    method: GET
+    status_code: "{{ pxe_content_validate_status_code }}"
+    return_content: false
+  when:
+    - pxe_content_validate_deployment | bool
+    - not ansible_check_mode
+
+# UNCLASSIFIED
+
+
+
+
+
+
+
+
 - name: Assert runtime image exists locally after tar load
   ansible.builtin.command:
     cmd: "podman image exists {{ pxe_content_runtime_image }}"
