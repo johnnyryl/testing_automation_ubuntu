@@ -1,0 +1,137 @@
+You’re not crazy — the reason you cannot find:
+
+add_extra_provision_repos_to_file()
+
+is because your newer script does not have that function anymore.
+
+In your current script, the equivalent function is:
+
+add_extra_provision_repos()
+
+So apply the fix there instead.
+
+Fix 1 — replace add_extra_provision_repos()
+
+Find this function:
+
+add_extra_provision_repos() {
+
+Replace the entire function with this:
+
+add_extra_provision_repos() {
+  local entry=""
+  local left=""
+  local source=""
+  local os_key=""
+  local repo_short=""
+  local repo_id=""
+  local repo_name=""
+  local baseurl=""
+  if [[ ${#PROVISION_EXTRA_REPOS[@]} -eq 0 ]]; then
+    return 0
+  fi
+  for entry in "${PROVISION_EXTRA_REPOS[@]}"; do
+    [[ "${entry}" == *=* ]] || fail "--provision-extra-repo must be OS:ID=PATH_OR_URL: ${entry}"
+    left="${entry%%=*}"
+    source="${entry#*=}"
+    [[ "${left}" == *:* ]] || fail "--provision-extra-repo must be OS:ID=PATH_OR_URL: ${entry}"
+    os_key="${left%%:*}"
+    repo_short="${left#*:}"
+    os_key="${os_key,,}"
+    [[ "${os_key}" =~ ^rhel(7|8|9|10)$ ]] || fail "--provision-extra-repo OS must be rhel7, rhel8, rhel9, or rhel10: ${entry}"
+    [[ "${repo_short}" =~ ^[A-Za-z0-9._-]+$ ]] || fail "--provision-extra-repo ID must be simple text: ${entry}"
+    baseurl="$(repo_source_to_client_baseurl "${source}")"
+    repo_id="aerolit-${os_key}-$(repo_id_sanitize "${repo_short}")"
+    repo_name="AeroLIT ${os_key} ${repo_short}"
+    append_provision_repo "${os_key}" "${repo_id}" "${repo_name}" "${baseurl}"
+  done
+}
+
+The important fix is this part:
+
+if [[ ${#PROVISION_EXTRA_REPOS[@]} -eq 0 ]]; then
+  return 0
+fi
+
+and this:
+
+for entry in "${PROVISION_EXTRA_REPOS[@]}"; do
+
+Your current script has:
+
+for entry in "${PROVISION_EXTRA_REPOS[@]:-}"; do
+
+That is the bad part causing the blank --provision-extra-repo error.
+
+⸻
+
+Fix 2 — guard the repo vars file before grep
+
+Inside write_controller_vars_file(), find this block:
+
+repo_vars_file="$(detect_bundle_provision_repos)"
+if grep -q '^  rhel[0-9]' "${repo_vars_file}"; then
+
+Replace it with this:
+
+if ! repo_vars_file="$(detect_bundle_provision_repos)"; then
+  fail "Failed to build provisioning repo variable file."
+fi
+if [[ ! -f "${repo_vars_file}" ]]; then
+  fail "Provisioning repo variable file was not created correctly."
+fi
+if grep -q '^  rhel[0-9]' "${repo_vars_file}"; then
+
+That fixes this:
+
+grep: : No such file or directory
+
+⸻
+
+Fix 3 — do not build PXE/controller vars during --bootstrap-only
+
+Near the bottom, find this:
+
+BOOTSTRAP_VARS_FILE="$(write_bootstrap_vars_file)"
+PXE_VARS_FILE="$(write_pxe_vars_file)"
+CONTROLLER_VARS_FILE="$(write_controller_vars_file)"
+
+Replace it with this:
+
+BOOTSTRAP_VARS_FILE="$(write_bootstrap_vars_file)"
+PXE_VARS_FILE="$(make_temp_file)"
+CONTROLLER_VARS_FILE="$(make_temp_file)"
+if [[ "${RUN_PXE}" == true ]]; then
+  PXE_VARS_FILE="$(write_pxe_vars_file)"
+fi
+if [[ "${RUN_CONTROLLER}" == true ]]; then
+  CONTROLLER_VARS_FILE="$(write_controller_vars_file)"
+fi
+
+This prevents ./bootstrap.sh --bootstrap-only from trying to detect controller repo vars at all.
+
+⸻
+
+What happened
+
+Your pasted script is the newer upgraded version, so the earlier fix names do not match perfectly anymore.
+
+Use this mapping:
+
+Old function name from earlier message:
+  add_extra_provision_repos_to_file()
+Your current function name:
+  add_extra_provision_repos()
+
+So yes, you do have the upgraded script. It just needs the updated version of the same fix applied to the new function name.
+
+After those 3 changes, run:
+
+bash -n bootstrap.sh
+bash -n collections-hub/scripts/bootstrap_controller.sh
+
+Then test:
+
+./bootstrap.sh --bootstrap-only
+
+The --prefer-bundle-repos change is separate. I would not add that until these three fixes are confirmed clean.
