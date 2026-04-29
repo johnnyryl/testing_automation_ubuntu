@@ -5,6 +5,62 @@
 
 
 
+
+
+- name: Check whether runtime image exists locally before tar load
+  ansible.builtin.command:
+    cmd: "podman image exists {{ pxe_content_runtime_image }}"
+  register: pxe_content_runtime_image_exists_pre
+  changed_when: false
+  failed_when: false
+  when:
+    - pxe_content_image_source == 'tar'
+    - not ansible_check_mode
+
+- name: Dry-run note for pxe-content image load
+  ansible.builtin.debug:
+    msg: >-
+      DRY RUN: would load pxe-content image tar into Podman from
+      {{ pxe_content_image_tar_path }} when the tar checksum changed or the
+      runtime image is missing.
+  when:
+    - pxe_content_image_source == 'tar'
+    - ansible_check_mode
+
+- name: Load pxe-content image tar into Podman
+  ansible.builtin.command:
+    cmd: "podman load -i {{ pxe_content_image_tar_path }}"
+  register: pxe_content_load_result
+  changed_when: true
+  when:
+    - pxe_content_image_source == 'tar'
+    - not ansible_check_mode
+    - >
+      ((pxe_content_loaded_tar_checksum | default('')) != (pxe_content_tar_state.stat.checksum | default('')))
+      or
+      ((pxe_content_runtime_image_exists_pre.rc | default(1)) != 0)
+
+- name: Write loaded image checksum stamp
+  ansible.builtin.copy:
+    dest: "{{ pxe_content_image_tar_checksum_file }}"
+    content: "{{ pxe_content_tar_state.stat.checksum }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - pxe_content_image_source == 'tar'
+    - not ansible_check_mode
+    - pxe_content_tar_state.stat.checksum is defined
+    - >
+      ((pxe_content_loaded_tar_checksum | default('')) != (pxe_content_tar_state.stat.checksum | default('')))
+      or
+      ((pxe_content_runtime_image_exists_pre.rc | default(1)) != 0)
+
+
+
+
+
+
 - name: Dry-run note for pxe-content tar load
   ansible.builtin.debug:
     msg: >-
