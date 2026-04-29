@@ -1,0 +1,22 @@
+    - name: Render processed fragment files
+      copy:
+        dest: >-
+          {{ repo_environment_init_gitlab_ci_tmpdir.path }}/
+          {{ '%02d' | format(item + 1) }}-{{ repo_environment_init_fragment_result.item.name }}.yml
+        mode: "0644"
+        content: |
+          {%- set lines = (repo_environment_init_fragment_result.content | b64decode).splitlines() -%}
+          {%- if repo_environment_init_fragment_result.item.trim == 'drop_last' -%}
+          {{ (lines[:-1] | join('\n')) ~ '\n' }}
+          {%- elif repo_environment_init_fragment_result.item.trim == 'drop_first_last' -%}
+          {{ (lines[1:-1] | join('\n')) ~ '\n' }}
+          {%- elif repo_environment_init_fragment_result.item.trim == 'drop_first' -%}
+          {{ (lines[1:] | join('\n')) ~ '\n' }}
+          {%- else -%}
+          {{ (lines | join('\n')) ~ '\n' }}
+          {%- endif -%}
+      loop: "{{ range(0, repo_environment_init_fragment_slurps.results | length) | list }}"
+      loop_control:
+        label: "{{ repo_environment_init_fragment_result.item.name }}"
+      vars:
+        repo_environment_init_fragment_result: "{{ repo_environment_init_fragment_slurps.results[item] }}"
