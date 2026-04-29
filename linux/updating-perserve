@@ -1,0 +1,191 @@
+Yes — these screenshots are enough. I would not make a bunch of new random changes. The proper final fix is mainly to clean up the preserve decision so the role has one clear variable that means:
+
+“This path exists and is protected, so do not back it up and do not copy over it.”
+
+Right now your copy_managed_path.yml is close, but I would still refine it so it is less confusing and easier to verify.
+
+1. backup_item.yml
+
+Leave this file alone.
+
+It is not responsible for deciding whether something should be backed up. It only backs up when another task includes it.
+
+Your backup_item.yml is fine.
+
+2. load_preserve_rules.yml
+
+This looks good now.
+
+You fixed the earlier splitlines problem by using:
+
+).split('\n')
+
+So I would leave load_preserve_rules.yml alone, as long as your .sync-preserve template includes these entries:
+
+.gitlab-ci.yml
+ansible/ansible.cfg
+ansible/inventory/
+ansible/group_vars/
+
+3. Replace copy_managed_path.yml with this cleaner final version
+
+This version uses one clear skip variable: repo_environment_init_should_skip_existing_path.
+
+# UNCLASSIFIED
+- name: "Normalize managed path key {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.set_fact:
+    repo_environment_init_path_item_dest_rel_normalized: >-
+      {{
+        repo_environment_init_path_item.dest_rel
+        | regex_replace('^\\./', '')
+        | regex_replace('/+$', '')
+      }}
+- name: "Set preserve match state for {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.set_fact:
+    repo_environment_init_path_is_preserved: >-
+      {{
+        repo_environment_init_respect_preserve_file | bool
+        and not repo_environment_init_overwrite_existing | bool
+        and repo_environment_init_path_item_dest_rel_normalized in
+          (repo_environment_init_active_preserve_entries | default([]))
+      }}
+- name: "Check destination {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.stat:
+    path: "{{ repo_environment_init_path_item.dest }}"
+  register: repo_environment_init_dest_stat
+- name: "Set skip state for existing preserved path {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.set_fact:
+    repo_environment_init_should_skip_existing_path: >-
+      {{
+        repo_environment_init_path_is_preserved | bool
+        and repo_environment_init_dest_stat.stat.exists | default(false)
+      }}
+- name: "Skip preserved existing path {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.debug:
+    msg: "Preserving existing managed path because it is listed in .sync-preserve: {{ repo_environment_init_path_item.dest_rel }}"
+  when:
+    - repo_environment_init_should_skip_existing_path | bool
+- name: "Back up existing managed path {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.include_tasks: backup_item.yml
+  vars:
+    repo_environment_init_backup_src: "{{ repo_environment_init_path_item.dest }}"
+    repo_environment_init_backup_rel: "{{ repo_environment_init_path_item.dest_rel }}"
+  when:
+    - repo_environment_init_backup | bool
+    - repo_environment_init_dest_stat.stat.exists
+    - not (repo_environment_init_should_skip_existing_path | bool)
+- name: "Ensure parent directory exists for {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.file:
+    path: "{{ repo_environment_init_path_item.dest | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - not (repo_environment_init_should_skip_existing_path | bool)
+- name: "Copy managed directory {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.copy:
+    src: "{{ repo_environment_init_path_item.src }}/"
+    dest: "{{ repo_environment_init_path_item.dest }}/"
+    owner: root
+    group: root
+    mode: preserve
+  when:
+    - repo_environment_init_path_item.expected_type == "directory"
+    - not (repo_environment_init_should_skip_existing_path | bool)
+- name: "Copy managed file {{ repo_environment_init_path_item.dest_rel }}"
+  ansible.builtin.copy:
+    src: "{{ repo_environment_init_path_item.src }}"
+    dest: "{{ repo_environment_init_path_item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - repo_environment_init_path_item.expected_type == "file"
+    - not (repo_environment_init_should_skip_existing_path | bool)
+# UNCLASSIFIED
+
+That should make the second run behave correctly for:
+
+ansible/inventory
+ansible/group_vars
+ansible/ansible.cfg
+
+4. Clean up the .gitlab-ci.yml preserve handling in tasks/main.yml
+
+Your current main.yml is close, but I would make it easier to read by setting a skip variable first.
+
+Replace the .gitlab-ci.yml section in tasks/main.yml with this:
+
+- name: "Check root .gitlab-ci.yml for preserve handling"
+  ansible.builtin.stat:
+    path: "{{ repo_environment_init_gitlab_ci_file }}"
+  register: repo_environment_init_gitlab_ci_preserve_stat
+  when:
+    - repo_environment_init_manage_gitlab_ci | bool
+    - repo_environment_init_respect_preserve_file | bool
+- name: "Set root .gitlab-ci.yml skip state"
+  ansible.builtin.set_fact:
+    repo_environment_init_gitlab_ci_should_skip: >-
+      {{
+        repo_environment_init_manage_gitlab_ci | bool
+        and repo_environment_init_respect_preserve_file | bool
+        and not repo_environment_init_overwrite_existing | bool
+        and repo_environment_init_gitlab_ci_preserve_stat.stat.exists | default(false)
+        and '.gitlab-ci.yml' in (repo_environment_init_active_preserve_entries | default([]))
+      }}
+  when:
+    - repo_environment_init_manage_gitlab_ci | bool
+- name: "Skip preserved root .gitlab-ci.yml"
+  ansible.builtin.debug:
+    msg: "Preserving existing root .gitlab-ci.yml because it is listed in .sync-preserve."
+  when:
+    - repo_environment_init_gitlab_ci_should_skip | default(false) | bool
+- name: Manage root .gitlab-ci.yml
+  import_tasks: manage_gitlab_ci.yml
+  when:
+    - repo_environment_init_manage_gitlab_ci | bool
+    - not (repo_environment_init_gitlab_ci_should_skip | default(false) | bool)
+
+This means manage_gitlab_ci.yml does not need to be changed right now. The role will simply skip importing that file when .gitlab-ci.yml is preserved.
+
+5. manage_ansible_files.yml
+
+Leave it as-is.
+
+This part looks correct:
+
+- name: Replace managed ansible paths from template sources
+  include_tasks: copy_managed_path.yml
+  loop: "{{ repo_environment_init_enabled_managed_paths }}"
+  loop_control:
+    loop_var: repo_environment_init_path_item
+    label: "{{ repo_environment_init_path_item.dest_rel }}"
+
+What to test after those two edits
+
+Run:
+
+./bootstrap.sh --bootstrap-only
+
+Then run it a second time:
+
+./bootstrap.sh --bootstrap-only
+
+On the second run, you want to see this pattern:
+
+Skip preserved existing path ansible/inventory
+ok: [localhost]
+Back up existing managed path ansible/inventory
+skipping: [localhost]
+Copy managed directory ansible/inventory
+skipping: [localhost]
+
+For .gitlab-ci.yml, you want to see:
+
+Skip preserved root .gitlab-ci.yml
+ok: [localhost]
+Manage root .gitlab-ci.yml
+skipping: [localhost]
+
+If you see Back up existing managed path ... changed again for a preserved path, then the issue is not the copy task anymore — it means .sync-preserve does not contain the matching entry or the active preserve list is not being loaded the way we expect.
