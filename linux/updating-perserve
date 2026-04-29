@@ -2,6 +2,22 @@
 
 
 
+
+
+
+- name: Dry-run note for pxe-content tar load
+  ansible.builtin.debug:
+    msg: >-
+      DRY RUN: would copy/load pxe-content image tar from
+      {{ pxe_content_image_tar_src }} to {{ pxe_content_image_tar_path }}.
+  when:
+    - pxe_content_image_source == 'tar'
+    - ansible_check_mode
+
+
+
+
+
 # UNCLASSIFIED
 
 - name: Check .sync-preserve file
