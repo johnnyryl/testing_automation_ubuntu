@@ -7,6 +7,70 @@
 
 
 
+
+
+
+
+- name: Assert runtime image exists locally after tar load
+  ansible.builtin.command:
+    cmd: "podman image exists {{ pxe_content_runtime_image }}"
+  register: pxe_content_runtime_image_exists_post
+  changed_when: false
+  failed_when: pxe_content_runtime_image_exists_post.rc != 0
+  when:
+    - pxe_content_image_source == 'tar'
+    - not ansible_check_mode
+
+- name: Dry-run note for registry image handling
+  ansible.builtin.debug:
+    msg: >-
+      DRY RUN: would check/pull pxe-content image from registry
+      {{ pxe_content_image }} using pull policy {{ pxe_content_image_pull_policy }}.
+  when:
+    - pxe_content_image_source == 'registry'
+    - ansible_check_mode
+
+- name: Check whether registry image already exists locally
+  ansible.builtin.command:
+    cmd: "podman image exists {{ pxe_content_image }}"
+  register: pxe_content_image_exists
+  changed_when: false
+  failed_when: false
+  when:
+    - pxe_content_image_source == 'registry'
+    - pxe_content_image_pull_policy == 'missing'
+    - not ansible_check_mode
+
+- name: Pull pxe-content image from registry
+  ansible.builtin.command:
+    cmd: "podman pull {{ pxe_content_image }}"
+  register: pxe_content_pull_result
+  changed_when: true
+  when:
+    - pxe_content_image_source == 'registry'
+    - not ansible_check_mode
+    - >
+      pxe_content_image_pull_policy == 'always'
+      or
+      (pxe_content_image_pull_policy == 'missing' and (pxe_content_image_exists.rc | default(1)) != 0)
+
+- name: Assert runtime image exists locally after registry handling
+  ansible.builtin.command:
+    cmd: "podman image exists {{ pxe_content_runtime_image }}"
+  register: pxe_content_runtime_image_exists_registry
+  changed_when: false
+  failed_when: pxe_content_runtime_image_exists_registry.rc != 0
+  when:
+    - pxe_content_image_source == 'registry'
+    - not ansible_check_mode
+
+
+
+
+
+
+
+
 - name: Check whether runtime image exists locally before tar load
   ansible.builtin.command:
     cmd: "podman image exists {{ pxe_content_runtime_image }}"
