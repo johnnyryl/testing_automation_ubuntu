@@ -21,3 +21,49 @@
     index_var: repo_environment_init_fragment_index
 
 dest: "{{ repo_environment_init_gitlab_ci_tmpdir.path }}/{{ '%02d' | format(repo_environment_init_fragment_index + 1) }}-{{ item.item.name }}.yml"
+
+
+
+
+# UNCLASSIFIED
+
+- name: Check .sync-preserve file
+  ansible.builtin.stat:
+    path: "{{ repo_environment_init_preserve_file }}"
+  register: repo_environment_init_preserve_file_stat
+
+- name: Read .sync-preserve file
+  ansible.builtin.slurp:
+    src: "{{ repo_environment_init_preserve_file }}"
+  register: repo_environment_init_preserve_file_slurp
+  when: repo_environment_init_preserve_file_stat.stat.exists
+
+- name: Set raw preserve entries
+  ansible.builtin.set_fact:
+    repo_environment_init_raw_preserve_entries: >-
+      {{
+        (
+          repo_environment_init_preserve_file_slurp.content
+          | default('')
+          | b64decode
+        ).split('\n')
+        if repo_environment_init_preserve_file_stat.stat.exists
+        else repo_environment_init_preserve_core_entries
+      }}
+
+- name: Normalize active preserve entries
+  ansible.builtin.set_fact:
+    repo_environment_init_active_preserve_entries: >-
+      {{
+        repo_environment_init_raw_preserve_entries
+        | map('trim')
+        | reject('equalto', '')
+        | reject('match', '^#')
+        | map('regex_replace', '^\\./', '')
+        | map('regex_replace', '/+$', '')
+        | unique
+        | list
+      }}
+
+# UNCLASSIFIED
+
