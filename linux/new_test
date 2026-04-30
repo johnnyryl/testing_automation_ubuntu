@@ -1,0 +1,101 @@
+No more code needed for this specific error. The error is exact:
+
+generated_group_vars_tmp: unbound variable
+
+That means the script is still referencing this old variable here:
+
+>> "${generated_group_vars_tmp}"
+
+But we removed/changed that variable. So the fix is not another debug step. The fix is to stop using generated_group_vars_tmp anywhere.
+
+Replace your whole current write_controller_vars_file() function with this:
+
+write_controller_vars_file() {
+  local file
+  local repo_vars_file=""
+  [[ -n "${GENERATED_GROUP_VARS_SOURCE_FILE:-}" ]] || fail "GENERATED_GROUP_VARS_SOURCE_FILE must be set before write_controller_vars_file"
+  file="$(make_temp_file)"
+  : > "${file}"
+  # Do not let group_vars_defaults inject generated bootstrap data into
+  # workstation_defaults.yml. Bootstrap now writes generated group vars directly to:
+  #   collections-hub/ansible/group_vars/all/aerolit_bootstrap_generated.yml
+  {
+    echo "group_vars_defaults_manage_nfs_mount_defaults: false"
+    echo "group_vars_defaults_manage_scalar_values: false"
+    echo "group_vars_defaults_manage_extra_blocks: false"
+    echo
+  } >> "${file}"
+  if [[ -n "${NFS_EXPORT_PATH}" ]]; then
+    echo "nfs_server_exports:" >> "${file}"
+    echo "  - path: $(yaml_quote "${NFS_EXPORT_PATH}")" >> "${file}"
+    if [[ "${NFS_ALLOW_ALL_CLIENTS}" == true ]]; then
+      echo "    clients: ''" >> "${file}"
+      echo "    allow_all_clients: true" >> "${file}"
+    else
+      echo "    clients: $(yaml_quote "${NFS_ALLOW_CLIENTS}")" >> "${file}"
+      echo "    allow_all_clients: false" >> "${file}"
+    fi
+    echo "    create_path: ${NFS_CREATE_EXPORT_PATH}" >> "${file}"
+    echo "    options:" >> "${file}"
+    echo "      - rw" >> "${file}"
+    echo "      - sync" >> "${file}"
+    echo "      - no_subtree_check" >> "${file}"
+    echo >> "${file}"
+  fi
+  if [[ -n "${PATH_FOR_ANSIBLE}" ]]; then
+    echo "path_for_ansible: $(yaml_quote "${PATH_FOR_ANSIBLE}")" >> "${file}"
+    echo >> "${file}"
+    if [[ -n "${NFS_SERVER_IP}" && -n "${NFS_EXPORT_PATH}" ]]; then
+      echo "mount_point_setup_single_site_mounts:" >> "${file}"
+      echo "  - path: $(yaml_quote "${PATH_FOR_ANSIBLE}")" >> "${file}"
+      echo "    mode: '0755'" >> "${file}"
+      echo "    owner: root" >> "${file}"
+      echo "    group: root" >> "${file}"
+      echo "    src: $(yaml_quote "${NFS_SERVER_IP}:${NFS_EXPORT_PATH}")" >> "${file}"
+      echo >> "${file}"
+    fi
+  fi
+  if [[ -n "${ENABLE_EPEL}" ]]; then
+    echo "enable_epel: ${ENABLE_EPEL}" >> "${file}"
+    echo >> "${file}"
+  fi
+  if [[ "${MANAGE_PROVISION_REPO_VARS}" == true ]]; then
+    if [[ "${AUTO_DETECT_PROVISION_REPOS}" == true || ${#PROVISION_EXTRA_REPOS[@]} -gt 0 || -n "${BASEOS_SOURCE}" || -n "${APPSTREAM_SOURCE}" ]]; then
+      repo_vars_file="$(detect_bundle_provision_repos)"
+      if grep -q '^  rhel[0-9]' "${repo_vars_file}"; then
+        cat "${repo_vars_file}" >> "${file}"
+        echo >> "${file}"
+      else
+        warn "No provisioning repos were detected for generated group_vars."
+      fi
+    fi
+  fi
+  write_bootstrap_generated_group_vars_file "${GENERATED_GROUP_VARS_SOURCE_FILE}" "${repo_vars_file}"
+  echo "${file}"
+}
+
+Then make sure your main flow has this exact pattern:
+
+BOOTSTRAP_VARS_FILE="$(write_bootstrap_vars_file)"
+PXE_VARS_FILE="$(make_temp_file)"
+CONTROLLER_VARS_FILE="$(make_temp_file)"
+GENERATED_GROUP_VARS_SOURCE_FILE="$(make_temp_file)"
+if [[ "${RUN_PXE}" == true ]]; then
+  PXE_VARS_FILE="$(write_pxe_vars_file)"
+fi
+if [[ "${RUN_CONTROLLER}" == true ]]; then
+  CONTROLLER_VARS_FILE="$(write_controller_vars_file)"
+  install_bootstrap_generated_group_vars_file "${GENERATED_GROUP_VARS_SOURCE_FILE}"
+fi
+
+Then run this check before testing:
+
+grep -n "generated_group_vars_tmp" collections-hub/scripts/bootstrap_controller.sh
+
+You want no output. If it prints anything, that old variable is still in the file and will keep breaking because set -u treats it as an error.
+
+Then run:
+
+bash -n collections-hub/scripts/bootstrap_controller.sh
+
+Then rerun bootstrap.
