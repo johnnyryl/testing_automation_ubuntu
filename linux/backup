@@ -1,0 +1,1839 @@
+#!/usr/bin/env bash
+# UNCLASSIFIED
+
+set -Eeuo pipefail
+
+###############################################################################
+# 01. Defaults
+###############################################################################
+DRY_RUN=false
+VERBOSE=false
+DEBUG=false
+ASSUME_YES=false
+ALLOW_ROOT_BUNDLE=false
+
+RUN_BOOTSTRAP=true
+RUN_PXE=true
+RUN_CONTROLLER=true
+OVERWRITE_INITIALIZED_FILES=false
+
+SKIP_ANSIBLE_INSTALL=false
+KEEP_BOOTSTRAP_REPO_FILE=false
+PREFER_BUNDLE_REPOS=false
+
+REPO_SOURCE=""
+BASEOS_SOURCE=""
+APPSTREAM_SOURCE=""
+
+PXE_SERVER_IP=""
+PXE_HTTP_PORT="18080"
+PXE_INTERFACE=""
+PXE_DHCP_START=""
+PXE_DHCP_END=""
+PXE_DHCP_NETMASK=""
+PXE_GATEWAY=""
+PXE_ISO_ROOT=""
+declare -a PXE_DNS_SERVERS=()
+
+PXE_CONTENT_IMAGE_SOURCE="auto"
+PXE_CONTENT_IMAGE=""
+PXE_CONTENT_RUNTIME_IMAGE=""
+PXE_CONTENT_IMAGE_TAR_SRC=""
+PXE_CONTENT_IMAGE_TAR_PATH="/srv/pxe-content/pxe-content.tar"
+
+NFS_SERVER_IP=""
+NFS_EXPORT_PATH=""
+NFS_ALLOW_CLIENTS=""
+NFS_ALLOW_ALL_CLIENTS=false
+NFS_CREATE_EXPORT_PATH=false
+PATH_FOR_ANSIBLE="/home/unix/sysadmin"
+EPEL_APPROVED=""
+
+MANAGE_PROVISION_REPO_VARS=true
+AUTO_DETECT_PROVISION_REPOS=true
+declare -a PROVISION_EXTRA_REPOS=()
+
+declare -a BOOTSTRAP_EXTRA_VARS=()
+declare -a PXE_EXTRA_VARS=()
+declare -a CONTROLLER_EXTRA_VARS=()
+
+declare -a BOOTSTRAP_EXTRA_VARS_FILES=()
+declare -a PXE_EXTRA_VARS_FILES=()
+declare -a CONTROLLER_EXTRA_VARS_FILES=()
+
+declare -a TEMP_FILES=()
+TEMP_REPO_FILE=""
+
+###############################################################################
+# 02. Logging helpers
+###############################################################################
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+warn() {
+  echo "WARNING: $*" >&2
+}
+
+info() {
+  echo "$*"
+}
+
+verbose() {
+  if [[ "${VERBOSE}" == true ]]; then
+    echo "VERBOSE: $*"
+  fi
+}
+
+trap 'echo "ERROR: bootstrap_controller.sh failed at line ${BASH_LINENO[0]:-${LINENO}} while running: ${BASH_COMMAND}" >&2' ERR
+
+cleanup() {
+  local path=""
+
+  if [[ -n "${TEMP_REPO_FILE}" && -f "${TEMP_REPO_FILE}" && "${KEEP_BOOTSTRAP_REPO_FILE}" != true && "${DRY_RUN}" != true ]]; then
+    rm -f -- "${TEMP_REPO_FILE}" || true
+  fi
+
+  for path in "${TEMP_FILES[@]:-}"; do
+    [[ -n "${path}" && -e "${path}" ]] && rm -f -- "${path}" || true
+  done
+}
+trap cleanup EXIT
+
+###############################################################################
+# 03. Usage
+###############################################################################
+usage() {
+  cat <<'EOF'
+bootstrap.sh / collections-hub/scripts/bootstrap_controller.sh
+
+Bootstrap an AeroLIT bundle host in this order:
+  1. bootstrap_repo_environment.yml
+  2. pxe_server.yml           optional
+  3. ansible_controller.yml   optional
+
+The bundle entry point is bootstrap.sh at the bundle root.
+That wrapper forwards to collections-hub/scripts/bootstrap_controller.sh.
+
+Typical bundle layout:
+  <bundle>/
+  |-- bootstrap.sh
+  |-- collections-hub/
+  |-- extracted_isos/
+  |   `-- rhel8iso|rhel9iso|rhel10iso/
+  |       |-- BaseOS/
+  |       `-- AppStream/
+  |-- files/
+  |   `-- pxe/pxe-content.tar
+  `-- repos/
+      `-- third-party-rhel8-rpms/
+
+Usage:
+  ./bootstrap.sh [OPTIONS]
+  ./collections-hub/scripts/bootstrap_controller.sh [OPTIONS]
+
+Execution flow:
+  --bootstrap-only
+      Run only bootstrap_repo_environment.yml.
+
+  --overwrite-initialized-files
+      Allow bootstrap_repo_environment.yml to overwrite initialized files that
+      are normally protected by .sync-preserve.
+
+  --skip-pxe
+      Skip pxe_server.yml.
+
+  --skip-controller
+      Skip ansible_controller.yml.
+
+Repository and Ansible install options:
+  --repo-source PATH_OR_URL
+      Parent source containing BaseOS and AppStream.
+      Local examples:
+        extracted_isos/rhel8iso
+        /mnt/repos/rhel9
+      HTTP example:
+        http://repo-server/repos/rhel9
+
+  --baseos-source PATH_OR_URL
+  --appstream-source PATH_OR_URL
+      Explicit BaseOS/AppStream sources. Use both together.
+      These override auto-detected bundle repos for the controller OS.
+
+  --prefer-bundle-repos
+      Use detected/provided bundle BaseOS/AppStream repos first when installing
+      ansible-core instead of trying currently configured repos first.
+
+  --skip-ansible-install
+      Do not install ansible-core. Fail if ansible-playbook is missing.
+
+  --keep-bootstrap-repo-file
+      Leave /etc/yum.repos.d/zz-aerolit-bootstrap.repo in place after exit.
+
+PXE-friendly options:
+  --pxe-server-ip IP
+      IP address PXE clients use to reach this server.
+      Find candidates with:
+        ip -br addr
+        ip route get 1.1.1.1
+
+  --pxe-http-port PORT
+      HTTP port exposed by the pxe-content container.
+      Default: 18080
+
+  --pxe-interface IFACE
+      Network interface dnsmasq listens on for PXE/DHCP.
+      Find interfaces with:
+        ip -br link
+        ip -br addr
+
+  --pxe-dhcp-start IP
+  --pxe-dhcp-end IP
+      DHCP range handed out to PXE clients.
+      Example for PXE server 192.168.109.139/24:
+        --pxe-dhcp-start 192.168.109.100
+        --pxe-dhcp-end   192.168.109.200
+
+  --pxe-dhcp-netmask MASK
+      DHCP netmask, usually matching the PXE interface network.
+      Example:
+        --pxe-dhcp-netmask 255.255.255.0
+
+  --pxe-gateway IP|none
+      Gateway offered to PXE clients.
+      Use "none" for isolated direct-cable/lab PXE networks.
+
+  --pxe-dns IP
+      Adds a DNS server to pxe_dnsmasq_dns_servers.
+      May be specified more than once.
+
+  --pxe-iso-root PATH
+      Host path bind-mounted into the pxe-content container.
+      Default auto-detects:
+        <bundle>/extracted_isos/rhel<controller_major>iso
+      Relative paths are normalized under the bundle root.
+
+PXE content image options:
+  --pxe-content-image-source auto|registry|tar
+      How pxe_content gets its container image.
+      Default: auto
+      auto uses tar when <bundle>/files/pxe/pxe-content.tar exists,
+      otherwise the pxe_content role default is used.
+
+  --pxe-content-image IMAGE
+      Registry image when image source is registry.
+      Maps to pxe_content_image.
+
+  --pxe-content-runtime-image IMAGE
+      Image name Quadlet/Podman should run after the image is available.
+      Maps to pxe_content_runtime_image.
+
+  --pxe-content-image-tar-src PATH
+      Controller-side tar file to copy/load when image source is tar.
+      Default if present:
+        <bundle>/files/pxe/pxe-content.tar
+
+  --pxe-content-image-tar-path PATH
+      Target-side tar path used by podman load.
+      Default:
+        /srv/pxe-content/pxe-content.tar
+
+Controller/NFS/group-vars options:
+  --nfs-server-ip IP
+      IP address provisioned machines use to mount the NFS export from this host.
+      Often the controller IP on the provisioning network.
+      Find candidates with:
+        ip -br addr
+
+  --nfs-export-path PATH
+      Local path exported by nfs_server.
+      Default:
+        <bundle root>
+      This must be an absolute local path.
+
+  --nfs-allow-clients SPEC
+      Client spec for /etc/exports.
+      Examples:
+        192.168.98.0/24
+        192.168.109.0/24
+        192.168.98.25
+
+  --nfs-allow-all-clients
+      Use allow_all_clients: true for nfs_server_exports.
+      Useful for first lab tests, but narrow it later.
+
+  --nfs-create-export-path
+      Set create_path: true in nfs_server_exports.
+
+  --path-for-ansible PATH
+      Path where provisioned machines will mount/use the exported bundle.
+      This becomes the client-visible base path for files and repos.
+      Default:
+        /home/unix/sysadmin
+      This must be an absolute path.
+
+  --epel-approved BOOL
+      Sets enable_epel in generated group vars.
+      Accepted:
+        true false yes no 1 0 on off
+
+Provisioning repo variables:
+  --skip-provision-repo-vars
+      Do not write detected repo variables into generated group_vars.
+
+  --no-auto-provision-repos
+      Do not auto-detect bundle repos for future provisioned machines.
+
+  --provision-extra-repo OS:ID=PATH_OR_URL
+      Add or override a repo for future provisioned machines.
+      May be specified more than once.
+      OS examples: rhel8, rhel9, rhel10
+      Local paths must be inside --nfs-export-path so clients can see them.
+      Examples:
+        --provision-extra-repo rhel8:third-party=repos/third-party-rhel8-rpms
+        --provision-extra-repo rhel9:epel=http://repo-server/rhel9/epel
+
+Safety options:
+  --assume-yes
+      Answer yes to safety prompts.
+
+  --allow-root-bundle
+      Allow running from a bundle located under /root without prompting.
+
+Extra vars:
+  The following options may be specified more than once:
+    --bootstrap-extra-var KEY=VALUE
+    --pxe-extra-var KEY=VALUE
+    --controller-extra-var KEY=VALUE
+
+Extra vars files may also be specified more than once:
+    --bootstrap-extra-vars-file FILE
+    --pxe-extra-vars-file FILE
+    --controller-extra-vars-file FILE
+
+General options:
+  --dry-run
+      Do not change the system. If Ansible is available, playbooks run in
+      --check mode.
+
+  --verbose
+      Show more output.
+
+  --debug
+      Enable shell tracing. Implies --verbose.
+
+  -h, --help
+      Show this help text.
+
+Examples:
+  # Full combined setup: bootstrap repo environment, PXE server, then controller
+  ./bootstrap.sh \
+    --pxe-server-ip 192.168.109.139 \
+    --pxe-interface ens160 \
+    --pxe-dhcp-start 192.168.109.100 \
+    --pxe-dhcp-end 192.168.109.200 \
+    --pxe-dhcp-netmask 255.255.255.0 \
+    --nfs-server-ip 192.168.98.141 \
+    --nfs-allow-clients 192.168.98.0/24 \
+    --epel-approved true
+
+  # Controller only: skip PXE setup
+  ./bootstrap.sh \
+    --skip-pxe \
+    --nfs-server-ip 192.168.98.141 \
+    --nfs-allow-clients 192.168.98.0/24 \
+    --epel-approved true
+
+  # PXE only: skip controller setup
+  ./bootstrap.sh \
+    --skip-controller \
+    --pxe-server-ip 192.168.109.139 \
+    --pxe-interface ens160 \
+    --pxe-dhcp-start 192.168.109.100 \
+    --pxe-dhcp-end 192.168.109.200 \
+    --pxe-dhcp-netmask 255.255.255.0
+
+  # Bootstrap repo environment only
+  ./bootstrap.sh --bootstrap-only
+
+  # Force bootstrap templates to overwrite initialized files
+  ./bootstrap.sh --bootstrap-only --overwrite-initialized-files
+
+  # Use a specific local BaseOS/AppStream parent source
+  ./bootstrap.sh --repo-source extracted_isos/rhel8iso
+
+  # Use separate BaseOS and AppStream HTTP sources
+  ./bootstrap.sh \
+    --baseos-source http://server/repos/rhel9/BaseOS \
+    --appstream-source http://server/repos/rhel9/AppStream
+
+  # Use the bundled pxe-content tar explicitly
+  ./bootstrap.sh \
+    --pxe-server-ip 192.168.109.139 \
+    --pxe-interface ens160 \
+    --pxe-content-image-source tar \
+    --pxe-content-image-tar-src files/pxe/pxe-content.tar
+
+  # Add future provisioning repos into generated group_vars
+  ./bootstrap.sh \
+    --skip-pxe \
+    --nfs-server-ip 192.168.98.141 \
+    --nfs-allow-clients 192.168.98.0/24 \
+    --provision-extra-repo rhel8:third-party=repos/third-party-rhel8-rpms \
+    --provision-extra-repo rhel9:epel=http://repo-server/rhel9/epel
+
+  # Pass repeated extra vars through to the PXE playbook
+  ./bootstrap.sh \
+    --pxe-server-ip 192.168.109.139 \
+    --pxe-interface ens160 \
+    --pxe-extra-var pxe_dnsmasq_log_queries=true \
+    --pxe-extra-var pxe_dnsmasq_extra_firewall_ports='["8081/tcp"]'
+
+  # Use vars files for larger custom setups
+  ./bootstrap.sh \
+    --pxe-extra-vars-file /path/to/pxe-vars.yml \
+    --controller-extra-vars-file /path/to/controller-vars.yml
+
+  # Dry-run the controller path
+  ./bootstrap.sh \
+    --dry-run \
+    --skip-pxe \
+    --nfs-server-ip 192.168.98.141 \
+    --nfs-allow-clients 192.168.98.0/24
+EOF
+}
+
+###############################################################################
+# 04. Basic helpers
+###############################################################################
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"
+}
+
+as_root() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    "$@"
+  else
+    need_cmd sudo
+    sudo "$@"
+  fi
+}
+
+is_url() {
+  [[ "$1" =~ ^https?:// ]]
+}
+
+normalize_bool() {
+  case "${1,,}" in
+    true|yes|1|on) echo "true" ;;
+    false|no|0|off) echo "false" ;;
+    *) fail "Invalid boolean value: $1" ;;
+  esac
+}
+
+yaml_quote() {
+  local value="$1"
+  value=${value//\'/\'\'}
+  printf "'%s'" "${value}"
+}
+
+make_temp_file() {
+  local path
+  path="$(mktemp)"
+  TEMP_FILES+=("${path}")
+  echo "${path}"
+}
+
+require_file_arg() {
+  local label="$1"
+  local path="$2"
+  [[ -f "${path}" ]] || fail "${label} file not found: ${path}"
+}
+
+validate_extra_var() {
+  local label="$1"
+  local value="$2"
+  [[ "${value}" == *=* ]] || fail "${label} must be in KEY=VALUE form: ${value}"
+  [[ "${value%%=*}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || fail "${label} key must be a valid variable name: ${value%%=*}"
+}
+
+validate_no_whitespace_path() {
+  local label="$1"
+  local value="$2"
+  [[ "${value}" != *[[:space:]]* ]] || fail "${label} must not contain whitespace: ${value}"
+}
+
+path_is_absolute() {
+  [[ "$1" == /* ]]
+}
+
+normalize_local_path() {
+  local label="$1"
+  local value="$2"
+  local base_dir="${3:-$(pwd)}"
+
+  [[ -n "${value}" ]] || return 0
+  validate_no_whitespace_path "${label}" "${value}"
+
+  if is_url "${value}"; then
+    printf '%s' "${value%/}"
+    return 0
+  fi
+
+  if path_is_absolute "${value}"; then
+    printf '%s' "${value%/}"
+    return 0
+  fi
+
+  warn "${label} was provided as a relative path: ${value}"
+  warn "Normalizing it relative to: ${base_dir}"
+  printf '%s/%s' "${base_dir%/}" "${value}"
+}
+
+require_absolute_path_value() {
+  local label="$1"
+  local value="$2"
+
+  validate_no_whitespace_path "${label}" "${value}"
+  path_is_absolute "${value}" || fail "${label} must be an absolute path: ${value}"
+}
+
+confirm_continue() {
+  local prompt="$1"
+  local reply=""
+
+  if [[ "${ASSUME_YES}" == true ]]; then
+    info "${prompt}"
+    info "Continuing because --assume-yes was used."
+    return 0
+  fi
+
+  if [[ ! -t 0 ]]; then
+    fail "${prompt} Re-run with --assume-yes to continue in non-interactive mode."
+  fi
+
+  printf '%s [y/N]: ' "${prompt}" >&2
+  read -r reply
+  case "${reply,,}" in
+    y|yes) return 0 ;;
+    *) fail "User declined to continue." ;;
+  esac
+}
+
+###############################################################################
+# 05. Path discovery
+###############################################################################
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "${SOURCE}" ]]; do
+  SCRIPT_DIR="$(cd -P "$(dirname "${SOURCE}")" && pwd)"
+  SOURCE="$(readlink "${SOURCE}")"
+  [[ "${SOURCE}" != /* ]] && SOURCE="${SCRIPT_DIR}/${SOURCE}"
+done
+
+SCRIPT_DIR="$(cd -P "$(dirname "${SOURCE}")" && pwd)"
+COLLECTIONS_HUB_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BUNDLE_ROOT="$(cd "${COLLECTIONS_HUB_ROOT}/.." && pwd)"
+BUNDLE_PARENT="$(cd "${BUNDLE_ROOT}/.." && pwd)"
+PLAYBOOKS_DIR="${COLLECTIONS_HUB_ROOT}/ansible"
+
+BOOTSTRAP_PLAYBOOK="${PLAYBOOKS_DIR}/bootstrap_repo_environment.yml"
+PXE_PLAYBOOK="${PLAYBOOKS_DIR}/pxe_server.yml"
+CONTROLLER_PLAYBOOK="${PLAYBOOKS_DIR}/ansible_controller.yml"
+
+BOOTSTRAP_CFG="${PLAYBOOKS_DIR}/ansible_template.cfg"
+MAIN_CFG="${PLAYBOOKS_DIR}/ansible.cfg"
+EFFECTIVE_MAIN_CFG="${MAIN_CFG}"
+
+GENERATED_GROUP_VARS_FILE="${PLAYBOOKS_DIR}/group_vars/all/aerolit_bootstrap_generated.yml"
+GENERATED_GROUP_VARS_SOURCE_FILE=""
+
+LOCALHOST_INVENTORY="localhost,"
+
+NFS_EXPORT_PATH="${BUNDLE_ROOT}"
+
+###############################################################################
+# 06. OS and repo helper functions used by defaults and main flow
+###############################################################################
+get_os_major() {
+  local version_id=""
+  if [[ -r /etc/os-release ]]; then
+    version_id="$(awk -F= '/^VERSION_ID=/{gsub(/"/,"",$2); print $2}' /etc/os-release)"
+  fi
+  [[ -n "${version_id}" ]] || fail "Unable to determine OS version from /etc/os-release"
+  echo "${version_id%%.*}"
+}
+
+repo_dir_is_valid() {
+  local path="$1"
+  [[ -d "${path}" ]] || return 1
+  [[ -f "${path}/repodata/repomd.xml" ]] || return 1
+}
+
+resolve_local_repo_pair() {
+  local root="$1"
+  local base=""
+  local app=""
+
+  [[ -d "${root}" ]] || return 1
+
+  if repo_dir_is_valid "${root}/BaseOS"; then
+    base="${root}/BaseOS"
+  elif repo_dir_is_valid "${root}/baseos"; then
+    base="${root}/baseos"
+  fi
+
+  if repo_dir_is_valid "${root}/AppStream"; then
+    app="${root}/AppStream"
+  elif repo_dir_is_valid "${root}/appstream"; then
+    app="${root}/appstream"
+  fi
+
+  if [[ -n "${base}" && -n "${app}" ]]; then
+    printf '%s\n%s\n' "${base}" "${app}"
+    return 0
+  fi
+
+  base="$(find "${root}" -maxdepth 6 $begin:math:text$ \-path \'\*\/BaseOS\/repodata\/repomd\.xml\' \-o \-path \'\*\/baseos\/repodata\/repomd\.xml\' $end:math:text$ -type f 2>/dev/null | head -n 1 || true)"
+  app="$(find "${root}" -maxdepth 6 $begin:math:text$ \-path \'\*\/AppStream\/repodata\/repomd\.xml\' \-o \-path \'\*\/appstream\/repodata\/repomd\.xml\' $end:math:text$ -type f 2>/dev/null | head -n 1 || true)"
+
+  [[ -n "${base}" ]] && base="$(dirname "$(dirname "${base}")")"
+  [[ -n "${app}" ]] && app="$(dirname "$(dirname "${app}")")"
+
+  if [[ -n "${base}" && -n "${app}" ]] && repo_dir_is_valid "${base}" && repo_dir_is_valid "${app}"; then
+    printf '%s\n%s\n' "${base}" "${app}"
+    return 0
+  fi
+
+  return 1
+}
+
+detect_default_pxe_iso_root() {
+  local os_major="$1"
+  local candidate=""
+
+  for candidate in \
+    "${BUNDLE_ROOT}/extracted_isos/rhel${os_major}iso" \
+    "${BUNDLE_ROOT}/extracted_isos/rhel${os_major}" \
+    "${BUNDLE_ROOT}/rhel${os_major}iso" \
+    "${BUNDLE_ROOT}/rhel${os_major}"; do
+    if [[ -d "${candidate}" ]]; then
+      printf '%s' "${candidate}"
+      return 0
+    fi
+  done
+
+  printf '%s' "${BUNDLE_ROOT}/extracted_isos/rhel${os_major}iso"
+}
+
+###############################################################################
+# 07. Argument parsing
+###############################################################################
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    --verbose)
+      VERBOSE=true
+      shift
+      ;;
+    --debug)
+      DEBUG=true
+      VERBOSE=true
+      shift
+      ;;
+    --assume-yes|-y)
+      ASSUME_YES=true
+      shift
+      ;;
+    --allow-root-bundle)
+      ALLOW_ROOT_BUNDLE=true
+      shift
+      ;;
+
+    --bootstrap-only)
+      RUN_PXE=false
+      RUN_CONTROLLER=false
+      shift
+      ;;
+    --overwrite-initialized-files)
+      OVERWRITE_INITIALIZED_FILES=true
+      shift
+      ;;
+    --skip-pxe)
+      RUN_PXE=false
+      shift
+      ;;
+    --skip-controller)
+      RUN_CONTROLLER=false
+      shift
+      ;;
+
+    --repo-source)
+      [[ $# -ge 2 ]] || fail "--repo-source requires a value"
+      REPO_SOURCE="$2"
+      shift 2
+      ;;
+    --baseos-source)
+      [[ $# -ge 2 ]] || fail "--baseos-source requires a value"
+      BASEOS_SOURCE="$2"
+      shift 2
+      ;;
+    --appstream-source)
+      [[ $# -ge 2 ]] || fail "--appstream-source requires a value"
+      APPSTREAM_SOURCE="$2"
+      shift 2
+      ;;
+    --prefer-bundle-repos)
+      PREFER_BUNDLE_REPOS=true
+      shift
+      ;;
+    --skip-ansible-install)
+      SKIP_ANSIBLE_INSTALL=true
+      shift
+      ;;
+    --keep-bootstrap-repo-file)
+      KEEP_BOOTSTRAP_REPO_FILE=true
+      shift
+      ;;
+
+    --pxe-server-ip)
+      [[ $# -ge 2 ]] || fail "--pxe-server-ip requires a value"
+      PXE_SERVER_IP="$2"
+      shift 2
+      ;;
+    --pxe-http-port)
+      [[ $# -ge 2 ]] || fail "--pxe-http-port requires a value"
+      PXE_HTTP_PORT="$2"
+      shift 2
+      ;;
+    --pxe-interface)
+      [[ $# -ge 2 ]] || fail "--pxe-interface requires a value"
+      PXE_INTERFACE="$2"
+      shift 2
+      ;;
+    --pxe-dhcp-start)
+      [[ $# -ge 2 ]] || fail "--pxe-dhcp-start requires a value"
+      PXE_DHCP_START="$2"
+      shift 2
+      ;;
+    --pxe-dhcp-end)
+      [[ $# -ge 2 ]] || fail "--pxe-dhcp-end requires a value"
+      PXE_DHCP_END="$2"
+      shift 2
+      ;;
+    --pxe-dhcp-netmask)
+      [[ $# -ge 2 ]] || fail "--pxe-dhcp-netmask requires a value"
+      PXE_DHCP_NETMASK="$2"
+      shift 2
+      ;;
+    --pxe-gateway)
+      [[ $# -ge 2 ]] || fail "--pxe-gateway requires a value"
+      PXE_GATEWAY="$2"
+      shift 2
+      ;;
+    --pxe-dns)
+      [[ $# -ge 2 ]] || fail "--pxe-dns requires a value"
+      PXE_DNS_SERVERS+=("$2")
+      shift 2
+      ;;
+    --pxe-iso-root)
+      [[ $# -ge 2 ]] || fail "--pxe-iso-root requires a value"
+      PXE_ISO_ROOT="$2"
+      shift 2
+      ;;
+
+    --pxe-content-image-source)
+      [[ $# -ge 2 ]] || fail "--pxe-content-image-source requires auto, registry, or tar"
+      PXE_CONTENT_IMAGE_SOURCE="$2"
+      shift 2
+      ;;
+    --pxe-content-image)
+      [[ $# -ge 2 ]] || fail "--pxe-content-image requires a value"
+      PXE_CONTENT_IMAGE="$2"
+      shift 2
+      ;;
+    --pxe-content-runtime-image)
+      [[ $# -ge 2 ]] || fail "--pxe-content-runtime-image requires a value"
+      PXE_CONTENT_RUNTIME_IMAGE="$2"
+      shift 2
+      ;;
+    --pxe-content-image-tar-src)
+      [[ $# -ge 2 ]] || fail "--pxe-content-image-tar-src requires a value"
+      PXE_CONTENT_IMAGE_TAR_SRC="$2"
+      shift 2
+      ;;
+    --pxe-content-image-tar-path)
+      [[ $# -ge 2 ]] || fail "--pxe-content-image-tar-path requires a value"
+      PXE_CONTENT_IMAGE_TAR_PATH="$2"
+      shift 2
+      ;;
+
+    --nfs-server-ip)
+      [[ $# -ge 2 ]] || fail "--nfs-server-ip requires a value"
+      NFS_SERVER_IP="$2"
+      shift 2
+      ;;
+    --nfs-export-path)
+      [[ $# -ge 2 ]] || fail "--nfs-export-path requires a value"
+      NFS_EXPORT_PATH="$2"
+      shift 2
+      ;;
+    --nfs-allow-clients)
+      [[ $# -ge 2 ]] || fail "--nfs-allow-clients requires a value"
+      NFS_ALLOW_CLIENTS="$2"
+      shift 2
+      ;;
+    --nfs-allow-all-clients)
+      NFS_ALLOW_ALL_CLIENTS=true
+      shift
+      ;;
+    --nfs-create-export-path)
+      NFS_CREATE_EXPORT_PATH=true
+      shift
+      ;;
+    --path-for-ansible)
+      [[ $# -ge 2 ]] || fail "--path-for-ansible requires a value"
+      PATH_FOR_ANSIBLE="$2"
+      shift 2
+      ;;
+    --epel-approved)
+      [[ $# -ge 2 ]] || fail "--epel-approved requires a value"
+      EPEL_APPROVED="$(normalize_bool "$2")"
+      shift 2
+      ;;
+
+    --skip-provision-repo-vars)
+      MANAGE_PROVISION_REPO_VARS=false
+      shift
+      ;;
+    --no-auto-provision-repos)
+      AUTO_DETECT_PROVISION_REPOS=false
+      shift
+      ;;
+    --provision-extra-repo)
+      [[ $# -ge 2 ]] || fail "--provision-extra-repo requires OS:ID=PATH_OR_URL"
+      PROVISION_EXTRA_REPOS+=("$2")
+      shift 2
+      ;;
+
+    --bootstrap-extra-var)
+      [[ $# -ge 2 ]] || fail "--bootstrap-extra-var requires KEY=VALUE"
+      validate_extra_var "--bootstrap-extra-var" "$2"
+      BOOTSTRAP_EXTRA_VARS+=("$2")
+      shift 2
+      ;;
+    --pxe-extra-var)
+      [[ $# -ge 2 ]] || fail "--pxe-extra-var requires KEY=VALUE"
+      validate_extra_var "--pxe-extra-var" "$2"
+      PXE_EXTRA_VARS+=("$2")
+      shift 2
+      ;;
+    --controller-extra-var)
+      [[ $# -ge 2 ]] || fail "--controller-extra-var requires KEY=VALUE"
+      validate_extra_var "--controller-extra-var" "$2"
+      CONTROLLER_EXTRA_VARS+=("$2")
+      shift 2
+      ;;
+
+    --bootstrap-extra-vars-file)
+      [[ $# -ge 2 ]] || fail "--bootstrap-extra-vars-file requires a file"
+      require_file_arg "--bootstrap-extra-vars-file" "$2"
+      BOOTSTRAP_EXTRA_VARS_FILES+=("$2")
+      shift 2
+      ;;
+    --pxe-extra-vars-file)
+      [[ $# -ge 2 ]] || fail "--pxe-extra-vars-file requires a file"
+      require_file_arg "--pxe-extra-vars-file" "$2"
+      PXE_EXTRA_VARS_FILES+=("$2")
+      shift 2
+      ;;
+    --controller-extra-vars-file)
+      [[ $# -ge 2 ]] || fail "--controller-extra-vars-file requires a file"
+      require_file_arg "--controller-extra-vars-file" "$2"
+      CONTROLLER_EXTRA_VARS_FILES+=("$2")
+      shift 2
+      ;;
+
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "Unknown argument: $1"
+      ;;
+  esac
+done
+
+if [[ "${DEBUG}" == true ]]; then
+  set -x
+fi
+
+###############################################################################
+# 08. Derived defaults and validation
+###############################################################################
+OS_MAJOR="$(get_os_major)"
+
+if [[ -z "${PXE_ISO_ROOT}" ]]; then
+  PXE_ISO_ROOT="$(detect_default_pxe_iso_root "${OS_MAJOR}")"
+fi
+
+DEFAULT_PXE_CONTENT_TAR_SRC="${BUNDLE_ROOT}/files/pxe/pxe-content.tar"
+if [[ "${PXE_CONTENT_IMAGE_SOURCE}" == "auto" && -f "${DEFAULT_PXE_CONTENT_TAR_SRC}" ]]; then
+  PXE_CONTENT_IMAGE_SOURCE="tar"
+  PXE_CONTENT_IMAGE_TAR_SRC="${DEFAULT_PXE_CONTENT_TAR_SRC}"
+elif [[ "${PXE_CONTENT_IMAGE_SOURCE}" == "auto" ]]; then
+  PXE_CONTENT_IMAGE_SOURCE=""
+fi
+
+REPO_SOURCE="$(normalize_local_path "--repo-source" "${REPO_SOURCE:-}" "${BUNDLE_ROOT}")"
+BASEOS_SOURCE="$(normalize_local_path "--baseos-source" "${BASEOS_SOURCE:-}" "${BUNDLE_ROOT}")"
+APPSTREAM_SOURCE="$(normalize_local_path "--appstream-source" "${APPSTREAM_SOURCE:-}" "${BUNDLE_ROOT}")"
+PXE_ISO_ROOT="$(normalize_local_path "--pxe-iso-root" "${PXE_ISO_ROOT:-}" "${BUNDLE_ROOT}")"
+PXE_CONTENT_IMAGE_TAR_SRC="$(normalize_local_path "--pxe-content-image-tar-src" "${PXE_CONTENT_IMAGE_TAR_SRC:-}" "${BUNDLE_ROOT}")"
+NFS_EXPORT_PATH="$(normalize_local_path "--nfs-export-path" "${NFS_EXPORT_PATH:-}" "${BUNDLE_ROOT}")"
+
+require_absolute_path_value "--nfs-export-path" "${NFS_EXPORT_PATH}"
+require_absolute_path_value "--path-for-ansible" "${PATH_FOR_ANSIBLE}"
+require_absolute_path_value "--pxe-content-image-tar-path" "${PXE_CONTENT_IMAGE_TAR_PATH}"
+
+if [[ -n "${PXE_ISO_ROOT}" ]] && ! is_url "${PXE_ISO_ROOT}"; then
+  require_absolute_path_value "--pxe-iso-root" "${PXE_ISO_ROOT}"
+  if [[ "${RUN_PXE}" == true && ! -d "${PXE_ISO_ROOT}" ]]; then
+    fail "--pxe-iso-root does not exist or is not a directory: ${PXE_ISO_ROOT}"
+  fi
+fi
+
+case "${PXE_CONTENT_IMAGE_SOURCE}" in
+  ""|registry|tar) ;;
+  *) fail "--pxe-content-image-source must be auto, registry, or tar" ;;
+esac
+
+if [[ "${RUN_PXE}" == true && "${PXE_CONTENT_IMAGE_SOURCE}" == "tar" ]]; then
+  [[ -n "${PXE_CONTENT_IMAGE_TAR_SRC}" ]] || fail "--pxe-content-image-source tar requires --pxe-content-image-tar-src"
+  require_absolute_path_value "--pxe-content-image-tar-src" "${PXE_CONTENT_IMAGE_TAR_SRC}"
+  [[ -f "${PXE_CONTENT_IMAGE_TAR_SRC}" ]] || fail "PXE content image tar not found: ${PXE_CONTENT_IMAGE_TAR_SRC}"
+fi
+
+[[ -d "${COLLECTIONS_HUB_ROOT}" ]] || fail "collections-hub root not found: ${COLLECTIONS_HUB_ROOT}"
+[[ -d "${PLAYBOOKS_DIR}" ]] || fail "Playbooks directory not found: ${PLAYBOOKS_DIR}"
+
+if [[ "${RUN_BOOTSTRAP}" == true ]]; then
+  [[ -f "${BOOTSTRAP_PLAYBOOK}" ]] || fail "Bootstrap playbook not found: ${BOOTSTRAP_PLAYBOOK}"
+  [[ -f "${BOOTSTRAP_CFG}" ]] || fail "Bootstrap ansible config not found: ${BOOTSTRAP_CFG}"
+fi
+
+if [[ "${RUN_PXE}" == true ]]; then
+  [[ -f "${PXE_PLAYBOOK}" ]] || fail "PXE playbook not found: ${PXE_PLAYBOOK}"
+  [[ -n "${PXE_SERVER_IP}" ]] || fail "--pxe-server-ip is required when PXE setup is enabled. Use --skip-pxe to skip PXE setup. Find IPs with: ip -br addr"
+  [[ -n "${PXE_INTERFACE}" ]] || fail "--pxe-interface is required when PXE setup is enabled. Find it with: ip -br addr"
+  [[ -n "${PXE_DHCP_START}" ]] || fail "--pxe-dhcp-start is required when PXE setup is enabled."
+  [[ -n "${PXE_DHCP_END}" ]] || fail "--pxe-dhcp-end is required when PXE setup is enabled."
+  [[ -n "${PXE_DHCP_NETMASK}" ]] || fail "--pxe-dhcp-netmask is required when PXE setup is enabled."
+fi
+
+if [[ "${RUN_CONTROLLER}" == true ]]; then
+  [[ -f "${CONTROLLER_PLAYBOOK}" ]] || fail "Controller playbook not found: ${CONTROLLER_PLAYBOOK}"
+  [[ -n "${NFS_SERVER_IP}" ]] || fail "--nfs-server-ip is required when controller setup is enabled. Use --skip-controller to skip controller setup."
+  if [[ "${NFS_ALLOW_ALL_CLIENTS}" != true && -z "${NFS_ALLOW_CLIENTS}" ]]; then
+    fail "Controller setup requires --nfs-allow-clients SPEC or --nfs-allow-all-clients"
+  fi
+fi
+
+if [[ -n "${BASEOS_SOURCE}" || -n "${APPSTREAM_SOURCE}" ]]; then
+  [[ -n "${BASEOS_SOURCE}" && -n "${APPSTREAM_SOURCE}" ]] || fail "Use both --baseos-source and --appstream-source together"
+fi
+
+if [[ "${NFS_ALLOW_ALL_CLIENTS}" == true && -n "${NFS_ALLOW_CLIENTS}" ]]; then
+  fail "Use either --nfs-allow-clients or --nfs-allow-all-clients, not both"
+fi
+
+if [[ -n "${PXE_HTTP_PORT}" && ! "${PXE_HTTP_PORT}" =~ ^[0-9]+$ ]]; then
+  fail "--pxe-http-port must be numeric"
+fi
+
+if [[ -n "${NFS_EXPORT_PATH}" && ! -d "${NFS_EXPORT_PATH}" && "${NFS_CREATE_EXPORT_PATH}" != true ]]; then
+  fail "--nfs-export-path does not exist. Use --nfs-create-export-path if you want the role to create it: ${NFS_EXPORT_PATH}"
+fi
+
+ROOT_PATH_WARNING=false
+case "${BUNDLE_ROOT}" in
+  /root|/root/*)
+    ROOT_PATH_WARNING=true
+    warn "The AeroLIT bundle is currently under /root:"
+    warn "  ${BUNDLE_ROOT}"
+    ;;
+esac
+
+case "${NFS_EXPORT_PATH}" in
+  /root|/root/*)
+    ROOT_PATH_WARNING=true
+    warn "The NFS export path is under /root:"
+    warn "  ${NFS_EXPORT_PATH}"
+    ;;
+esac
+
+if [[ "${ROOT_PATH_WARNING}" == true && "${ALLOW_ROOT_BUNDLE}" != true ]]; then
+  warn "This can work for testing, but it is a bad long-term location for an exported provisioning bundle."
+  warn "NFS clients may fail because /root is normally not traversable by other users."
+  warn "A shared location such as /srv/aerolit/<bundle-name> is strongly recommended."
+  if [[ "${DRY_RUN}" == true ]]; then
+    warn "Dry-run mode: continuing without prompting."
+  else
+    confirm_continue "Continue with the bundle or export path under /root?"
+  fi
+fi
+
+###############################################################################
+# 09. Repository helpers
+###############################################################################
+ensure_trailing_slashless() {
+  local value="$1"
+  printf '%s' "${value%/}"
+}
+
+resolve_repo_sources() {
+  local os_major="$1"
+  local candidate=""
+  local version_root=""
+  local -a repo_pair=()
+  local -a version_candidates=()
+
+  if [[ -n "${BASEOS_SOURCE}" || -n "${APPSTREAM_SOURCE}" ]]; then
+    [[ -n "${BASEOS_SOURCE}" && -n "${APPSTREAM_SOURCE}" ]] || fail "Use both --baseos-source and --appstream-source together"
+    return 0
+  fi
+
+  if [[ -n "${REPO_SOURCE}" ]]; then
+    if is_url "${REPO_SOURCE}"; then
+      REPO_SOURCE="$(ensure_trailing_slashless "${REPO_SOURCE}")"
+      BASEOS_SOURCE="${REPO_SOURCE}/BaseOS"
+      APPSTREAM_SOURCE="${REPO_SOURCE}/AppStream"
+      return 0
+    fi
+
+    mapfile -t repo_pair < <(resolve_local_repo_pair "${REPO_SOURCE}" || true)
+    if [[ ${#repo_pair[@]} -eq 2 ]]; then
+      BASEOS_SOURCE="${repo_pair[0]}"
+      APPSTREAM_SOURCE="${repo_pair[1]}"
+      return 0
+    fi
+
+    mapfile -t version_candidates < <(find "${REPO_SOURCE}" -maxdepth 4 -type d $begin:math:text$ \-iname \"rhel\$\{os\_major\}iso\" \-o \-iname \"\*rhel\$\{os\_major\}\*\" $end:math:text$ 2>/dev/null | sort -u || true)
+    for version_root in "${version_candidates[@]}"; do
+      mapfile -t repo_pair < <(resolve_local_repo_pair "${version_root}" || true)
+      if [[ ${#repo_pair[@]} -eq 2 ]]; then
+        BASEOS_SOURCE="${repo_pair[0]}"
+        APPSTREAM_SOURCE="${repo_pair[1]}"
+        return 0
+      fi
+    done
+
+    fail "Unable to find valid BaseOS/AppStream repos with repodata under --repo-source ${REPO_SOURCE}"
+  fi
+
+  for candidate in \
+    "${BUNDLE_ROOT}/extracted_isos/rhel${os_major}iso" \
+    "${BUNDLE_ROOT}/extracted_isos/rhel${os_major}" \
+    "${BUNDLE_ROOT}/rhel${os_major}iso" \
+    "${BUNDLE_ROOT}/rhel${os_major}"; do
+    verbose "Searching repo sources under: ${candidate}"
+    mapfile -t repo_pair < <(resolve_local_repo_pair "${candidate}" || true)
+    if [[ ${#repo_pair[@]} -eq 2 ]]; then
+      BASEOS_SOURCE="${repo_pair[0]}"
+      APPSTREAM_SOURCE="${repo_pair[1]}"
+      info "Detected local repo sources:"
+      info "  BaseOS    : ${BASEOS_SOURCE}"
+      info "  AppStream : ${APPSTREAM_SOURCE}"
+      return 0
+    fi
+  done
+
+  for candidate in \
+    "${BUNDLE_ROOT}/extracted_isos" \
+    "${BUNDLE_ROOT}" \
+    "${BUNDLE_PARENT}"; do
+    verbose "Searching version-specific repo roots under: ${candidate}"
+    [[ -d "${candidate}" ]] || continue
+    mapfile -t version_candidates < <(find "${candidate}" -maxdepth 4 -type d $begin:math:text$ \-iname \"rhel\$\{os\_major\}iso\" \-o \-iname \"\*rhel\$\{os\_major\}\*\" $end:math:text$ 2>/dev/null | sort -u || true)
+    for version_root in "${version_candidates[@]}"; do
+      mapfile -t repo_pair < <(resolve_local_repo_pair "${version_root}" || true)
+      if [[ ${#repo_pair[@]} -eq 2 ]]; then
+        BASEOS_SOURCE="${repo_pair[0]}"
+        APPSTREAM_SOURCE="${repo_pair[1]}"
+        info "Detected local repo sources:"
+        info "  BaseOS    : ${BASEOS_SOURCE}"
+        info "  AppStream : ${APPSTREAM_SOURCE}"
+        return 0
+      fi
+    done
+  done
+
+  return 1
+}
+
+to_baseurl() {
+  local source="$1"
+
+  if is_url "${source}"; then
+    printf '%s' "$(ensure_trailing_slashless "${source}")"
+  else
+    repo_dir_is_valid "${source}" || fail "Local repo path is not valid or missing repodata/repomd.xml: ${source}"
+    printf 'file://%s' "$(cd "${source}" && pwd)"
+  fi
+}
+
+configure_bootstrap_repo_file() {
+  local baseos_baseurl="$1"
+  local appstream_baseurl="$2"
+
+  TEMP_REPO_FILE="$(mktemp /tmp/aerolit-bootstrap-XXXXXX.repo)"
+  TEMP_FILES+=("${TEMP_REPO_FILE}")
+
+  cat > "${TEMP_REPO_FILE}" <<EOF
+[aerolit-bootstrap-baseos]
+name=AeroLIT Bootstrap BaseOS
+baseurl=${baseos_baseurl}
+enabled=1
+gpgcheck=0
+
+[aerolit-bootstrap-appstream]
+name=AeroLIT Bootstrap AppStream
+baseurl=${appstream_baseurl}
+enabled=1
+gpgcheck=0
+EOF
+
+  if [[ "${DRY_RUN}" == true ]]; then
+    info "DRY RUN: would install temporary repo file from ${TEMP_REPO_FILE} to /etc/yum.repos.d/zz-aerolit-bootstrap.repo"
+    cat "${TEMP_REPO_FILE}"
+    return 0
+  fi
+
+  as_root install -m 0644 -- "${TEMP_REPO_FILE}" /etc/yum.repos.d/zz-aerolit-bootstrap.repo
+  TEMP_REPO_FILE="/etc/yum.repos.d/zz-aerolit-bootstrap.repo"
+}
+
+install_ansible_if_needed() {
+  local baseos_baseurl=""
+  local appstream_baseurl=""
+
+  if command -v ansible-playbook >/dev/null 2>&1; then
+    info "ansible-playbook is already available. Skipping ansible-core installation."
+    return 0
+  fi
+
+  if [[ "${SKIP_ANSIBLE_INSTALL}" == true ]]; then
+    fail "ansible-playbook is missing and --skip-ansible-install was used"
+  fi
+
+  need_cmd dnf
+
+  if [[ "${PREFER_BUNDLE_REPOS}" == true ]]; then
+    info "Using bundle BaseOS/AppStream repos first because --prefer-bundle-repos was used."
+    resolve_repo_sources "${OS_MAJOR}" || fail "Unable to locate valid BaseOS/AppStream sources automatically. Use --repo-source or --baseos-source/--appstream-source."
+
+    baseos_baseurl="$(to_baseurl "${BASEOS_SOURCE}")"
+    appstream_baseurl="$(to_baseurl "${APPSTREAM_SOURCE}")"
+
+    configure_bootstrap_repo_file "${baseos_baseurl}" "${appstream_baseurl}"
+
+    if [[ "${DRY_RUN}" == true ]]; then
+      info "DRY RUN: would install ansible-core from bundle bootstrap repos."
+      return 0
+    fi
+
+    as_root dnf --disablerepo='*' \
+      --enablerepo='aerolit-bootstrap-baseos' \
+      --enablerepo='aerolit-bootstrap-appstream' \
+      install -y ansible-core
+
+    command -v ansible-playbook >/dev/null 2>&1 || fail "ansible-playbook is still not available after ansible-core installation"
+    return 0
+  fi
+
+  info "ansible-playbook is not currently installed."
+  info "Trying existing configured repositories first."
+
+  if [[ "${DRY_RUN}" == true ]]; then
+    info "DRY RUN: would try 'dnf install -y ansible-core' using current repos"
+    if resolve_repo_sources "${OS_MAJOR}"; then
+      info "DRY RUN: if current repos were insufficient, would create temporary repo definitions for:"
+      info "  BaseOS    : ${BASEOS_SOURCE}"
+      info "  AppStream : ${APPSTREAM_SOURCE}"
+      info "DRY RUN: would then install ansible-core from those sources"
+    else
+      warn "DRY RUN: no bundle repo sources were auto-detected"
+    fi
+    info "DRY RUN: ansible is not installed, so playbook execution will be skipped"
+    return 0
+  fi
+
+  if as_root dnf install -y ansible-core; then
+    info "Installed ansible-core using existing configured repositories."
+    return 0
+  fi
+
+  warn "Existing configured repositories were not enough to install ansible-core."
+
+  resolve_repo_sources "${OS_MAJOR}" || fail "Unable to locate valid BaseOS/AppStream sources automatically. Use --repo-source or --baseos-source/--appstream-source."
+
+  baseos_baseurl="$(to_baseurl "${BASEOS_SOURCE}")"
+  appstream_baseurl="$(to_baseurl "${APPSTREAM_SOURCE}")"
+
+  configure_bootstrap_repo_file "${baseos_baseurl}" "${appstream_baseurl}"
+
+  info "Installing ansible-core using temporary AeroLIT bootstrap repos."
+  as_root dnf --disablerepo='*' \
+    --enablerepo='aerolit-bootstrap-baseos' \
+    --enablerepo='aerolit-bootstrap-appstream' \
+    install -y ansible-core
+
+  command -v ansible-playbook >/dev/null 2>&1 || fail "ansible-playbook is still not available after ansible-core installation"
+}
+
+###############################################################################
+# 10. Provisioning repo var detection
+###############################################################################
+repo_id_sanitize() {
+  local value="$1"
+  value="${value,,}"
+  value="${value//[^a-z0-9._-]/-}"
+  value="${value#-}"
+  value="${value%-}"
+  printf '%s' "${value}"
+}
+
+infer_rhel_key_from_path() {
+  local path="$1"
+
+  if [[ "${path}" =~ [Rr][Hh][Ee][Ll][-_/]*([0-9]+) ]]; then
+    printf 'rhel%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+
+  return 1
+}
+
+path_under_nfs_export() {
+  local path="$1"
+  [[ "${path}" == "${NFS_EXPORT_PATH}" || "${path}" == "${NFS_EXPORT_PATH}/"* ]]
+}
+
+local_path_to_client_baseurl() {
+  local path="$1"
+  local rel=""
+
+  require_absolute_path_value "local repo path" "${path}"
+  path_under_nfs_export "${path}" || fail "Local provisioning repo path is not under --nfs-export-path, so clients will not see it: ${path}"
+
+  rel="${path#${NFS_EXPORT_PATH}}"
+  rel="${rel#/}"
+
+  if [[ -n "${rel}" ]]; then
+    printf 'file://%s/%s' "${PATH_FOR_ANSIBLE%/}" "${rel}"
+  else
+    printf 'file://%s' "${PATH_FOR_ANSIBLE%/}"
+  fi
+}
+
+repo_source_to_client_baseurl() {
+  local source="$1"
+
+  if is_url "${source}"; then
+    printf '%s' "$(ensure_trailing_slashless "${source}")"
+  else
+    source="$(normalize_local_path "provision repo source" "${source}" "${BUNDLE_ROOT}")"
+    repo_dir_is_valid "${source}" || fail "Provision repo path is missing repodata/repomd.xml: ${source}"
+    local_path_to_client_baseurl "${source}"
+  fi
+}
+
+PROVISION_REPO_RHEL7_FILE=""
+PROVISION_REPO_RHEL8_FILE=""
+PROVISION_REPO_RHEL9_FILE=""
+PROVISION_REPO_RHEL10_FILE=""
+
+init_provision_repo_files() {
+  PROVISION_REPO_RHEL7_FILE="$(make_temp_file)"
+  PROVISION_REPO_RHEL8_FILE="$(make_temp_file)"
+  PROVISION_REPO_RHEL9_FILE="$(make_temp_file)"
+  PROVISION_REPO_RHEL10_FILE="$(make_temp_file)"
+  : > "${PROVISION_REPO_RHEL7_FILE}"
+  : > "${PROVISION_REPO_RHEL8_FILE}"
+  : > "${PROVISION_REPO_RHEL9_FILE}"
+  : > "${PROVISION_REPO_RHEL10_FILE}"
+}
+
+provision_repo_file_for_os() {
+  local os_key="$1"
+
+  case "${os_key}" in
+    rhel7) printf '%s' "${PROVISION_REPO_RHEL7_FILE}" ;;
+    rhel8) printf '%s' "${PROVISION_REPO_RHEL8_FILE}" ;;
+    rhel9) printf '%s' "${PROVISION_REPO_RHEL9_FILE}" ;;
+    rhel10) printf '%s' "${PROVISION_REPO_RHEL10_FILE}" ;;
+    *) fail "Unsupported provisioning repo OS key: ${os_key}" ;;
+  esac
+}
+
+append_provision_repo() {
+  local os_key="$1"
+  local repo_id="$2"
+  local repo_name="$3"
+  local baseurl="$4"
+  local os_file=""
+
+  os_file="$(provision_repo_file_for_os "${os_key}")"
+
+  if [[ -s "${os_file}" ]]; then
+    awk -v id="${repo_id}" '
+      $0 ~ /^    - id: / {
+        if ($0 == "    - id: " id) { skip=1; next }
+        skip=0
+      }
+      skip { next }
+      { print }
+    ' "${os_file}" > "${os_file}.tmp"
+    mv -- "${os_file}.tmp" "${os_file}"
+  fi
+
+  {
+    echo "    - id: ${repo_id}"
+    echo "      name: ${repo_name}"
+    echo "      baseurl: $(yaml_quote "${baseurl}")"
+    echo "      enabled: true"
+    echo "      gpgcheck: false"
+  } >> "${os_file}"
+}
+
+write_grouped_provision_repo_file() {
+  local output_file="$1"
+  local major=""
+  local os_file=""
+
+  echo "aerolit_yum_repositories:" > "${output_file}"
+
+  for major in 7 8 9 10; do
+    os_file="$(provision_repo_file_for_os "rhel${major}")"
+    if [[ -s "${os_file}" ]]; then
+      echo "  rhel${major}:" >> "${output_file}"
+      cat "${os_file}" >> "${output_file}"
+    fi
+  done
+}
+
+add_extra_provision_repos() {
+  local entry=""
+  local left=""
+  local source=""
+  local os_key=""
+  local repo_short=""
+  local repo_id=""
+  local repo_name=""
+  local baseurl=""
+
+  if [[ ${#PROVISION_EXTRA_REPOS[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  for entry in "${PROVISION_EXTRA_REPOS[@]}"; do
+    [[ "${entry}" == *=* ]] || fail "--provision-extra-repo must be OS:ID=PATH_OR_URL: ${entry}"
+    left="${entry%%=*}"
+    source="${entry#*=}"
+    [[ "${left}" == *:* ]] || fail "--provision-extra-repo must be OS:ID=PATH_OR_URL: ${entry}"
+
+    os_key="${left%%:*}"
+    repo_short="${left#*:}"
+    os_key="${os_key,,}"
+
+    [[ "${os_key}" =~ ^rhel(7|8|9|10)$ ]] || fail "--provision-extra-repo OS must be rhel7, rhel8, rhel9, or rhel10: ${entry}"
+    [[ "${repo_short}" =~ ^[A-Za-z0-9._-]+$ ]] || fail "--provision-extra-repo ID must be simple text: ${entry}"
+
+    baseurl="$(repo_source_to_client_baseurl "${source}")"
+    repo_id="aerolit-${os_key}-$(repo_id_sanitize "${repo_short}")"
+    repo_name="AeroLIT ${os_key} ${repo_short}"
+
+    append_provision_repo "${os_key}" "${repo_id}" "${repo_name}" "${baseurl}"
+  done
+}
+
+detect_bundle_provision_repos() {
+  local major=""
+  local root=""
+  local base=""
+  local app=""
+  local repo_path=""
+  local rhel_key=""
+  local repo_name=""
+  local repo_id=""
+  local -a pair=()
+  local output_file=""
+
+  init_provision_repo_files
+  output_file="$(make_temp_file)"
+
+  if [[ "${AUTO_DETECT_PROVISION_REPOS}" == true ]]; then
+    for major in 7 8 9 10; do
+      pair=()
+
+      if [[ "${major}" == "${OS_MAJOR}" && -n "${BASEOS_SOURCE}" && -n "${APPSTREAM_SOURCE}" ]]; then
+        continue
+      fi
+
+      for root in \
+        "${BUNDLE_ROOT}/extracted_isos/rhel${major}iso" \
+        "${BUNDLE_ROOT}/extracted_isos/rhel${major}" \
+        "${BUNDLE_ROOT}/rhel${major}iso" \
+        "${BUNDLE_ROOT}/rhel${major}"; do
+        mapfile -t pair < <(resolve_local_repo_pair "${root}" || true)
+        [[ ${#pair[@]} -eq 2 ]] && break
+      done
+
+      if [[ ${#pair[@]} -eq 2 ]]; then
+        base="${pair[0]}"
+        app="${pair[1]}"
+
+        append_provision_repo \
+          "rhel${major}" \
+          "aerolit-rhel${major}-baseos" \
+          "AeroLIT RHEL${major} BaseOS" \
+          "$(local_path_to_client_baseurl "${base}")"
+
+        append_provision_repo \
+          "rhel${major}" \
+          "aerolit-rhel${major}-appstream" \
+          "AeroLIT RHEL${major} AppStream" \
+          "$(local_path_to_client_baseurl "${app}")"
+      fi
+    done
+
+    if [[ -d "${BUNDLE_ROOT}/repos" ]]; then
+      while IFS= read -r repo_path; do
+        rhel_key="$(infer_rhel_key_from_path "${repo_path}" || true)"
+        [[ -n "${rhel_key}" ]] || continue
+        [[ "${rhel_key}" =~ ^rhel(7|8|9|10)$ ]] || continue
+
+        repo_name="$(basename "${repo_path}")"
+        repo_id="aerolit-${rhel_key}-$(repo_id_sanitize "${repo_name}")"
+
+        append_provision_repo \
+          "${rhel_key}" \
+          "${repo_id}" \
+          "AeroLIT ${rhel_key} ${repo_name}" \
+          "$(local_path_to_client_baseurl "${repo_path}")"
+      done < <(find "${BUNDLE_ROOT}/repos" -type f -path '*/repodata/repomd.xml' 2>/dev/null | while read -r f; do dirname "$(dirname "${f}")"; done | sort -u)
+    fi
+  fi
+
+  if [[ -n "${BASEOS_SOURCE}" && -n "${APPSTREAM_SOURCE}" ]]; then
+    append_provision_repo \
+      "rhel${OS_MAJOR}" \
+      "aerolit-rhel${OS_MAJOR}-baseos" \
+      "AeroLIT RHEL${OS_MAJOR} BaseOS" \
+      "$(repo_source_to_client_baseurl "${BASEOS_SOURCE}")"
+
+    append_provision_repo \
+      "rhel${OS_MAJOR}" \
+      "aerolit-rhel${OS_MAJOR}-appstream" \
+      "AeroLIT RHEL${OS_MAJOR} AppStream" \
+      "$(repo_source_to_client_baseurl "${APPSTREAM_SOURCE}")"
+  fi
+
+  add_extra_provision_repos
+  write_grouped_provision_repo_file "${output_file}"
+
+  echo "${output_file}"
+}
+
+indent_file() {
+  local spaces="$1"
+  local file="$2"
+  sed "s/^/${spaces}/" "${file}"
+}
+
+write_bootstrap_generated_group_vars_file() {
+  local output_file="$1"
+  local repo_vars_file="${2:-}"
+
+  {
+    echo "# UNCLASSIFIED"
+    echo "#"
+    echo "# Generated by AeroLIT bootstrap.sh / bootstrap_controller.sh."
+    echo "# Do not hand-edit this file for local defaults."
+    echo "# Put local/manual defaults in workstation_defaults.yml instead."
+    echo
+
+    if [[ -n "${PATH_FOR_ANSIBLE}" ]]; then
+      echo "path_for_ansible: $(yaml_quote "${PATH_FOR_ANSIBLE}")"
+      echo
+
+      if [[ -n "${NFS_SERVER_IP}" && -n "${NFS_EXPORT_PATH}" ]]; then
+        echo "mount_point_setup_single_site_mounts:"
+        echo "  - path: $(yaml_quote "${PATH_FOR_ANSIBLE}")"
+        echo "    mode: '0755'"
+        echo "    owner: root"
+        echo "    group: root"
+        echo "    src: $(yaml_quote "${NFS_SERVER_IP}:${NFS_EXPORT_PATH}")"
+        echo
+      fi
+    fi
+
+    if [[ -n "${EPEL_APPROVED}" ]]; then
+      echo "enable_epel: ${EPEL_APPROVED}"
+      echo
+    fi
+
+    if [[ -n "${repo_vars_file}" && -s "${repo_vars_file}" ]] && grep -q '^  rhel[0-9]' "${repo_vars_file}"; then
+      cat "${repo_vars_file}"
+      echo
+    fi
+
+    echo "# UNCLASSIFIED"
+  } > "${output_file}"
+}
+
+install_bootstrap_generated_group_vars_file() {
+  local source_file="$1"
+  local dest_file="${GENERATED_GROUP_VARS_FILE}"
+  local dest_dir=""
+
+  [[ -n "${source_file}" && -f "${source_file}" ]] || return 0
+
+  if [[ "${DRY_RUN}" == true ]]; then
+    info "DRY RUN: would write generated bootstrap group vars to ${dest_file}"
+    if [[ "${VERBOSE}" == true ]]; then
+      cat "${source_file}"
+    fi
+    return 0
+  fi
+
+  dest_dir="$(dirname "${dest_file}")"
+
+  as_root mkdir -p -- "${dest_dir}"
+
+  if [[ -f "${dest_file}" ]] && cmp -s "${source_file}" "${dest_file}"; then
+    verbose "Generated bootstrap group vars already up to date: ${dest_file}"
+    return 0
+  fi
+
+  as_root install -m 0644 -- "${source_file}" "${dest_file}"
+  info "Wrote generated bootstrap group vars: ${dest_file}"
+}
+
+###############################################################################
+# 11. Extra vars generation
+###############################################################################
+write_bootstrap_vars_file() {
+  local file
+  file="$(make_temp_file)"
+  {
+    echo "repo_environment_init_repo_root: $(yaml_quote "${COLLECTIONS_HUB_ROOT}")"
+    echo "repo_environment_init_respect_preserve_file: true"
+    echo "repo_environment_init_overwrite_existing: ${OVERWRITE_INITIALIZED_FILES}"
+  } > "${file}"
+  echo "${file}"
+}
+
+write_pxe_vars_file() {
+  local file
+  local dns=""
+
+  file="$(make_temp_file)"
+  : > "${file}"
+
+  if [[ -n "${PXE_SERVER_IP}" ]]; then
+    echo "pxe_content_server_ip: $(yaml_quote "${PXE_SERVER_IP}")" >> "${file}"
+    echo "pxe_dnsmasq_pxe_server_ip: $(yaml_quote "${PXE_SERVER_IP}")" >> "${file}"
+    echo "pxe_dnsmasq_tftp_server_ip: $(yaml_quote "${PXE_SERVER_IP}")" >> "${file}"
+  fi
+
+  if [[ -n "${PXE_HTTP_PORT}" ]]; then
+    echo "pxe_content_host_port: ${PXE_HTTP_PORT}" >> "${file}"
+    echo "pxe_dnsmasq_http_port: ${PXE_HTTP_PORT}" >> "${file}"
+  fi
+
+  [[ -n "${PXE_INTERFACE}" ]] && echo "pxe_dnsmasq_interface: $(yaml_quote "${PXE_INTERFACE}")" >> "${file}"
+  [[ -n "${PXE_DHCP_START}" ]] && echo "pxe_dnsmasq_dhcp_range_start: $(yaml_quote "${PXE_DHCP_START}")" >> "${file}"
+  [[ -n "${PXE_DHCP_END}" ]] && echo "pxe_dnsmasq_dhcp_range_end: $(yaml_quote "${PXE_DHCP_END}")" >> "${file}"
+  [[ -n "${PXE_DHCP_NETMASK}" ]] && echo "pxe_dnsmasq_dhcp_netmask: $(yaml_quote "${PXE_DHCP_NETMASK}")" >> "${file}"
+
+  if [[ -n "${PXE_GATEWAY}" ]]; then
+    if [[ "${PXE_GATEWAY,,}" == "none" ]]; then
+      echo "pxe_dnsmasq_gateway: ''" >> "${file}"
+    else
+      echo "pxe_dnsmasq_gateway: $(yaml_quote "${PXE_GATEWAY}")" >> "${file}"
+    fi
+  fi
+
+  [[ -n "${PXE_ISO_ROOT}" ]] && echo "pxe_content_iso_root: $(yaml_quote "${PXE_ISO_ROOT}")" >> "${file}"
+
+  if [[ -n "${PXE_CONTENT_IMAGE_SOURCE}" ]]; then
+    echo "pxe_content_image_source: $(yaml_quote "${PXE_CONTENT_IMAGE_SOURCE}")" >> "${file}"
+  fi
+  [[ -n "${PXE_CONTENT_IMAGE}" ]] && echo "pxe_content_image: $(yaml_quote "${PXE_CONTENT_IMAGE}")" >> "${file}"
+  [[ -n "${PXE_CONTENT_RUNTIME_IMAGE}" ]] && echo "pxe_content_runtime_image: $(yaml_quote "${PXE_CONTENT_RUNTIME_IMAGE}")" >> "${file}"
+  [[ -n "${PXE_CONTENT_IMAGE_TAR_SRC}" ]] && echo "pxe_content_image_tar_src: $(yaml_quote "${PXE_CONTENT_IMAGE_TAR_SRC}")" >> "${file}"
+  [[ -n "${PXE_CONTENT_IMAGE_TAR_PATH}" ]] && echo "pxe_content_image_tar_path: $(yaml_quote "${PXE_CONTENT_IMAGE_TAR_PATH}")" >> "${file}"
+
+  if [[ ${#PXE_DNS_SERVERS[@]} -gt 0 ]]; then
+    echo "pxe_dnsmasq_dns_servers:" >> "${file}"
+    for dns in "${PXE_DNS_SERVERS[@]}"; do
+      echo "  - $(yaml_quote "${dns}")" >> "${file}"
+    done
+  fi
+
+  echo "${file}"
+}
+
+write_controller_vars_file() {
+  local file
+  local repo_vars_file=""
+  local generated_group_vars_tmp=""
+
+  file="$(make_temp_file)"
+  generated_group_vars_tmp="$(make_temp_file)"
+  GENERATED_GROUP_VARS_SOURCE_FILE="${generated_group_vars_tmp}"
+
+  : > "${file}"
+
+  echo "group_vars_defaults_manage_nfs_mount_defaults: false" >> "${file}"
+  echo "group_vars_defaults_manage_scalar_values: false" >> "${file}"
+  echo "group_vars_defaults_manage_extra_blocks: false" >> "${file}"
+  echo >> "${file}"
+
+  if [[ -n "${NFS_EXPORT_PATH}" ]]; then
+    echo "nfs_server_exports:" >> "${file}"
+    echo "  - path: $(yaml_quote "${NFS_EXPORT_PATH}")" >> "${file}"
+
+    if [[ "${NFS_ALLOW_ALL_CLIENTS}" == true ]]; then
+      echo "    clients: ''" >> "${file}"
+      echo "    allow_all_clients: true" >> "${file}"
+    else
+      echo "    clients: $(yaml_quote "${NFS_ALLOW_CLIENTS}")" >> "${file}"
+      echo "    allow_all_clients: false" >> "${file}"
+    fi
+
+    echo "    create_path: ${NFS_CREATE_EXPORT_PATH}" >> "${file}"
+    echo "    options:" >> "${file}"
+    echo "      - rw" >> "${file}"
+    echo "      - sync" >> "${file}"
+    echo "      - no_subtree_check" >> "${file}"
+    echo >> "${file}"
+  fi
+
+  if [[ -n "${PATH_FOR_ANSIBLE}" ]]; then
+    echo "path_for_ansible: $(yaml_quote "${PATH_FOR_ANSIBLE}")" >> "${file}"
+    echo >> "${file}"
+
+    if [[ -n "${NFS_SERVER_IP}" && -n "${NFS_EXPORT_PATH}" ]]; then
+      echo "mount_point_setup_single_site_mounts:" >> "${file}"
+      echo "  - path: $(yaml_quote "${PATH_FOR_ANSIBLE}")" >> "${file}"
+      echo "    mode: '0755'" >> "${file}"
+      echo "    owner: root" >> "${file}"
+      echo "    group: root" >> "${file}"
+      echo "    src: $(yaml_quote "${NFS_SERVER_IP}:${NFS_EXPORT_PATH}")" >> "${file}"
+      echo >> "${file}"
+    fi
+  fi
+
+  if [[ -n "${EPEL_APPROVED}" ]]; then
+    echo "enable_epel: ${EPEL_APPROVED}" >> "${file}"
+    echo >> "${file}"
+  fi
+
+  if [[ "${MANAGE_PROVISION_REPO_VARS}" == true ]]; then
+    if [[ "${AUTO_DETECT_PROVISION_REPOS}" == true || ${#PROVISION_EXTRA_REPOS[@]} -gt 0 || -n "${BASEOS_SOURCE}" || -n "${APPSTREAM_SOURCE}" ]]; then
+      repo_vars_file="$(detect_bundle_provision_repos)"
+
+      if grep -q '^  rhel[0-9]' "${repo_vars_file}"; then
+        cat "${repo_vars_file}" >> "${file}"
+        echo >> "${file}"
+      else
+        warn "No provisioning repos were detected for generated group_vars."
+      fi
+    fi
+  fi
+
+  write_bootstrap_generated_group_vars_file "${generated_group_vars_tmp}" "${repo_vars_file}"
+
+  echo "${file}"
+}
+
+###############################################################################
+# 12. Ansible runners
+###############################################################################
+run_playbook() {
+  local name="$1"
+  local cfg="$2"
+  local playbook="$3"
+  local vars_file="$4"
+  local use_become="$5"
+  shift 5
+
+  local -a extra_vars=("$@")
+  local -a args=()
+  local item=""
+
+  [[ -f "${cfg}" ]] || fail "Ansible config not found: ${cfg}"
+  [[ -f "${playbook}" ]] || fail "Playbook not found: ${playbook}"
+
+  args+=(ansible-playbook)
+  args+=(-i "${LOCALHOST_INVENTORY}")
+  args+=(-c local)
+
+  if [[ "${use_become}" == true ]]; then
+    args+=(-b)
+  fi
+
+  [[ "${DRY_RUN}" == true ]] && args+=(--check)
+  [[ "${VERBOSE}" == true ]] && args+=(-v)
+
+  [[ -s "${vars_file}" ]] && args+=(-e "@${vars_file}")
+
+  for item in "${extra_vars[@]}"; do
+    args+=(-e "${item}")
+  done
+
+  args+=("${playbook}")
+
+  info
+  info "Running ${name}: $(basename "${playbook}")"
+
+  if [[ "${VERBOSE}" == true || "${DRY_RUN}" == true ]]; then
+    printf 'ANSIBLE CMD: ANSIBLE_CONFIG=%q ' "${cfg}"
+    printf '%q ' "${args[@]}"
+    printf '\n'
+  fi
+
+  (
+    cd "${PLAYBOOKS_DIR}"
+    ANSIBLE_CONFIG="${cfg}" "${args[@]}"
+  )
+}
+
+append_vars_files_as_extra_vars() {
+  local -n target_array="$1"
+  shift
+  local file=""
+
+  for file in "$@"; do
+    target_array+=("@${file}")
+  done
+}
+
+show_summary() {
+  info
+  info "Bootstrap workflow summary"
+  info "Bundle root                : ${BUNDLE_ROOT}"
+  info "Collections hub root       : ${COLLECTIONS_HUB_ROOT}"
+  info "Playbooks dir              : ${PLAYBOOKS_DIR}"
+  info "Bootstrap cfg              : ${BOOTSTRAP_CFG}"
+  info "Main cfg                   : ${MAIN_CFG}"
+  info "Detected OS major          : ${OS_MAJOR}"
+  info "Run bootstrap              : ${RUN_BOOTSTRAP}"
+  info "Run PXE                    : ${RUN_PXE}"
+  info "Run controller             : ${RUN_CONTROLLER}"
+  info "Repo source                : ${REPO_SOURCE:-<auto>}"
+  info "BaseOS source              : ${BASEOS_SOURCE:-<auto>}"
+  info "AppStream source           : ${APPSTREAM_SOURCE:-<auto>}"
+  info "Skip ansible install       : ${SKIP_ANSIBLE_INSTALL}"
+  info "Prefer bundle repos        : ${PREFER_BUNDLE_REPOS}"
+  info "PXE ISO root               : ${PXE_ISO_ROOT:-<not set>}"
+  info "PXE content image source   : ${PXE_CONTENT_IMAGE_SOURCE:-<role default>}"
+  info "PXE content tar source     : ${PXE_CONTENT_IMAGE_TAR_SRC:-<not set>}"
+  info "NFS export path            : ${NFS_EXPORT_PATH}"
+  info "Path for Ansible clients   : ${PATH_FOR_ANSIBLE}"
+  info "Provision repo vars        : ${MANAGE_PROVISION_REPO_VARS}"
+  info "Generated group vars file  : ${GENERATED_GROUP_VARS_FILE}"
+}
+
+###############################################################################
+# 13. Main flow
+###############################################################################
+install_ansible_if_needed
+
+if [[ "${MANAGE_PROVISION_REPO_VARS}" == true && ( -n "${REPO_SOURCE}" || -n "${BASEOS_SOURCE}" || -n "${APPSTREAM_SOURCE}" ) ]]; then
+  resolve_repo_sources "${OS_MAJOR}" || fail "Unable to resolve user-provided repo source for provisioning repo variables."
+fi
+
+if ! command -v ansible-playbook >/dev/null 2>&1; then
+  if [[ "${DRY_RUN}" == true ]]; then
+    info
+    info "DRY RUN: ansible-playbook is not present, so no playbooks were executed."
+    exit 0
+  fi
+  fail "ansible-playbook is required but not available"
+fi
+
+BOOTSTRAP_VARS_FILE="$(write_bootstrap_vars_file)"
+PXE_VARS_FILE="$(make_temp_file)"
+CONTROLLER_VARS_FILE="$(make_temp_file)"
+
+if [[ "${RUN_PXE}" == true ]]; then
+  PXE_VARS_FILE="$(write_pxe_vars_file)"
+fi
+
+if [[ "${RUN_CONTROLLER}" == true ]]; then
+  CONTROLLER_VARS_FILE="$(write_controller_vars_file)"
+fi
+
+append_vars_files_as_extra_vars BOOTSTRAP_EXTRA_VARS "${BOOTSTRAP_EXTRA_VARS_FILES[@]}"
+append_vars_files_as_extra_vars PXE_EXTRA_VARS "${PXE_EXTRA_VARS_FILES[@]}"
+append_vars_files_as_extra_vars CONTROLLER_EXTRA_VARS "${CONTROLLER_EXTRA_VARS_FILES[@]}"
+
+show_summary
+
+if [[ "${RUN_BOOTSTRAP}" == true ]]; then
+  run_playbook \
+    "bootstrap repo environment" \
+    "${BOOTSTRAP_CFG}" \
+    "${BOOTSTRAP_PLAYBOOK}" \
+    "${BOOTSTRAP_VARS_FILE}" \
+    false \
+    "${BOOTSTRAP_EXTRA_VARS[@]}"
+else
+  info "Skipping bootstrap playbook."
+fi
+
+EFFECTIVE_MAIN_CFG="${MAIN_CFG}"
+if [[ ! -f "${EFFECTIVE_MAIN_CFG}" && "${DRY_RUN}" == true ]]; then
+  warn "Generated ansible.cfg does not exist during dry-run. Falling back to bootstrap config: ${BOOTSTRAP_CFG}"
+  EFFECTIVE_MAIN_CFG="${BOOTSTRAP_CFG}"
+fi
+
+if [[ "${RUN_PXE}" == true ]]; then
+  [[ -f "${EFFECTIVE_MAIN_CFG}" ]] || fail "Generated ansible config not found after bootstrap: ${MAIN_CFG}"
+  run_playbook \
+    "PXE server setup" \
+    "${EFFECTIVE_MAIN_CFG}" \
+    "${PXE_PLAYBOOK}" \
+    "${PXE_VARS_FILE}" \
+    true \
+    "${PXE_EXTRA_VARS[@]}"
+else
+  info "Skipping PXE playbook."
+fi
+
+if [[ "${RUN_CONTROLLER}" == true ]]; then
+  [[ -f "${EFFECTIVE_MAIN_CFG}" ]] || fail "Generated ansible config not found after bootstrap: ${MAIN_CFG}"
+
+  install_bootstrap_generated_group_vars_file "${GENERATED_GROUP_VARS_SOURCE_FILE}"
+
+  run_playbook \
+    "Ansible controller setup" \
+    "${EFFECTIVE_MAIN_CFG}" \
+    "${CONTROLLER_PLAYBOOK}" \
+    "${CONTROLLER_VARS_FILE}" \
+    true \
+    "${CONTROLLER_EXTRA_VARS[@]}"
+else
+  info "Skipping controller playbook."
+fi
+
+info
+info "Bootstrap workflow complete."
+
+# UNCLASSIFIED
