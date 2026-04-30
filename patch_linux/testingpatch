@@ -1,0 +1,16 @@
+if [[ "${VERBOSE}" == true || "${DEBUG}" == true ]]; then
+  info
+  info "DEBUG: bootstrap vars file: ${BOOTSTRAP_VARS_FILE}"
+  sed -n '1,220p' "${BOOTSTRAP_VARS_FILE}" || true
+
+  info
+  info "DEBUG: PXE vars file: ${PXE_VARS_FILE}"
+  sed -n '1,220p' "${PXE_VARS_FILE}" || true
+
+  info
+  info "DEBUG: controller vars file: ${CONTROLLER_VARS_FILE}"
+  sed -n '1,260p' "${CONTROLLER_VARS_FILE}" || true
+
+  cp -f "${CONTROLLER_VARS_FILE}" "${BUNDLE_ROOT}/bootstrap_controller_vars_debug.yml"
+  info "DEBUG: copied controller vars to ${BUNDLE_ROOT}/bootstrap_controller_vars_debug.yml"
+fi
