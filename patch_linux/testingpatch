@@ -1,4 +1,27 @@
 
+
+
+
+
+
+
+
+if [[ "${RUN_CONTROLLER}" == true ]]; then
+  CONTROLLER_VARS_FILE="$(write_controller_vars_file)"
+
+  [[ -n "${GENERATED_GROUP_VARS_SOURCE_FILE:-}" ]] || fail "Generated group vars source file was not set"
+  install_bootstrap_generated_group_vars_file "${GENERATED_GROUP_VARS_SOURCE_FILE}"
+fi
+
+
+
+
+
+
+
+
+
+
 write_bootstrap_generated_group_vars_file() {
   local output_file="$1"
   local repo_vars_file="${2:-}"
