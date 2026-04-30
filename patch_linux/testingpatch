@@ -14,3 +14,14 @@ if [[ "${VERBOSE}" == true || "${DEBUG}" == true ]]; then
   cp -f "${CONTROLLER_VARS_FILE}" "${BUNDLE_ROOT}/bootstrap_controller_vars_debug.yml"
   info "DEBUG: copied controller vars to ${BUNDLE_ROOT}/bootstrap_controller_vars_debug.yml"
 fi
+
+
+
+BOOTSTRAP_VARS_FILE="$(write_bootstrap_vars_file)"
+PXE_VARS_FILE="$(write_pxe_vars_file)"
+CONTROLLER_VARS_FILE="$(write_controller_vars_file)"
+
+info "DEBUG: controller vars file: ${CONTROLLER_VARS_FILE}"
+sed -n '1,260p' "${CONTROLLER_VARS_FILE}" || true
+cp -f "${CONTROLLER_VARS_FILE}" "${BUNDLE_ROOT}/bootstrap_controller_vars_debug.yml"
+info "DEBUG: copied controller vars to ${BUNDLE_ROOT}/bootstrap_controller_vars_debug.yml"
