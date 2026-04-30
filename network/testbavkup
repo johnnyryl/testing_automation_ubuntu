@@ -1,0 +1,111 @@
+Yes — I can see the actual issue now.
+
+You did not necessarily mess up the YAML logic. The failure is from Bash scope.
+
+This line runs the function in a subshell:
+
+CONTROLLER_VARS_FILE="$(write_controller_vars_file)"
+
+So this assignment inside write_controller_vars_file() does not survive back into the main script:
+
+GENERATED_GROUP_VARS_SOURCE_FILE="${generated_group_vars_tmp}"
+
+That is why you get:
+
+ERROR: Generated group vars source file was not set
+
+The fix is: create GENERATED_GROUP_VARS_SOURCE_FILE in the main flow before calling write_controller_vars_file(), then let the function write to that already-known file.
+
+⸻
+
+Fix 1 — main flow section
+
+In the section shown in your last screenshot, change this:
+
+BOOTSTRAP_VARS_FILE="$(write_bootstrap_vars_file)"
+PXE_VARS_FILE="$(make_temp_file)"
+CONTROLLER_VARS_FILE="$(make_temp_file)"
+if [[ "${RUN_PXE}" == true ]]; then
+  PXE_VARS_FILE="$(write_pxe_vars_file)"
+fi
+if [[ "${RUN_CONTROLLER}" == true ]]; then
+  CONTROLLER_VARS_FILE="$(write_controller_vars_file)"
+  [[ -n "${GENERATED_GROUP_VARS_SOURCE_FILE:-}" ]] || fail "Generated group vars source file was not set"
+  install_bootstrap_generated_group_vars_file "${GENERATED_GROUP_VARS_SOURCE_FILE}"
+fi
+
+to this:
+
+BOOTSTRAP_VARS_FILE="$(write_bootstrap_vars_file)"
+PXE_VARS_FILE="$(make_temp_file)"
+CONTROLLER_VARS_FILE="$(make_temp_file)"
+GENERATED_GROUP_VARS_SOURCE_FILE="$(make_temp_file)"
+if [[ "${RUN_PXE}" == true ]]; then
+  PXE_VARS_FILE="$(write_pxe_vars_file)"
+fi
+if [[ "${RUN_CONTROLLER}" == true ]]; then
+  CONTROLLER_VARS_FILE="$(write_controller_vars_file)"
+  install_bootstrap_generated_group_vars_file "${GENERATED_GROUP_VARS_SOURCE_FILE}"
+fi
+
+⸻
+
+Fix 2 — write_controller_vars_file()
+
+Do not set GENERATED_GROUP_VARS_SOURCE_FILE inside the function anymore.
+
+Inside write_controller_vars_file(), remove these lines if they exist:
+
+local generated_group_vars_tmp=""
+generated_group_vars_tmp="$(make_temp_file)"
+GENERATED_GROUP_VARS_SOURCE_FILE="${generated_group_vars_tmp}"
+: > "${generated_group_vars_tmp}"
+
+Then near the top of the function, make it look like this:
+
+write_controller_vars_file() {
+  local file
+  local repo_vars_file=""
+  file="$(make_temp_file)"
+  [[ -n "${GENERATED_GROUP_VARS_SOURCE_FILE:-}" ]] || fail "GENERATED_GROUP_VARS_SOURCE_FILE must be set before write_controller_vars_file"
+  : > "${file}"
+  : > "${GENERATED_GROUP_VARS_SOURCE_FILE}"
+  # Do not let group_vars_defaults inject generated bootstrap data into
+  # workstation_defaults.yml. Bootstrap now writes generated group vars directly to:
+  #   collections-hub/ansible/group_vars/all/aerolit_bootstrap_generated.yml
+  {
+    echo "group_vars_defaults_manage_nfs_mount_defaults: false"
+    echo "group_vars_defaults_manage_scalar_values: false"
+    echo "group_vars_defaults_manage_extra_blocks: false"
+    echo
+  } >> "${file}"
+
+Then at the bottom of write_controller_vars_file(), make sure this line uses the parent-created file:
+
+write_bootstrap_generated_group_vars_file "${GENERATED_GROUP_VARS_SOURCE_FILE}" "${repo_vars_file}"
+
+not this:
+
+write_bootstrap_generated_group_vars_file "${generated_group_vars_tmp}" "${repo_vars_file}"
+
+Then keep:
+
+echo "${file}"
+
+as the last line of the function.
+
+⸻
+
+Why this fixes it
+
+The temp file path now exists in the parent shell before this runs:
+
+CONTROLLER_VARS_FILE="$(write_controller_vars_file)"
+
+Even though the function runs in a subshell, it writes actual content to the temp file path that the parent already knows about. After the function returns, this works:
+
+install_bootstrap_generated_group_vars_file "${GENERATED_GROUP_VARS_SOURCE_FILE}"
+
+That should stop the “source file was not set” failure and let it write:
+
+collections-hub/ansible/group_vars/all/aerolit_bootstrap_generated.yml
