@@ -1,0 +1,191 @@
+Yes — with these new photos, I’d make only a few targeted changes in the group_vars_defaults role.
+
+The main goal now is: stop treating workstation_defaults.yml as the bootstrap-generated file and make the role safe/idempotent when writing to:
+
+collections-hub/ansible/group_vars/all/aerolit_bootstrap_generated.yml
+
+1. Fix defaults/main.yml
+
+Your current defaults still point at workstation_defaults.yml, have hardcoded sample NFS values enabled by default, and still reference epel_is_approved.
+
+Update these sections.
+
+Replace this target file default
+
+Current:
+
+group_vars_defaults_file: "{{ playbook_dir }}/../ansible/group_vars/all/workstation_defaults.yml"
+
+Use:
+
+group_vars_defaults_file: "{{ playbook_dir }}/group_vars/all/aerolit_bootstrap_generated.yml"
+
+Change NFS defaults to safe empty defaults
+
+Current default behavior is risky because it has NFS enabled and sample values:
+
+group_vars_defaults_manage_nfs_mount_defaults: true
+group_vars_defaults_nfs_path_for_ansible: /home/unix/sysadmin
+group_vars_defaults_nfs_mounts:
+  - path: /home/unix/sysadmin
+    mode: "0755"
+    owner: root
+    group: root
+    src: "192.168.98.141:/srv/aerolit-bundle"
+
+Change that to:
+
+group_vars_defaults_manage_nfs_mount_defaults: false
+group_vars_defaults_nfs_cleanup_legacy_keys: true
+group_vars_defaults_nfs_marker: "# {mark} MANAGED AEROLIT NFS BUNDLE"
+group_vars_defaults_nfs_path_for_ansible: ""
+group_vars_defaults_nfs_mounts: []
+
+This makes the role safe by default. bootstrap_controller.sh should be the thing passing the real NFS values.
+
+Replace old EPEL example
+
+Current comment/example uses:
+
+# epel_is_approved: true
+
+Change it to:
+
+# enable_epel: true
+
+So this section should look like:
+
+group_vars_defaults_manage_scalar_values: false
+group_vars_defaults_scalar_values: {}
+# Example:
+# group_vars_defaults_manage_scalar_values: true
+# group_vars_defaults_scalar_values:
+#   enable_epel: true
+#   local_repo_enabled: true
+#   workstation_profile: "classified"
+
+2. Fix tasks/validate.yml for extra blocks
+
+Your current validation requires every extra block to use item.block. That is fine, but earlier the script used content, which caused the failure.
+
+You can either enforce block only, or support both block and content.
+
+I’d support both so the role is more forgiving.
+
+Replace the Validate each extra block entry task with this:
+
+- name: Validate each extra block entry
+  ansible.builtin.assert:
+    that:
+      - item.name is defined
+      - item.name | string | length > 0
+      - item.marker is defined
+      - item.marker | string | length > 0
+      - item.block is defined or item.content is defined
+      - (item.block | default(item.content) | string) | length > 0
+    fail_msg: >-
+      Invalid group_vars_defaults_extra_blocks entry:
+      {{ item | to_nice_yaml(indent=2) }}
+      Each extra block must define name, marker, and either block or content.
+  loop: "{{ group_vars_defaults_extra_blocks }}"
+  loop_control:
+    label: "{{ item.name | default('missing-name') }}"
+  when: group_vars_defaults_manage_extra_blocks | bool
+
+3. Fix tasks/extra_blocks.yml
+
+Update this so it also supports either block or content.
+
+Replace the file with:
+
+# UNCLASSIFIED
+- name: Manage generic extra blocks
+  ansible.builtin.blockinfile:
+    path: "{{ group_vars_defaults_file }}"
+    marker: "{{ item.marker }}"
+    insertafter: EOF
+    backup: "{{ group_vars_defaults_backup | bool }}"
+    block: "{{ item.block | default(item.content) }}"
+  loop: "{{ group_vars_defaults_extra_blocks }}"
+  loop_control:
+    label: "{{ item.name }}"
+# UNCLASSIFIED
+
+4. Keep nfs_mount_defaults.yml mostly as-is
+
+Your nfs_mount_defaults.yml looks okay. It removes the old top-level keys and then writes a managed block.
+
+I would not rewrite that right now.
+
+The important part is that it should now write into:
+
+aerolit_bootstrap_generated.yml
+
+not directly into:
+
+workstation_defaults.yml
+
+That prevents the messy repeated blocks you saw earlier.
+
+5. Important warning about file order
+
+Since you chose:
+
+aerolit_bootstrap_generated.yml
+
+instead of:
+
+zz_aerolit_bootstrap_generated.yml
+
+then this file will likely load before:
+
+workstation_defaults.yml
+
+So if both files define the same variable, workstation_defaults.yml may override the generated file.
+
+That means you should remove old generated values from workstation_defaults.yml, especially these:
+
+path_for_ansible:
+mount_point_setup_single_site_mounts:
+enable_epel:
+aerolit_yum_repositories:
+
+At minimum, remove the broken raw marker section:
+
+AEROLIT YUM REPOSITORIES
+aerolit_yum_repositories:
+  ...
+AEROLIT YUM REPOSITORIES
+
+That is invalid YAML and must not stay in workstation_defaults.yml.
+
+The short exact checklist
+
+Make these role changes:
+
+defaults/main.yml
+- Change default target file to aerolit_bootstrap_generated.yml
+- Set group_vars_defaults_manage_nfs_mount_defaults to false
+- Set group_vars_defaults_nfs_path_for_ansible to ""
+- Set group_vars_defaults_nfs_mounts to []
+- Replace epel_is_approved example with enable_epel
+tasks/validate.yml
+- Update extra block validation to allow item.block or item.content
+tasks/extra_blocks.yml
+- Change block line to:
+  block: "{{ item.block | default(item.content) }}"
+
+No major change is needed in these based on the photos:
+
+tasks/main.yml
+tasks/prepare.yml
+tasks/cleanup.yml
+tasks/scalar_values.yml
+tasks/nfs_mount_defaults.yml
+templates/group_vars_defaults_nfs_block.yml.j2
+
+After that, rerun bootstrap once and confirm it creates a clean file here:
+
+cat collections-hub/ansible/group_vars/all/aerolit_bootstrap_generated.yml
+
+That file should contain clean YAML only — no bare marker text lines.
