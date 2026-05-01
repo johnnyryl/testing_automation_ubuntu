@@ -1,1 +1,169 @@
 ../execution_environments/requirements-25.yml
+
+
+
+
+
+
+
+# AeroLIT MR readiness checklist
+#
+# Recommended location:
+#   mr-agent/mr-readiness-checklist.yml
+#
+# Purpose:
+#   This checklist is for AeroLIT / LIT repositories that manage Ansible roles,
+#   GitLab CI/CD components, compliance policies, offline bundles, collections,
+#   integrations, container content, PXE content, repo sync, and RHEL provisioning.
+#
+# Notes:
+#   - readiness_check_status is owned by Mr. Agent during evaluation.
+#   - Keep readiness_check_status set to the string "null".
+#   - Deterministic checks should only fail when the MR visibly violates the rule.
+#   - Vibe checks should look for supporting evidence in the MR description,
+#     comments, pipeline output, logs, screenshots, or changed files.
+#   - Checks should pass when they are clearly not applicable to the MR.
+
+checks_enabled: true
+
+mr_readiness_deterministic:
+  checks:
+    - title: "No Secrets or Sensitive Environment Values"
+      readiness_check_status: "null"
+      objective: "Prevent AeroLIT code, templates, docs, and pipelines from introducing credentials, sensitive environment details, or values that should be supplied through approved configuration."
+      success_criteria: "The MR does not introduce real-looking passwords, tokens, API keys, private keys, certificates with private material, registry credentials, runner identifiers, sensitive hostnames, sensitive IP addresses, classified paths, or environment-specific connection values. Clearly fake examples and placeholders such as <host>, <token>, <registry>, <project>, CHANGEME, or example.invalid are acceptable. Approved shared service references already used by the project are acceptable when they do not contain credentials."
+      failure_criteria: "The MR introduces a real-looking secret, credential, private key, password, access token, fixed sensitive hostname, fixed sensitive IP address, classified path, runner identifier, registry credential, or environment-specific value that should instead come from CI/CD variables, inventory, group_vars, vault, user input, or documented placeholders."
+
+    - title: "GitLab CI and Component Structure Is Preserved"
+      readiness_check_status: "null"
+      objective: "Keep AeroLIT GitLab CI/CD YAML, reusable components, compliance policy includes, and pipeline templates structurally valid and maintainable."
+      success_criteria: "If the MR changes GitLab CI, component, or policy YAML, the structure remains coherent: spec.inputs are still defined where needed, component body YAML remains separated correctly, rules are attached to the intended jobs, includes point to intended files, and indentation does not obviously break the template."
+      failure_criteria: "The MR introduces visibly broken GitLab CI or component structure, such as misplaced spec.inputs, malformed YAML indentation, rules attached to the wrong job, removed required includes, duplicated conflicting job names, or component syntax that appears incomplete."
+
+    - title: "Shared GitLab Components Remain Reusable"
+      readiness_check_status: "null"
+      objective: "Keep AeroLIT GitLab CI/CD components reusable across LIT projects, downstream projects, and disconnected environments."
+      success_criteria: "If the MR changes a reusable GitLab component, the changed behavior is controlled through spec.inputs, CI/CD variables, documented defaults, or clearly scoped rules. Component logic does not depend on one hard-coded project path, branch, schedule name, image, registry, Nexus path, or network unless that value is configurable."
+      failure_criteria: "The MR hard-codes project-specific paths, branch names, schedule descriptions, image references, Nexus paths, registry locations, or network assumptions directly into reusable component logic without exposing them as inputs, variables, or documented configuration."
+
+    - title: "Compliance Enforcement Changes Are Explicitly Scoped"
+      readiness_check_status: "null"
+      objective: "Prevent accidental weakening of AeroLIT compliance policy behavior, linting, release checks, changelog checks, collection generation, or validation workflows."
+      success_criteria: "If the MR adds or changes skip logic, allow_failure, rules:never, exclusions, policy_noop behavior, disabled jobs, or bypass behavior, the change is narrow, intentional, and limited to a specific condition. Required compliance jobs are not silently disabled."
+      failure_criteria: "The MR broadly disables, skips, weakens, hides, or bypasses required compliance behavior without clear scoping. Examples include unconditional allow_failure, broad rules:never, unqualified lint exclusions, disabling policy jobs for all pipelines, or using a placeholder job to mask a real failure."
+
+    - title: "Publishing, Sync, and Schedule Jobs Are Safely Gated"
+      readiness_check_status: "null"
+      objective: "Protect AeroLIT jobs that publish artifacts, upload to Nexus, push branches, sync repositories, trigger downstream pipelines, or update offline packages from running unintentionally."
+      success_criteria: "Jobs that publish, upload, push, sync, mirror, release, or modify downstream state are gated by an explicit trigger such as CI_PIPELINE_SOURCE == 'schedule', a protected branch, a tag rule, a manual rule, a schedule description, or another clear condition."
+      failure_criteria: "The MR allows a publishing, upload, sync, mirror, release, or downstream-update job to run on normal pushes, merge request pipelines, tags, or branches where it was not intended to run."
+
+    - title: "Offline and Restricted-Network Path Is Preserved"
+      readiness_check_status: "null"
+      objective: "Keep AeroLIT usable in offline, air-gapped, disconnected, and restricted-network environments."
+      success_criteria: "The MR does not make an existing offline workflow depend on public internet access, live external repositories, dynamic downloads, unapproved registries, or online-only services. If online behavior is added, it is optional or configurable and the offline path remains available."
+      failure_criteria: "The MR makes an existing offline workflow require public internet access, live package repositories, online registries, live downloads, external APIs, or online-only services without preserving a local, bundled, mirrored, or configurable alternative."
+
+    - title: "Offline Bundle Layout Remains Compatible"
+      readiness_check_status: "null"
+      objective: "Protect the expected AeroLIT offline bundle structure used by bootstrap, collections-hub, files, repos, extracted ISOs, PXE content, and Ansible controller setup."
+      success_criteria: "If the MR changes bundle packaging, extraction, bootstrap, repo setup, PXE content, or controller setup, all affected references remain aligned. Expected locations such as collections-hub, files, repos, extracted-isos, bootstrap.sh, files/pxe, and generated bootstrap config files are either preserved or updated consistently."
+      failure_criteria: "The MR renames, moves, extracts, packages, or references bundle content inconsistently. Examples include changing a path in one script but not another, extracting tar content into the wrong directory, breaking files/pxe placement, changing collections-hub layout without updating consumers, or leaving stale path references."
+
+    - title: "Generated and User-Editable Config Ownership Is Clear"
+      readiness_check_status: "null"
+      objective: "Prevent AeroLIT-generated files from accidentally overwriting user-maintained configuration."
+      success_criteria: "If the MR changes generated config, defaults, inventory, group_vars, bootstrap variables, or sync-preserved files, the ownership and precedence are clear. User-editable files are not overwritten unless the behavior is intentional and documented."
+      failure_criteria: "The MR introduces unclear variable precedence, overwrites user-editable configuration, removes a required generated file from preservation logic, or causes bootstrap-generated values to replace local values without a clear precedence model."
+
+    - title: "Ansible Changes Remain Idempotent"
+      readiness_check_status: "null"
+      objective: "Ensure AeroLIT Ansible roles and playbooks can run repeatedly without creating duplicate content, unnecessary changes, or broken system state."
+      success_criteria: "If the MR changes Ansible tasks, the tasks use idempotent modules or safe guards such as creates, removes, changed_when, failed_when, check_mode handling, conditions, handlers, or service notifications where appropriate."
+      failure_criteria: "The MR introduces Ansible tasks that always report changed, append duplicate content, restart services unnecessarily, repeatedly modify files, rerun destructive commands, or use shell/command without appropriate guards when an idempotent module or guard is practical."
+
+    - title: "Privileged or Destructive Actions Have Safeguards"
+      readiness_check_status: "null"
+      objective: "Protect systems from unsafe automation that removes files, replaces repositories, modifies boot content, changes services, alters mounts, or updates system-level configuration."
+      success_criteria: "If the MR adds privileged or destructive behavior, it includes safeguards such as dry-run support, backup or restore behavior, explicit target paths, confirmation variables, narrow conditions, validation steps, or clear failure handling."
+      failure_criteria: "The MR adds commands or tasks that delete, overwrite, move, chmod, chown, mount, unmount, disable repos, replace repo files, restart critical services, or alter boot/PXE content without clear safeguards or target scoping."
+
+    - title: "RHEL Version Scope Is Explicit"
+      readiness_check_status: "null"
+      objective: "Ensure OS-specific AeroLIT behavior handles RHEL 8, RHEL 9, and RHEL 10 intentionally."
+      success_criteria: "If the MR changes OS-specific behavior, it uses explicit RHEL major version checks, variables, directory names, defaults, role logic, or documented support boundaries. Version-specific behavior is scoped to the intended RHEL version."
+      failure_criteria: "The MR introduces OS behavior that assumes one RHEL version while affecting multiple versions, mixes RHEL 8/9/10 paths incorrectly, uses ambiguous version detection, or changes version-specific behavior without clear gating."
+
+    - title: "Unexpected Generated or Binary Artifacts Are Not Committed"
+      readiness_check_status: "null"
+      objective: "Keep AeroLIT repositories clean by preventing accidental commits of generated bundles, extracted archives, logs, RPM payloads, ISO content, temporary files, or build output."
+      success_criteria: "The MR does not introduce generated archives, extracted repo content, ISO trees, RPM payloads, logs, cache directories, temporary files, local test output, or build artifacts unless the repository intentionally stores that type of content and the file location is appropriate."
+      failure_criteria: "The MR accidentally commits generated tar files, extracted bundle content, repo trees, ISO contents, logs, cache files, local test output, temporary files, or build artifacts that should be produced by pipelines, stored in Nexus, ignored, or generated at runtime."
+
+    - title: "User-Facing Inputs and Commands Are Documented"
+      readiness_check_status: "null"
+      objective: "Prevent AeroLIT users from needing to reverse-engineer new variables, component inputs, script flags, bundle item types, role tags, playbook options, or required manual steps."
+      success_criteria: "If the MR adds or changes a user-facing variable, spec input, script flag, required directory, required file, playbook option, role tag, schedule variable, bundle item type, or manual command, the relevant README, COMPONENTS.md, defaults comments, example YAML, or usage documentation is updated."
+      failure_criteria: "The MR adds or changes user-facing behavior without updating relevant documentation, examples, default comments, or usage guidance."
+
+mr_readiness_vibe:
+  checks:
+    - title: "MR Explains the AeroLIT Workflow Impact"
+      readiness_check_status: "null"
+      objective: "Make sure reviewers understand what AeroLIT workflow is affected and why the change exists."
+      success_criteria: "The MR description or comments identify the affected AeroLIT workflow, such as provisioning, STIG compliance, patching, repo sync, offline bundle creation, PXE content, collections-hub generation, GitLab component reuse, changelog/release automation, compliance policy execution, Ansible role behavior, or containerized content."
+      failure_criteria: "The MR does not explain which AeroLIT workflow is affected, why the change is needed, or what problem it solves."
+
+    - title: "Validation Evidence Is Provided"
+      readiness_check_status: "null"
+      objective: "Ensure changes to automation, provisioning, packaging, compliance, pipelines, or offline workflows include useful proof before merging."
+      success_criteria: "The MR includes relevant evidence such as passing pipeline links, job names, logs, screenshots, dry-run output, ansible-playbook output, ansible-lint output, markdownlint output, package build output, Nexus upload output, repo makecache output, PXE curl validation, Molecule output, OSCAP/SCC output, or a clear explanation of why validation could not be run."
+      failure_criteria: "The MR changes executable automation, packaging, provisioning, compliance, or pipeline behavior but provides no test evidence, no pipeline evidence, no dry-run evidence, and no explanation for missing validation."
+
+    - title: "Offline Bundle Impact Is Addressed"
+      readiness_check_status: "null"
+      objective: "Ensure reviewers understand whether the change affects AeroLIT offline bundles or disconnected installation workflows."
+      success_criteria: "The MR states whether the offline bundle is affected. If affected, it identifies the affected area, such as collections-hub, files, repos, extracted-isos, bootstrap.sh, PXE content, local repo setup, controller setup, generated manifests, or package components."
+      failure_criteria: "The MR affects offline package content, bootstrap behavior, repo setup, extracted ISO usage, PXE content, or controller setup but does not explain the offline impact."
+
+    - title: "Compliance and A&A Impact Is Considered"
+      readiness_check_status: "null"
+      objective: "Protect AeroLIT compliance outcomes by making sure STIG, OSCAP, SCC, A&A evidence, approvals, releases, and auditability are considered."
+      success_criteria: "The MR states whether compliance behavior is affected. If affected, it explains the impact on STIG remediation, OSCAP/SCC validation, A&A certification output, audit evidence, approval flow, pipeline evidence, tags, or release artifacts."
+      failure_criteria: "The MR changes compliance policy, STIG logic, validation behavior, release evidence, approval requirements, or A&A-related output without explaining the compliance impact."
+
+    - title: "Downstream Consumer Impact Is Considered"
+      readiness_check_status: "null"
+      objective: "Ensure shared AeroLIT changes remain safe for projects that consume centralized roles, components, collections, resources, integrations, containers, or offline packages."
+      success_criteria: "The MR considers affected downstream consumers such as Compliance Center projects, role projects, collection projects, collections-hub consumers, integration projects, container projects, resources projects, workstation-config repositories, offline bundle users, or network-specific deployments."
+      failure_criteria: "The MR changes shared behavior without addressing downstream consumers, compatibility expectations, required migration steps, or project-specific assumptions."
+
+    - title: "Variable Precedence and Override Behavior Are Explained"
+      readiness_check_status: "null"
+      objective: "Avoid confusion when defaults, group_vars, inventory, generated bootstrap variables, CI/CD variables, extra vars, and user-provided overrides interact."
+      success_criteria: "The MR explains or preserves the intended precedence order for changed variables. New variables have clear names, defaults, and override behavior. Surprising precedence changes are documented."
+      failure_criteria: "The MR introduces or changes variables without explaining where they are set, how users override them, or whether they take precedence over existing defaults, group_vars, inventory, generated files, CI/CD variables, or extra vars."
+
+    - title: "Failure and Rollback Path Is Understandable"
+      readiness_check_status: "null"
+      objective: "Ensure operators know how to recover if the change breaks a pipeline, role, repo setup, bundle, PXE service, controller setup, or provisioning workflow."
+      success_criteria: "When appropriate, the MR includes a practical recovery path such as reverting the MR, restoring repo file backups, using a previous release artifact, disabling an optional feature, using --restore, running dry-run first, rerunning a safe command, or falling back to a previous bundle, image, component, or collection version."
+      failure_criteria: "The MR changes operational behavior but provides no practical recovery path, rollback note, safe fallback, or explanation for how to recover."
+
+    - title: "Security Boundary Is Preserved"
+      readiness_check_status: "null"
+      objective: "Protect AeroLIT’s security model across privileged automation, root access, offline content, CI/CD tokens, package sources, repo trust, and audit evidence."
+      success_criteria: "The MR preserves least privilege, keeps tokens in protected mechanisms, avoids unnecessary root behavior, avoids broad permissions, maintains trusted package-source behavior, and preserves useful audit or pipeline evidence."
+      failure_criteria: "The MR expands privileges, exposes tokens, weakens access controls, makes package sources less trustworthy, removes useful audit evidence, or introduces privileged behavior without explanation."
+
+    - title: "Release, Changelog, and Artifact Impact Is Covered"
+      readiness_check_status: "null"
+      objective: "Keep AeroLIT semantic versioning, changelog generation, GitLab releases, collection generation, image builds, and offline package publication aligned."
+      success_criteria: "The MR states whether it requires a changelog entry, version bump, GitLab release, collection regeneration, offline package rebuild, image rebuild, Nexus upload, or downstream artifact update. Required release follow-up work is listed."
+      failure_criteria: "The MR changes behavior that users consume but does not mention release, changelog, versioning, collections, images, packages, Nexus artifacts, or offline bundle impact."
+
+    - title: "Review Scope Is Focused"
+      readiness_check_status: "null"
+      objective: "Keep AeroLIT MRs reviewable and safe to roll back by avoiding unrelated changes."
+      success_criteria: "The MR is focused on one related change set. Cleanup, formatting, renaming, refactoring, documentation, policy, role, packaging, and script changes are directly related to the main purpose or clearly explained."
+      failure_criteria: "The MR combines unrelated feature work, formatting cleanup, refactoring, documentation changes, policy changes, role changes, packaging changes, and operational script changes in a way that makes review or rollback difficult."
