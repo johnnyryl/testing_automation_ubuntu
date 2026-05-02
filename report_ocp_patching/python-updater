@@ -1,0 +1,978 @@
+"""
+AeroLIT bootstrap network helper.
+
+This helper walks a user through the network choices needed by bootstrap.sh and
+prints a ready-to-run command. By default, it does not change the system.
+
+Python compatibility note:
+  This script intentionally supports Python 3.6+ for RHEL 8/platform-python.
+  Avoid Python 3.9+ syntax such as list[str] and Python 3.10+ syntax such as
+  str | None.
+
+Supported bootstrap network options covered by this helper:
+  --skip-pxe
+  --skip-controller
+  --pxe-server-ip
+  --pxe-http-port
+  --pxe-interface
+  --pxe-dhcp-start
+  --pxe-dhcp-end
+  --pxe-dhcp-netmask
+  --pxe-gateway
+  --pxe-dns
+  --nfs-server-ip
+  --nfs-allow-clients
+  --nfs-allow-all-clients
+"""
+
+import argparse
+import ipaddress
+import json
+import math
+import os
+import shutil
+import subprocess
+import sys
+
+
+DEFAULT_HTTP_PORT = 18080
+MIN_PXE_PREFIXLEN = 29
+PRIVATE_LAB_NETWORKS = [
+    ("192.168.109.0/24", "AeroLIT-style isolated lab subnet"),
+    ("192.168.98.0/24", "close to the example values"),
+    ("192.168.1.0/24", "common home/lab subnet; avoid if your home router already uses it"),
+    ("10.0.0.0/24", "simple 10.x lab subnet"),
+    ("10.16.0.0/24", "another common private lab subnet"),
+    ("172.16.10.0/24", "private 172.16/12 lab subnet"),
+]
+
+RFC1918_NETWORKS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+]
+
+
+class InterfaceInfo(object):
+    def __init__(self, name, state, addresses):
+        self.name = name
+        self.state = state
+        self.addresses = addresses
+
+
+class RunMode(object):
+    def __init__(self, run_pxe, run_controller):
+        self.run_pxe = run_pxe
+        self.run_controller = run_controller
+
+
+class NetworkPlan(object):
+    def __init__(
+        self,
+        interface_name,
+        interface_current_addr,
+        network,
+        server_ip,
+        dhcp_start,
+        dhcp_end,
+        gateway,
+        dns_servers,
+        nfs_server_ip,
+        nfs_allow_clients,
+        nfs_allow_all_clients,
+        pxe_http_port,
+        include_nmcli_setup,
+    ):
+        self.interface_name = interface_name
+        self.interface_current_addr = interface_current_addr
+        self.network = network
+        self.server_ip = server_ip
+        self.dhcp_start = dhcp_start
+        self.dhcp_end = dhcp_end
+        self.gateway = gateway
+        self.dns_servers = dns_servers
+        self.nfs_server_ip = nfs_server_ip
+        self.nfs_allow_clients = nfs_allow_clients
+        self.nfs_allow_all_clients = nfs_allow_all_clients
+        self.pxe_http_port = pxe_http_port
+        self.include_nmcli_setup = include_nmcli_setup
+
+
+# ---------------------------------------------------------------------------
+# Compatibility helpers
+# ---------------------------------------------------------------------------
+def network_is_subnet_of(network, parent):
+    """Python 3.6 compatible replacement for IPv4Network.subnet_of()."""
+    return network.version == parent.version and network.network_address in parent and network.broadcast_address in parent
+
+
+def is_rfc1918(network):
+    return any(network_is_subnet_of(network, private_network) for private_network in RFC1918_NETWORKS)
+
+
+# ---------------------------------------------------------------------------
+# Command helpers
+# ---------------------------------------------------------------------------
+def run_json(cmd):
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+        return json.loads(result.stdout)
+    except Exception:
+        return []
+
+
+def get_default_route():
+    routes = run_json(["ip", "-j", "-4", "route", "show", "default"])
+    if not routes:
+        return {}
+    route = routes[0]
+    return {
+        "dev": str(route.get("dev", "")),
+        "gateway": str(route.get("gateway", "")),
+    }
+
+
+def get_interfaces():
+    links = run_json(["ip", "-j", "link", "show"])
+    addrs = run_json(["ip", "-j", "-4", "addr", "show", "scope", "global"])
+
+    addr_map = {}
+    for item in addrs:
+        ifname = str(item.get("ifname", ""))
+        for addr in item.get("addr_info", []):
+            local = addr.get("local")
+            prefixlen = addr.get("prefixlen")
+            if local and prefixlen is not None:
+                try:
+                    parsed = ipaddress.ip_interface("{}/{}".format(local, prefixlen))
+                    if isinstance(parsed, ipaddress.IPv4Interface):
+                        addr_map.setdefault(ifname, []).append(parsed)
+                except ValueError:
+                    pass
+
+    interfaces = []
+    for link in links:
+        ifname = str(link.get("ifname", ""))
+        if ifname == "lo" or not ifname:
+            continue
+        interfaces.append(
+            InterfaceInfo(
+                name=ifname,
+                state=str(link.get("operstate", "UNKNOWN")),
+                addresses=addr_map.get(ifname, []),
+            )
+        )
+
+    return interfaces
+
+
+# ---------------------------------------------------------------------------
+# Prompt helpers
+# ---------------------------------------------------------------------------
+def read_user_input(rendered_prompt):
+    try:
+        return input(rendered_prompt)
+    except EOFError:
+        raise SystemExit("ERROR: interactive input ended before the helper completed.")
+
+
+def prompt(text, default=None, allow_blank=False):
+    suffix = " [{}]".format(default) if default not in (None, "") else ""
+    while True:
+        value = read_user_input("{}{}: ".format(text, suffix)).strip()
+        if value == "" and default is not None:
+            return default
+        if value == "" and allow_blank:
+            return ""
+        if value != "":
+            return value
+        print("This value is required. Enter a value or press Ctrl+C to cancel.")
+
+
+def yes_no(text, default=True):
+    default_text = "Y/n" if default else "y/N"
+    while True:
+        value = read_user_input("{} [{}]: ".format(text, default_text)).strip().lower()
+        if value == "":
+            return default
+        if value in {"y", "yes"}:
+            return True
+        if value in {"n", "no"}:
+            return False
+        print("Please answer yes or no. Valid responses are: y, yes, n, no.")
+
+
+def choose(text, options, default_index=0):
+    if not options:
+        raise ValueError("choose() requires at least one option")
+
+    default_index = max(0, min(default_index, len(options) - 1))
+    print()
+    print(text)
+    for idx, option in enumerate(options, start=1):
+        marker = "* " if idx - 1 == default_index else "  "
+        print("{}{}) {}".format(marker, idx, option))
+
+    while True:
+        value = read_user_input("Choose 1-{} [{}]: ".format(len(options), default_index + 1)).strip()
+        if value == "":
+            return default_index
+        if value.isdigit():
+            parsed = int(value)
+            if 1 <= parsed <= len(options):
+                return parsed - 1
+        print("Invalid selection: {}. Choose a number from 1 through {}.".format(value or "<blank>", len(options)))
+
+
+def prompt_int(text, default, minimum=1, maximum=None):
+    while True:
+        value = prompt(text, str(default))
+        try:
+            parsed = int(value)
+        except ValueError:
+            parsed = minimum - 1
+
+        if parsed < minimum:
+            if maximum is None:
+                print("Invalid value: {}. Enter a whole number greater than or equal to {}.".format(value, minimum))
+            else:
+                print("Invalid value: {}. Enter a whole number between {} and {}.".format(value, minimum, maximum))
+            continue
+
+        if maximum is not None and parsed > maximum:
+            print("Invalid value: {}. Enter a whole number between {} and {}.".format(value, minimum, maximum))
+            continue
+
+        return parsed
+
+
+def require_pxe_sized_network(network):
+    return network.prefixlen <= MIN_PXE_PREFIXLEN and network.num_addresses >= 8
+
+
+def network_size_reason(network):
+    return "{} only has {} normally usable host addresses".format(network, max(network.num_addresses - 2, 0))
+
+
+def prompt_network(text, default, require_private=False, require_pxe_size=False):
+    while True:
+        value = prompt(text, default)
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+            if not isinstance(network, ipaddress.IPv4Network):
+                raise ValueError
+
+            if require_pxe_size and not require_pxe_sized_network(network):
+                print("Invalid PXE network: {}.".format(network_size_reason(network)))
+                print("Use /29 or larger, such as 192.168.109.0/24, so there is room for the server, gateway, and DHCP clients.")
+                continue
+
+            if require_private and not is_rfc1918(network):
+                print("{} is not an RFC1918 private network.".format(network))
+                print("For an isolated lab/provisioning subnet, use 10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16 space.")
+                continue
+
+            return network
+        except ValueError:
+            print("Enter a valid IPv4 network in CIDR form, such as 192.168.109.0/24.")
+
+
+def prompt_ip(text, default, network=None, reserved=None, reserved_label="reserved"):
+    reserved = reserved or set()
+    while True:
+        value = prompt(text, default)
+        try:
+            parsed = ipaddress.ip_address(value)
+            if not isinstance(parsed, ipaddress.IPv4Address):
+                raise ValueError
+            if network and parsed not in network:
+                print("Invalid IP: {} is not inside {}.".format(parsed, network))
+                continue
+            # For /31 and /32 networks, RFC 3021-style host behavior means
+            # ipaddress.hosts() treats these addresses as usable. Do not reject
+            # them as network/broadcast unless the network is /30 or larger.
+            if network and network.prefixlen < 31 and (parsed == network.network_address or parsed == network.broadcast_address):
+                print("Invalid IP: {} cannot be the network or broadcast address for {}.".format(parsed, network))
+                continue
+            if parsed in reserved:
+                print("Invalid IP: {} is already being used for {}.".format(parsed, reserved_label))
+                continue
+            return parsed
+        except ValueError:
+            print("Enter a valid IPv4 address, such as 192.168.109.10.")
+
+
+def parse_ipv4(value):
+    try:
+        parsed = ipaddress.ip_address(value)
+        if isinstance(parsed, ipaddress.IPv4Address):
+            return parsed
+    except ValueError:
+        return None
+    return None
+
+
+def prompt_gateway(default, network, server_ip):
+    while True:
+        value = prompt("PXE gateway IP, or 'none'", default).strip().lower()
+        if value in {"none", "no", "disabled"}:
+            return "none"
+
+        parsed = parse_ipv4(value)
+        if parsed is None:
+            print("Enter a valid IPv4 gateway IP or 'none'.")
+            continue
+
+        if parsed == server_ip:
+            print("The PXE gateway cannot be the same address as the PXE server. Use 'none' for an isolated lab with no gateway.")
+            continue
+
+        if parsed not in network:
+            print("WARNING: {} is not inside {}.".format(parsed, network))
+            print("PXE clients usually need a gateway in their own subnet. This is unusual unless you have a routed design.")
+            if yes_no("Keep this gateway anyway?", False):
+                return str(parsed)
+            continue
+
+        if network.prefixlen < 31 and (parsed == network.network_address or parsed == network.broadcast_address):
+            print("Invalid gateway: {} cannot be the network or broadcast address for {}.".format(parsed, network))
+            continue
+
+        return str(parsed)
+
+
+def prompt_dns_server(existing):
+    while True:
+        value = prompt("DNS server IP, blank when done", "", allow_blank=True)
+        if value == "":
+            return ""
+        parsed = parse_ipv4(value)
+        if parsed is None:
+            print("Enter a valid IPv4 DNS server IP, such as 192.168.109.1.")
+            continue
+        parsed_text = str(parsed)
+        if parsed_text in existing:
+            print("{} is already in the DNS server list.".format(parsed_text))
+            continue
+        return parsed_text
+
+
+def prompt_nfs_client_spec(default):
+    while True:
+        value = prompt("NFS allowed clients CIDR or single IP", default)
+
+        parsed_ip = parse_ipv4(value)
+        if parsed_ip is not None:
+            return str(parsed_ip)
+
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+            if isinstance(network, ipaddress.IPv4Network):
+                if network.prefixlen == 0:
+                    print("0.0.0.0/0 allows every IPv4 client. Use the 'allow all clients' option instead so the generated command is explicit.")
+                    continue
+                return str(network)
+        except ValueError:
+            pass
+
+        print("Enter a valid IPv4 CIDR like 192.168.109.0/24 or a single IPv4 address like 192.168.109.25.")
+
+
+# ---------------------------------------------------------------------------
+# IP math helpers
+# ---------------------------------------------------------------------------
+def dotted_netmask(network):
+    return str(network.netmask)
+
+
+def usable_host_bounds(network):
+    """Return normal first/last usable host integer values without expanding hosts()."""
+    if network.prefixlen >= 31:
+        first = int(network.network_address)
+        last = int(network.broadcast_address)
+    else:
+        first = int(network.network_address) + 1
+        last = int(network.broadcast_address) - 1
+    return first, last
+
+
+def usable_host_count(network):
+    first, last = usable_host_bounds(network)
+    return max(last - first + 1, 0)
+
+
+def default_server_ip(network):
+    first, last = usable_host_bounds(network)
+    if first > last:
+        raise SystemExit("Network {} has no usable host addresses.".format(network))
+
+    preferred_host_numbers = [10, 5, 2, 1]
+    for host_number in preferred_host_numbers:
+        candidate = int(network.network_address) + host_number
+        if first <= candidate <= last:
+            return ipaddress.ip_address(candidate)
+
+    return ipaddress.ip_address(first)
+
+
+def max_dhcp_clients(network, reserved_count=1):
+    return max(usable_host_count(network) - reserved_count, 1)
+
+
+def subtract_reserved_from_ranges(ranges, reserved_values):
+    result = ranges[:]
+    for reserved in sorted(reserved_values):
+        next_result = []
+        for start, end in result:
+            if reserved < start or reserved > end:
+                next_result.append((start, end))
+                continue
+            if start <= reserved - 1:
+                next_result.append((start, reserved - 1))
+            if reserved + 1 <= end:
+                next_result.append((reserved + 1, end))
+        result = next_result
+    return result
+
+
+def suggest_dhcp_range(network, server_ip, requested_clients, gateway_ip=None):
+    first, last = usable_host_bounds(network)
+    if first > last:
+        raise SystemExit("Network {} is too small for a PXE/DHCP range.".format(network))
+
+    reserved = {int(server_ip)}
+    if gateway_ip is not None:
+        reserved.add(int(gateway_ip))
+
+    ranges = subtract_reserved_from_ranges([(first, last)], reserved)
+    total_available = sum(end - start + 1 for start, end in ranges)
+    if total_available < 2:
+        raise SystemExit("Network {} is too small for a PXE/DHCP range.".format(network))
+
+    target_size = requested_clients + max(10, int(math.ceil(requested_clients * 0.20)))
+    target_size = min(target_size, total_available)
+
+    preferred_starts = [100, 50, 20, 2, 1]
+
+    def range_len(item):
+        return item[1] - item[0] + 1
+
+    for host_number in preferred_starts:
+        candidate_start = int(network.network_address) + host_number
+        for range_start, range_end in ranges:
+            if range_start <= candidate_start <= range_end:
+                end = min(range_end, candidate_start + target_size - 1)
+                if end - candidate_start + 1 >= min(target_size, range_len((range_start, range_end))):
+                    return ipaddress.ip_address(candidate_start), ipaddress.ip_address(end)
+
+    best_start, best_end = max(ranges, key=range_len)
+    end = min(best_end, best_start + target_size - 1)
+    return ipaddress.ip_address(best_start), ipaddress.ip_address(end)
+
+
+def parse_gateway_ip(value, network):
+    if not value or value.lower() == "none":
+        return None
+    parsed = parse_ipv4(value)
+    if parsed and parsed in network:
+        return parsed
+    return None
+
+
+def prompt_dhcp_range(network, server_ip, gateway_ip):
+    reserved = {server_ip}
+    if gateway_ip is not None:
+        reserved.add(gateway_ip)
+
+    max_clients = max_dhcp_clients(network, len(reserved))
+    client_count = prompt_int(
+        "How many machines should the DHCP range support eventually?",
+        min(50, max_clients),
+        1,
+        max_clients,
+    )
+    suggested_start, suggested_end = suggest_dhcp_range(network, server_ip, client_count, gateway_ip)
+
+    while True:
+        dhcp_start = prompt_ip(
+            "DHCP range start",
+            str(suggested_start),
+            network,
+            reserved=reserved,
+            reserved_label="the server or gateway",
+        )
+        dhcp_end = prompt_ip(
+            "DHCP range end",
+            str(suggested_end),
+            network,
+            reserved=reserved,
+            reserved_label="the server or gateway",
+        )
+
+        if int(dhcp_end) < int(dhcp_start):
+            print("Invalid DHCP range: the end address must be greater than or equal to the start address.")
+            print("Re-enter the DHCP range.")
+            continue
+
+        if dhcp_start <= server_ip <= dhcp_end:
+            print("Invalid DHCP range: it includes the PXE/NFS server IP {}.".format(server_ip))
+            print("The DHCP pool should only contain client addresses. Re-enter the DHCP range.")
+            continue
+
+        if gateway_ip is not None and dhcp_start <= gateway_ip <= dhcp_end:
+            print("Invalid DHCP range: it includes the gateway IP {}.".format(gateway_ip))
+            print("The DHCP pool should only contain client addresses. Re-enter the DHCP range.")
+            continue
+
+        return dhcp_start, dhcp_end
+
+
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+def sh_quote(value):
+    if value == "":
+        return "''"
+    safe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/:=-"
+    if all(char in safe for char in value):
+        return value
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def format_command(command_path, args):
+    pieces = [sh_quote(command_path)]
+    for flag, value in args:
+        if value is None:
+            pieces.append(flag)
+        else:
+            pieces.append("{} {}".format(flag, sh_quote(value)))
+
+    if len(pieces) == 1:
+        return pieces[0]
+
+    lines = [pieces[0] + " \\"]
+    for idx, piece in enumerate(pieces[1:], start=1):
+        continuation = " \\" if idx < len(pieces) - 1 else ""
+        lines.append("  {}{}".format(piece, continuation))
+    return "\n".join(lines)
+
+
+def find_default_interface_index(interfaces, default_dev):
+    for idx, interface in enumerate(interfaces):
+        if interface.name == default_dev:
+            return idx
+    for idx, interface in enumerate(interfaces):
+        if interface.addresses:
+            return idx
+    return 0
+
+
+def print_interface_summary(interfaces):
+    labels = []
+    for interface in interfaces:
+        if interface.addresses:
+            addr_text = ", ".join(str(addr) for addr in interface.addresses)
+        else:
+            addr_text = "no IPv4 address detected"
+        labels.append("{}  state={}  {}".format(interface.name, interface.state, addr_text))
+    return labels
+
+
+def format_nmcli_setup(interface_name, server_interface):
+    address = str(server_interface)
+    con_name = "aerolit-provisioning-{}".format(interface_name)
+    return """# Optional: configure the selected interface with the planned PXE/NFS IP.
+# Review this before running. It adds the address if an active NetworkManager
+# connection exists; otherwise it creates a simple manual connection.
+CONNECTION_NAME=\"$(nmcli -g GENERAL.CONNECTION device show {interface_name} | head -n 1)\"
+if [[ -z \"${{CONNECTION_NAME}}\" || \"${{CONNECTION_NAME}}\" == \"--\" ]]; then
+  sudo nmcli con add type ethernet ifname {interface_name} con-name {con_name} \\
+    ipv4.method manual ipv4.addresses {address} autoconnect yes
+  sudo nmcli con up {con_name}
+else
+  sudo nmcli con mod \"${{CONNECTION_NAME}}\" +ipv4.addresses {address}
+  sudo nmcli con up \"${{CONNECTION_NAME}}\"
+fi
+ip -br addr show {interface_name}""".format(
+        interface_name=sh_quote(interface_name),
+        con_name=sh_quote(con_name),
+        address=sh_quote(address),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Guided workflow
+# ---------------------------------------------------------------------------
+def choose_run_mode():
+    options = [
+        "Full setup: PXE server + Ansible controller/NFS",
+        "PXE server only",
+        "Ansible controller/NFS only",
+    ]
+    choice = choose("What do you want this bootstrap command to set up?", options, 0)
+    if choice == 0:
+        return RunMode(run_pxe=True, run_controller=True)
+    if choice == 1:
+        return RunMode(run_pxe=True, run_controller=False)
+    return RunMode(run_pxe=False, run_controller=True)
+
+
+def choose_interface(interfaces, default_route):
+    default_idx = find_default_interface_index(interfaces, default_route.get("dev", ""))
+    while True:
+        selected_idx = choose(
+            "Select the interface that provisioned/PXE/NFS clients will connect to:",
+            print_interface_summary(interfaces),
+            default_idx,
+        )
+        selected = interfaces[selected_idx]
+        if selected.state.upper() not in {"UP", "UNKNOWN"}:
+            print()
+            print("WARNING: interface {} is currently state={}.".format(selected.name, selected.state))
+            print("That may be fine if you plan to plug it in or let NetworkManager bring it up, but PXE/NFS will not work while it is down.")
+            if not yes_no("Use this interface anyway?", False):
+                continue
+        return selected
+
+
+def choose_network(selected, default_route, run_mode):
+    current_addr = selected.addresses[0] if selected.addresses else None
+
+    mode_options = [
+        "Use this interface's current IPv4 subnet",
+        "Plan an isolated lab/provisioning subnet",
+        "Custom subnet",
+    ]
+    default_mode = 0 if current_addr else 1
+
+    while True:
+        mode = choose("What kind of network should clients use?", mode_options, default_mode)
+        isolated_or_custom = mode in {1, 2}
+
+        if mode == 0:
+            if current_addr is None:
+                print("The selected interface does not have an IPv4 address, so its current subnet cannot be used.")
+                print("Choose an isolated lab/provisioning subnet or a custom subnet instead.")
+                default_mode = 1
+                continue
+
+            network = current_addr.network
+            if run_mode.run_pxe and not require_pxe_sized_network(network):
+                print("The current subnet is too small for PXE/DHCP: {}.".format(network_size_reason(network)))
+                print("Choose an isolated lab/provisioning subnet or a larger custom subnet instead.")
+                default_mode = 1
+                continue
+
+            if run_mode.run_pxe:
+                print()
+                print("WARNING: using PXE/DHCP on an existing shared network can accidentally hand out addresses to machines that should not use AeroLIT.")
+                print("Only do this on a lab VLAN, isolated switch, direct-cable connection, or an approved provisioning network.")
+                if not yes_no("Continue with this existing subnet?", False):
+                    default_mode = 1
+                    continue
+
+            use_current = yes_no("Use current interface IP {} as the PXE/NFS server IP?".format(current_addr.ip), True)
+            if use_current:
+                server_ip = current_addr.ip
+            else:
+                server_ip = prompt_ip("PXE/NFS server IP for this host", str(current_addr.ip), network)
+            return network, server_ip, current_addr, False
+
+        if mode == 1:
+            options = ["{:<18} {}".format(cidr, description) for cidr, description in PRIVATE_LAB_NETWORKS]
+            options.append("Custom private subnet")
+            choice = choose("Pick a lab/provisioning subnet:", options, 0)
+            if choice < len(PRIVATE_LAB_NETWORKS):
+                network = ipaddress.ip_network(PRIVATE_LAB_NETWORKS[choice][0])
+            else:
+                network = prompt_network(
+                    "Custom private network CIDR",
+                    "192.168.109.0/24",
+                    require_private=True,
+                    require_pxe_size=run_mode.run_pxe,
+                )
+            server_ip = prompt_ip("PXE/NFS server IP for this host", str(default_server_ip(network)), network)
+            return network, server_ip, current_addr, True
+
+        network = prompt_network(
+            "Custom network CIDR",
+            "192.168.109.0/24",
+            require_private=False,
+            require_pxe_size=run_mode.run_pxe,
+        )
+        if not is_rfc1918(network):
+            print("WARNING: {} is not private RFC1918 address space.".format(network))
+            print("That is unusual for a lab/provisioning network. Make sure this is intentional and approved.")
+            if not yes_no("Use this non-private network anyway?", False):
+                continue
+        server_ip = prompt_ip("PXE/NFS server IP for this host", str(default_server_ip(network)), network)
+        return network, server_ip, current_addr, True
+
+
+def choose_gateway(network, default_route, isolated_or_custom, server_ip):
+    default_gateway = "none"
+    route_gateway = default_route.get("gateway", "")
+    parsed_route_gateway = parse_ipv4(route_gateway)
+    if not isolated_or_custom and parsed_route_gateway and parsed_route_gateway in network and parsed_route_gateway != server_ip:
+        default_gateway = str(parsed_route_gateway)
+
+    if isolated_or_custom:
+        print()
+        print("For isolated PXE labs, 'none' is usually correct because clients only need to reach this server during provisioning.")
+
+    if yes_no("Use PXE gateway '{}'?".format(default_gateway), True):
+        return default_gateway
+    return prompt_gateway(default_gateway, network, server_ip)
+
+
+def choose_dns_servers(default_gateway, server_ip):
+    dns_values = []
+    if not yes_no("Add DNS servers for PXE clients?", False):
+        return dns_values
+
+    if default_gateway != "none" and yes_no("Use gateway {} as a DNS server?".format(default_gateway), False):
+        dns_values.append(default_gateway)
+
+    if yes_no("Use PXE/NFS server {} as a DNS server? Only say yes if DNS runs on this host.".format(server_ip), False):
+        dns_values.append(str(server_ip))
+
+    while True:
+        value = prompt_dns_server(dns_values)
+        if value == "":
+            break
+        dns_values.append(value)
+
+    return dns_values
+
+
+def choose_nfs_options(network, server_ip):
+    same_nfs = yes_no("Use {} as the NFS server IP too?".format(server_ip), True)
+    if same_nfs:
+        nfs_server_ip = server_ip
+    else:
+        nfs_server_ip = prompt_ip("NFS server IP", str(server_ip), None)
+        if nfs_server_ip not in network:
+            print()
+            print("WARNING: NFS server IP {} is not inside the selected client network {}.".format(nfs_server_ip, network))
+            print("That can work only if clients have routing to the NFS server.")
+            if not yes_no("Keep this NFS server IP anyway?", False):
+                nfs_server_ip = prompt_ip("NFS server IP", str(server_ip), network)
+
+    nfs_choice = choose(
+        "Who should be allowed to mount the NFS export?",
+        [
+            "Only clients on this subnet: {}".format(network),
+            "Custom CIDR or single client IP",
+            "Allow all clients (easy lab test, least restrictive)",
+        ],
+        0,
+    )
+
+    if nfs_choice == 0:
+        return nfs_server_ip, str(network), False
+    if nfs_choice == 1:
+        custom = prompt_nfs_client_spec(str(network))
+        return nfs_server_ip, custom, False
+
+    print()
+    print("WARNING: --nfs-allow-all-clients is convenient for a quick lab, but it is too broad for long-term use.")
+    if not yes_no("Use --nfs-allow-all-clients anyway?", False):
+        custom = prompt_nfs_client_spec(str(network))
+        return nfs_server_ip, custom, False
+    return nfs_server_ip, None, True
+
+
+def choose_http_port():
+    if yes_no("Use default PXE HTTP port {}?".format(DEFAULT_HTTP_PORT), True):
+        return DEFAULT_HTTP_PORT
+    return prompt_int("PXE HTTP port", DEFAULT_HTTP_PORT, 1, 65535)
+
+
+def build_plan(run_mode, selected, default_route):
+    network, server_ip, current_addr, isolated_or_custom = choose_network(selected, default_route, run_mode)
+
+    dhcp_start = None
+    dhcp_end = None
+    gateway = None
+    dns_servers = []
+    pxe_http_port = DEFAULT_HTTP_PORT
+
+    if run_mode.run_pxe:
+        pxe_http_port = choose_http_port()
+        gateway = choose_gateway(network, default_route, isolated_or_custom, server_ip)
+        gateway_ip = parse_gateway_ip(gateway, network)
+        dhcp_start, dhcp_end = prompt_dhcp_range(network, server_ip, gateway_ip)
+        dns_servers = choose_dns_servers(gateway, server_ip)
+
+    nfs_server_ip = None
+    nfs_allow_clients = None
+    nfs_allow_all_clients = False
+    if run_mode.run_controller:
+        nfs_server_ip, nfs_allow_clients, nfs_allow_all_clients = choose_nfs_options(network, server_ip)
+
+    include_nmcli_setup = False
+    server_interface = ipaddress.ip_interface("{}/{}".format(server_ip, network.prefixlen))
+    existing_ips = {addr.ip for addr in selected.addresses}
+    if server_ip not in existing_ips:
+        print()
+        print("The selected interface does not currently have the planned server IP:")
+        print("  interface : {}".format(selected.name))
+        print("  planned IP: {}".format(server_interface))
+        if selected.addresses:
+            print("  current IPs: " + ", ".join(str(addr) for addr in selected.addresses))
+        else:
+            print("  current IPs: none detected")
+        print("The bootstrap command can be generated, but the interface needs this IP before PXE/NFS will work.")
+        include_nmcli_setup = yes_no("Include optional nmcli commands to configure this IP before bootstrap?", True)
+
+    return NetworkPlan(
+        interface_name=selected.name,
+        interface_current_addr=current_addr,
+        network=network,
+        server_ip=server_ip,
+        dhcp_start=dhcp_start,
+        dhcp_end=dhcp_end,
+        gateway=gateway,
+        dns_servers=dns_servers,
+        nfs_server_ip=nfs_server_ip,
+        nfs_allow_clients=nfs_allow_clients,
+        nfs_allow_all_clients=nfs_allow_all_clients,
+        pxe_http_port=pxe_http_port,
+        include_nmcli_setup=include_nmcli_setup,
+    )
+
+
+def command_args_from_plan(run_mode, plan):
+    cmd_args = []
+
+    if not run_mode.run_pxe:
+        cmd_args.append(("--skip-pxe", None))
+    if not run_mode.run_controller:
+        cmd_args.append(("--skip-controller", None))
+
+    if run_mode.run_pxe:
+        if not plan.interface_name:
+            raise SystemExit("ERROR: PXE mode requires an interface.")
+        if plan.dhcp_start is None or plan.dhcp_end is None:
+            raise SystemExit("ERROR: PXE mode requires a DHCP range.")
+        cmd_args.extend(
+            [
+                ("--pxe-server-ip", str(plan.server_ip)),
+                ("--pxe-http-port", str(plan.pxe_http_port)),
+                ("--pxe-interface", plan.interface_name),
+                ("--pxe-dhcp-start", str(plan.dhcp_start)),
+                ("--pxe-dhcp-end", str(plan.dhcp_end)),
+                ("--pxe-dhcp-netmask", dotted_netmask(plan.network)),
+            ]
+        )
+        if plan.gateway is not None:
+            cmd_args.append(("--pxe-gateway", plan.gateway))
+        for dns in plan.dns_servers:
+            cmd_args.append(("--pxe-dns", dns))
+
+    if run_mode.run_controller:
+        if plan.nfs_server_ip is None:
+            raise SystemExit("ERROR: controller mode requires an NFS server IP.")
+        cmd_args.append(("--nfs-server-ip", str(plan.nfs_server_ip)))
+        if plan.nfs_allow_all_clients:
+            cmd_args.append(("--nfs-allow-all-clients", None))
+        elif plan.nfs_allow_clients:
+            cmd_args.append(("--nfs-allow-clients", plan.nfs_allow_clients))
+        else:
+            raise SystemExit("ERROR: controller mode requires NFS clients or allow-all.")
+
+    return cmd_args
+
+
+def print_plan(run_mode, plan, command):
+    print()
+    print("Suggested network plan")
+    mode_text = "PXE + controller" if run_mode.run_pxe and run_mode.run_controller else "PXE only" if run_mode.run_pxe else "controller only"
+    print("  Bootstrap mode    : {}".format(mode_text))
+    print("  Interface         : {}".format(plan.interface_name or "<not used>"))
+    print("  Network           : {}".format(plan.network))
+    print("  Netmask           : {}".format(dotted_netmask(plan.network)))
+    print("  Server IP         : {}".format(plan.server_ip))
+
+    if run_mode.run_pxe:
+        print("  PXE HTTP port     : {}".format(plan.pxe_http_port))
+        print("  DHCP range        : {} - {}".format(plan.dhcp_start, plan.dhcp_end))
+        print("  PXE gateway       : {}".format(plan.gateway))
+        print("  PXE DNS servers   : {}".format(", ".join(plan.dns_servers) if plan.dns_servers else "<none>"))
+
+    if run_mode.run_controller:
+        print("  NFS server IP     : {}".format(plan.nfs_server_ip))
+        if plan.nfs_allow_all_clients:
+            print("  NFS clients       : all clients")
+        else:
+            print("  NFS clients       : {}".format(plan.nfs_allow_clients))
+
+    server_interface = ipaddress.ip_interface("{}/{}".format(plan.server_ip, plan.network.prefixlen))
+    nmcli_block = ""
+    if plan.include_nmcli_setup and plan.interface_name:
+        nmcli_block = format_nmcli_setup(plan.interface_name, server_interface)
+        print()
+        print("Optional interface setup command")
+        print(nmcli_block)
+
+    print()
+    print("Generated bootstrap command")
+    print(command)
+
+    script_parts = ["#!/usr/bin/env bash", "# UNCLASSIFIED", "", "set -Eeuo pipefail", ""]
+    if nmcli_block:
+        script_parts.append(nmcli_block)
+        script_parts.append("")
+    script_parts.append(command)
+    script_parts.append("")
+    return "\n".join(script_parts)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate AeroLIT bootstrap network options.")
+    parser.add_argument("--bootstrap-path", default="./bootstrap.sh")
+    parser.add_argument("--output", help="Optional file to write the generated command to.")
+    args = parser.parse_args()
+
+    if not shutil.which("ip"):
+        print("ERROR: the 'ip' command is required.", file=sys.stderr)
+        return 1
+
+    default_route = get_default_route()
+    interfaces = get_interfaces()
+    if not interfaces:
+        print("ERROR: no non-loopback interfaces were found.", file=sys.stderr)
+        return 1
+
+    print()
+    print("AeroLIT bootstrap network helper")
+    print("This helper builds a suggested bootstrap command from simple network questions.")
+    print("It does not change your system unless you copy/run the optional nmcli commands it prints.")
+    print()
+    print("Safety note: PXE/DHCP should normally run on an isolated provisioning network,")
+    print("a lab VLAN, or a direct-cable network. Be careful enabling DHCP on a shared network.")
+
+    run_mode = choose_run_mode()
+    selected = choose_interface(interfaces, default_route)
+    plan = build_plan(run_mode, selected, default_route)
+    command = format_command(args.bootstrap_path, command_args_from_plan(run_mode, plan))
+    script_body = print_plan(run_mode, plan, command)
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as handle:
+            handle.write(script_body)
+        os.chmod(args.output, 0o755)
+        print()
+        print("Wrote executable helper output to: {}".format(args.output))
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
