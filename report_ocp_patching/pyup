@@ -1,4 +1,15 @@
 
+run_ip_helper() {
+  local helper="${SCRIPT_DIR}/aerolit_ip_helper.py"
+  local py=""
+
+  [[ -f "${helper}" ]] || fail "IP/network helper not found: ${helper}"
+  py="$(find_python_for_helper)" || fail "Python 3.6 or newer is required for --ip-helper. Tried: python3, /usr/libexec/platform-python, python"
+
+  "${py}" "${helper}" --bootstrap-path "${BUNDLE_ROOT}/bootstrap.sh"
+}
+
+
   --ip-helper, --network-helper
       Start an interactive helper that walks the user through PXE/NFS IP
       decisions and writes a reviewable executable bootstrap script.
