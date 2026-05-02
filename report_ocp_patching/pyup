@@ -1,5 +1,13 @@
 
+  --ip-helper, --network-helper
+      Start an interactive helper that walks the user through PXE/NFS IP
+      decisions and writes a reviewable executable bootstrap script.
 
+      The generated script includes the bootstrap command and, when needed,
+      optional NetworkManager/nmcli commands to add the planned PXE/NFS IP
+      to the selected interface.
+
+      The helper does not run the generated script automatically.
 
 
 
