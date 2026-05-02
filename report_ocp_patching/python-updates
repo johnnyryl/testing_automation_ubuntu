@@ -1,0 +1,336 @@
+diff --git a/collections-hub/scripts/bootstrap_controller.sh b/collections-hub/scripts/bootstrap_controller.sh
+index 0000000..1111111 100755
+--- a/collections-hub/scripts/bootstrap_controller.sh
++++ b/collections-hub/scripts/bootstrap_controller.sh
+@@ -15,6 +15,9 @@ DEBUG=false
+ ASSUME_YES=false
+ ALLOW_ROOT_BUNDLE=false
+ 
++RUN_IP_HELPER=false
++IP_HELPER_OUTPUT=""
++
+ RUN_BOOTSTRAP=true
+ RUN_PXE=true
+ RUN_CONTROLLER=true
+@@ -196,6 +199,20 @@ General options:
+   --dry-run
+       Do not change the system. If Ansible is available, playbooks run in
+       --check mode.
++
++  --ip-helper, --network-helper
++      Start an interactive helper that walks the user through PXE/NFS IP
++      decisions and prints a ready-to-run bootstrap command. The helper exits
++      after printing the command and does not run the bootstrap workflow.
++
++      The helper can optionally print NetworkManager/nmcli commands when the
++      selected interface does not already have the planned PXE/NFS server IP.
++      Those commands are shown for review; they are not run automatically.
++
++  --ip-helper-output FILE, --network-helper-output FILE
++      Optional output file for --ip-helper. The helper writes the generated
++      command, plus any optional interface setup commands, to this executable
++      shell script.
+ 
+   --verbose
+       Show more output.
+@@ -356,5 +373,37 @@ NFS_EXPORT_PATH="${BUNDLE_ROOT}"
+ 
+ ###############################################################################
++# 05a. Interactive network helper
++###############################################################################
++find_python_for_helper() {
++  local candidate=""
++
++  for candidate in python3 /usr/libexec/platform-python python; do
++    if command -v "${candidate}" >/dev/null 2>&1; then
++      if "${candidate}" -c 'import sys; raise SystemExit(0 if sys.version_info[0] >= 3 else 1)' >/dev/null 2>&1; then
++        printf '%s' "${candidate}"
++        return 0
++      fi
++    fi
++  done
++
++  return 1
++}
++
++run_ip_helper() {
++  local helper="${SCRIPT_DIR}/aerolit_ip_helper.py"
++  local py=""
++  local -a helper_args=()
++
++  [[ -f "${helper}" ]] || fail "IP/network helper not found: ${helper}"
++  py="$(find_python_for_helper)" || fail "Python 3 is required for --ip-helper. Tried: python3, /usr/libexec/platform-python, python"
++
++  helper_args+=("--bootstrap-path" "${BUNDLE_ROOT}/bootstrap.sh")
++  [[ -n "${IP_HELPER_OUTPUT}" ]] && helper_args+=("--output" "${IP_HELPER_OUTPUT}")
++
++  "${py}" "${helper}" "${helper_args[@]}"
++}
++
++###############################################################################
+ # 06. OS and repo helper functions used by defaults and main flow
+ ###############################################################################
+ get_os_major() {
+@@ -430,6 +476,16 @@ while [[ $# -gt 0 ]]; do
+       ALLOW_ROOT_BUNDLE=true
+       shift
+       ;;
++    --ip-helper|--network-helper)
++      RUN_IP_HELPER=true
++      shift
++      ;;
++    --ip-helper-output|--network-helper-output)
++      [[ $# -ge 2 ]] || fail "$1 requires a file path"
++      RUN_IP_HELPER=true
++      IP_HELPER_OUTPUT="$2"
++      shift 2
++      ;;
+ 
+     --bootstrap-only)
+       RUN_PXE=false
+@@ -651,6 +708,11 @@ if [[ "${DEBUG}" == true ]]; then
+   set -x
+ fi
+ 
++if [[ "${RUN_IP_HELPER}" == true ]]; then
++  run_ip_helper
++  exit 0
++fi
++
+ ###############################################################################
+ # 08. Derived defaults and validation
+ ###############################################################################
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yes. Ignore the diff --git, @@, and + symbols. Those are just patch instructions. You are manually adding five small changes to:
+
+collections-hub/scripts/bootstrap_controller.sh
+
+Do not paste the + signs.
+
+Also place the helper script here:
+
+collections-hub/scripts/aerolit_ip_helper.py
+
+Then:
+
+chmod +x collections-hub/scripts/aerolit_ip_helper.py
+
+⸻
+
+1. Add the helper defaults
+
+Find this near the top:
+
+DRY_RUN=false
+VERBOSE=false
+DEBUG=false
+ASSUME_YES=false
+ALLOW_ROOT_BUNDLE=false
+RUN_BOOTSTRAP=true
+RUN_PXE=true
+RUN_CONTROLLER=true
+
+Change it to this:
+
+DRY_RUN=false
+VERBOSE=false
+DEBUG=false
+ASSUME_YES=false
+ALLOW_ROOT_BUNDLE=false
+RUN_IP_HELPER=false
+IP_HELPER_OUTPUT=""
+RUN_BOOTSTRAP=true
+RUN_PXE=true
+RUN_CONTROLLER=true
+
+⸻
+
+2. Add the usage/help text
+
+Inside the usage() block, find this:
+
+General options:
+  --dry-run
+      Do not change the system. If Ansible is available, playbooks run in
+      --check mode.
+  --verbose
+      Show more output.
+
+Change it to this:
+
+General options:
+  --dry-run
+      Do not change the system. If Ansible is available, playbooks run in
+      --check mode.
+  --ip-helper, --network-helper
+      Start an interactive helper that walks the user through PXE/NFS IP
+      decisions and prints a ready-to-run bootstrap command. The helper exits
+      after printing the command and does not run the bootstrap workflow.
+      The helper can optionally print NetworkManager/nmcli commands when the
+      selected interface does not already have the planned PXE/NFS server IP.
+      Those commands are shown for review; they are not run automatically.
+  --ip-helper-output FILE, --network-helper-output FILE
+      Optional output file for --ip-helper. The helper writes the generated
+      command, plus any optional interface setup commands, to this executable
+      shell script.
+  --verbose
+      Show more output.
+
+⸻
+
+3. Add the helper functions
+
+Find this section near the end of path discovery:
+
+NFS_EXPORT_PATH="${BUNDLE_ROOT}"
+###############################################################################
+# 06. OS and repo helper functions used by defaults and main flow
+###############################################################################
+get_os_major() {
+
+Change it to this:
+
+NFS_EXPORT_PATH="${BUNDLE_ROOT}"
+###############################################################################
+# 05a. Interactive network helper
+###############################################################################
+find_python_for_helper() {
+  local candidate=""
+  for candidate in python3 /usr/libexec/platform-python python; do
+    if command -v "${candidate}" >/dev/null 2>&1; then
+      if "${candidate}" -c 'import sys; raise SystemExit(0 if sys.version_info[0] >= 3 else 1)' >/dev/null 2>&1; then
+        printf '%s' "${candidate}"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+run_ip_helper() {
+  local helper="${SCRIPT_DIR}/aerolit_ip_helper.py"
+  local py=""
+  local -a helper_args=()
+  [[ -f "${helper}" ]] || fail "IP/network helper not found: ${helper}"
+  py="$(find_python_for_helper)" || fail "Python 3 is required for --ip-helper. Tried: python3, /usr/libexec/platform-python, python"
+  helper_args+=("--bootstrap-path" "${BUNDLE_ROOT}/bootstrap.sh")
+  [[ -n "${IP_HELPER_OUTPUT}" ]] && helper_args+=("--output" "${IP_HELPER_OUTPUT}")
+  "${py}" "${helper}" "${helper_args[@]}"
+}
+###############################################################################
+# 06. OS and repo helper functions used by defaults and main flow
+###############################################################################
+get_os_major() {
+
+⸻
+
+4. Add the argument parsing options
+
+Find this part in the big while [[ $# -gt 0 ]]; do case block:
+
+    --allow-root-bundle)
+      ALLOW_ROOT_BUNDLE=true
+      shift
+      ;;
+    --bootstrap-only)
+      RUN_PXE=false
+      RUN_CONTROLLER=false
+      shift
+      ;;
+
+Change it to this:
+
+    --allow-root-bundle)
+      ALLOW_ROOT_BUNDLE=true
+      shift
+      ;;
+    --ip-helper|--network-helper)
+      RUN_IP_HELPER=true
+      shift
+      ;;
+    --ip-helper-output|--network-helper-output)
+      [[ $# -ge 2 ]] || fail "$1 requires a file path"
+      RUN_IP_HELPER=true
+      IP_HELPER_OUTPUT="$2"
+      shift 2
+      ;;
+    --bootstrap-only)
+      RUN_PXE=false
+      RUN_CONTROLLER=false
+      shift
+      ;;
+
+⸻
+
+5. Make the helper run before normal validation
+
+Find this after argument parsing:
+
+if [[ "${DEBUG}" == true ]]; then
+  set -x
+fi
+###############################################################################
+# 08. Derived defaults and validation
+###############################################################################
+OS_MAJOR="$(get_os_major)"
+
+Change it to this:
+
+if [[ "${DEBUG}" == true ]]; then
+  set -x
+fi
+if [[ "${RUN_IP_HELPER}" == true ]]; then
+  run_ip_helper
+  exit 0
+fi
+###############################################################################
+# 08. Derived defaults and validation
+###############################################################################
+OS_MAJOR="$(get_os_major)"
+
+This placement matters. It lets the helper run before the script complains that --pxe-server-ip, --pxe-interface, or --nfs-server-ip are missing.
+
+⸻
+
+Then verify
+
+Run:
+
+bash -n collections-hub/scripts/bootstrap_controller.sh
+python3 -m py_compile collections-hub/scripts/aerolit_ip_helper.py
+
+Then test:
+
+./bootstrap.sh --network-helper
+
+or:
+
+./bootstrap.sh --ip-helper
+
+To write the generated command to a file:
+
+./bootstrap.sh --network-helper-output run-bootstrap-network.sh
+
+Then you can inspect it:
+
+cat run-bootstrap-network.sh
+bash -n run-bootstrap-network.sh
