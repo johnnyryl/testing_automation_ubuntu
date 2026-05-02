@@ -1,5 +1,99 @@
 
+def choose_network(selected, default_route, run_mode):
+    current_addr = selected.addresses[0] if selected.addresses else None
 
+    print_section("Client/provisioning network")
+    print()
+    print("Now choose the network/subnet that provisioning clients will use.")
+    print("For a simple isolated lab, choosing a dedicated lab subnet is usually safer than using a shared network.")
+
+    # Put the safest PXE/DHCP option first.
+    # PXE mode defaults to an isolated lab/provisioning subnet.
+    # Controller/NFS-only mode can default to the current interface subnet when one exists.
+    mode_options = [
+        ("isolated", "Plan an isolated lab/provisioning subnet"),
+        ("current", "Use this interface's current IPv4 subnet"),
+        ("custom", "Custom subnet"),
+    ]
+
+    if run_mode.run_pxe:
+        default_mode = 0
+    else:
+        default_mode = 1 if current_addr else 0
+
+    while True:
+        selected_mode_index = choose(
+            "What kind of network should clients use?",
+            [item[1] for item in mode_options],
+            default_mode,
+        )
+        mode = mode_options[selected_mode_index][0]
+        isolated_or_custom = mode in {"isolated", "custom"}
+
+        if mode == "current":
+            if current_addr is None:
+                print("The selected interface does not have an IPv4 address, so its current subnet cannot be used.")
+                print("Choose an isolated lab/provisioning subnet or a custom subnet instead.")
+                default_mode = 0
+                continue
+
+            network = current_addr.network
+            if run_mode.run_pxe and not require_pxe_sized_network(network):
+                print("The current subnet is too small for PXE/DHCP: {}.".format(network_size_reason(network)))
+                print("Choose an isolated lab/provisioning subnet or a larger custom subnet instead.")
+                default_mode = 0
+                continue
+
+            if run_mode.run_pxe:
+                print()
+                print("WARNING: using PXE/DHCP on an existing shared network can accidentally hand out addresses to machines that should not use AeroLIT.")
+                print("Only do this on a lab VLAN, isolated switch, direct-cable connection, or an approved provisioning network.")
+                if not yes_no("Continue with this existing subnet?", False):
+                    default_mode = 0
+                    continue
+
+            use_current = yes_no("Use current interface IP {} as the server IP for this host?".format(current_addr.ip), True)
+            if use_current:
+                server_ip = current_addr.ip
+            else:
+                server_ip = prompt_server_ip(current_addr.ip, network, run_mode)
+            return network, server_ip, current_addr, False
+
+        if mode == "isolated":
+            print()
+            print("Pick a private lab/provisioning subnet. Avoid choosing a subnet already used elsewhere on your network.")
+            options = ["{:<18} {}".format(cidr, description) for cidr, description in PRIVATE_LAB_NETWORKS]
+            options.append("Custom private subnet")
+            choice = choose("Pick a lab/provisioning subnet:", options, 0)
+
+            if choice < len(PRIVATE_LAB_NETWORKS):
+                network = ipaddress.ip_network(PRIVATE_LAB_NETWORKS[choice][0])
+            else:
+                network = prompt_network(
+                    "Custom private network CIDR",
+                    "192.168.109.0/24",
+                    require_private=True,
+                    require_pxe_size=run_mode.run_pxe,
+                )
+
+            server_ip = prompt_server_ip(default_server_ip(network), network, run_mode)
+            return network, server_ip, current_addr, True
+
+        network = prompt_network(
+            "Custom network CIDR",
+            "192.168.109.0/24",
+            require_private=False,
+            require_pxe_size=run_mode.run_pxe,
+        )
+
+        if not is_rfc1918(network):
+            print("WARNING: {} is not private RFC1918 address space.".format(network))
+            print("That is unusual for a lab/provisioning network. Make sure this is intentional and approved.")
+            if not yes_no("Use this non-private network anyway?", False):
+                continue
+
+        server_ip = prompt_server_ip(default_server_ip(network), network, run_mode)
+        return network, server_ip, current_addr, True
 
 
 
