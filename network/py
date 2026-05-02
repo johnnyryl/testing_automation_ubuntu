@@ -9,3 +9,28 @@ def main():
         help="Advanced/testing only: optional bootstrap script output path. Normal use writes next to bootstrap.sh automatically.",
     )
     args = parser.parse_args()
+
+
+
+
+
+find_python_for_helper() {
+  local candidate=""
+
+  for candidate in python3 /usr/libexec/platform-python python; do
+    if command -v "${candidate}" >/dev/null 2>&1; then
+      if "${candidate}" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 6) else 1)' >/dev/null 2>&1; then
+        printf '%s' "${candidate}"
+        return 0
+      fi
+    fi
+  done
+
+  return 1
+}
+
+
+
+
+
+py="$(find_python_for_helper)" || fail "Python 3.6 or newer is required for --ip-helper. Tried: python3, /usr/libexec/platform-python, python"
