@@ -1,0 +1,615 @@
+Yes — now that your pxe-content image/container project is becoming dynamic, the Ansible role should mainly do one thing cleanly:
+
+It should deploy the container with Quadlet and mount the bundle’s extracted_isos/ directory into the container as /iso.
+
+So the important correction is:
+
+host bundle path:   /path/to/aerolit_bundle/extracted_isos
+container path:     /iso
+
+Do not change the container/Nginx side to extracted_isos. Inside the container, /iso is still the clean stable path. The role just needs to mount the right host directory into /iso.
+
+Delete this old file from the role if it still exists:
+
+templates/pxe-content.service.j2
+
+Replace/add these files.
+
+⸻
+
+defaults/main.yml
+
+---
+# UNCLASSIFIED
+# pxe-content
+# Bundle / host path behavior
+#
+# If aerolit_bundle_root is provided by bootstrap/group_vars, this role uses:
+#   <bundle root>/extracted_isos
+#   <bundle root>/files/pxe/pxe-content.tar
+#
+# If no bundle root is provided, it falls back to /srv/ipxe and /srv/pxe-content.
+pxe_content_bundle_root: "{{ aerolit_bundle_root | default('') }}"
+pxe_content_extracted_isos_root: "{{ ((pxe_content_bundle_root | string | length) > 0) | ternary(pxe_content_bundle_root ~ '/extracted_isos', '/srv/ipxe') }}"
+# Container identity
+pxe_content_container_name: "pxe-content"
+pxe_content_service_name: "pxe-content"
+# Image source
+# Supported values:
+#   - registry
+#   - tar
+pxe_content_image_source: "registry"
+# Registry image source
+pxe_content_image: "registry.gitlab.us.lmco.com/lit/containers/pxe-content:latest"
+# Image name used at runtime by Quadlet.
+# In registry mode this usually matches pxe_content_image.
+# In tar mode this must match the tag embedded in the loaded tar.
+pxe_content_runtime_image: "{{ pxe_content_image }}"
+# Supported values when image_source=registry:
+#   - missing
+#   - always
+pxe_content_image_pull_policy: "missing"
+# Tar image options
+# Optional controller-side source file to copy to the target first.
+pxe_content_image_tar_src: ""
+# Target-side tar path used by podman load.
+# In bundle mode, this defaults to <bundle root>/files/pxe/pxe-content.tar.
+pxe_content_image_tar_path: "{{ ((pxe_content_bundle_root | string | length) > 0) | ternary(pxe_content_bundle_root ~ '/files/pxe/pxe-content.tar', '/srv/pxe-content/pxe-content.tar') }}"
+# Stamp file used so podman load only reruns when the tar changes,
+# unless the runtime image is missing.
+pxe_content_image_tar_checksum_file: "/etc/pxe-content/.loaded-image.sha256"
+# Runtime / service settings
+pxe_content_host_port: 18080
+pxe_content_container_port: 8080
+pxe_content_server_ip: "192.168.109.139"
+pxe_content_stop_timeout: 10
+pxe_content_restart_policy: "always"
+pxe_content_restart_sec: 5
+# Host-side ISO/content root.
+# This should point to extracted_isos on the host.
+pxe_content_iso_root: "{{ pxe_content_extracted_isos_root }}"
+# Container-side ISO path.
+# Keep this as /iso because the container/Nginx/generator should use a stable internal path.
+pxe_content_container_iso_root: "/iso"
+# Environment / state
+pxe_content_state_dir: "/etc/pxe-content"
+pxe_content_env_file: "/etc/pxe-content/pxe-content.env"
+# Quadlet
+pxe_content_quadlet_dir: "/etc/containers/systemd"
+pxe_content_quadlet_file: "{{ pxe_content_quadlet_dir }}/{{ pxe_content_service_name }}.container"
+# Cleanup from the earlier hand-written systemd service design
+pxe_content_remove_legacy_service_file: true
+pxe_content_legacy_service_file: "/etc/systemd/system/{{ pxe_content_service_name }}.service"
+# Podman / SELinux behavior
+pxe_content_security_opt_label_disable: true
+# Main content mount plus any extras.
+# Host extracted_isos gets mounted into the container as /iso.
+pxe_content_volume_mounts:
+  - "{{ pxe_content_iso_root }}:{{ pxe_content_container_iso_root }}:ro,Z"
+# Extra ports in standard Quadlet PublishPort format, for example:
+#   - "8443:8443/tcp"
+pxe_content_extra_ports: []
+# Extra env vars written into /etc/pxe-content/pxe-content.env.
+# Example:
+# pxe_content_extra_env:
+#   PXE_SCAN_INTERVAL: 15
+pxe_content_extra_env: {}
+# Podman args that should always be present for the Quadlet container.
+# This prevents boot-time startup from depending on live registry access.
+pxe_content_quadlet_podman_args:
+  - "--pull=never"
+# Extra raw podman args for Quadlet, for example:
+#   - "--log-driver=journald"
+#   - "--cpus=2"
+pxe_content_extra_run_args: []
+# Package / firewall management
+pxe_content_packages:
+  - podman
+pxe_content_manage_firewall: true
+pxe_content_firewall_zone: "public"
+pxe_content_firewall_packages:
+  - firewalld
+pxe_content_firewall_ports:
+  - "{{ pxe_content_host_port }}/tcp"
+# Validation after deployment
+pxe_content_validate_deployment: true
+pxe_content_validate_scheme: "http"
+pxe_content_validate_host: "127.0.0.1"
+pxe_content_validate_path: "/boot.ipxe"
+pxe_content_validate_status_code: 200
+pxe_content_validate_timeout: 30
+pxe_content_validate_retries: 10
+pxe_content_validate_delay: 3
+# UNCLASSIFIED
+
+⸻
+
+handlers/main.yml
+
+---
+# UNCLASSIFIED
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: not ansible_check_mode
+- name: Restart pxe-content
+  ansible.builtin.systemd:
+    name: "{{ pxe_content_service_name }}.service"
+    state: restarted
+    enabled: true
+  when: not ansible_check_mode
+# UNCLASSIFIED
+
+⸻
+
+tasks/main.yml
+
+---
+# UNCLASSIFIED
+- name: Include install tasks
+  ansible.builtin.include_tasks: install.yml
+- name: Include configure tasks
+  ansible.builtin.include_tasks: configure.yml
+- name: Include service tasks
+  ansible.builtin.include_tasks: service.yml
+# UNCLASSIFIED
+
+⸻
+
+tasks/install.yml
+
+---
+# UNCLASSIFIED
+- name: Assert valid pxe_content_image_source
+  ansible.builtin.assert:
+    that:
+      - pxe_content_image_source in ['registry', 'tar']
+    fail_msg: "pxe_content_image_source must be 'registry' or 'tar'."
+- name: Assert valid pxe_content_image_pull_policy
+  ansible.builtin.assert:
+    that:
+      - pxe_content_image_pull_policy in ['missing', 'always']
+    fail_msg: "pxe_content_image_pull_policy must be 'missing' or 'always'."
+- name: Assert runtime image is set
+  ansible.builtin.assert:
+    that:
+      - pxe_content_runtime_image | length > 0
+    fail_msg: "pxe_content_runtime_image must be set."
+- name: Assert registry image is set when using registry source
+  ansible.builtin.assert:
+    that:
+      - pxe_content_image | length > 0
+    fail_msg: "pxe_content_image must be set when pxe_content_image_source=registry."
+  when: pxe_content_image_source == 'registry'
+- name: Assert tar image path is set when using tar source
+  ansible.builtin.assert:
+    that:
+      - pxe_content_image_tar_path | length > 0
+    fail_msg: "pxe_content_image_tar_path must be set when pxe_content_image_source=tar."
+  when: pxe_content_image_source == 'tar'
+- name: Assert valid pxe_content_host_port
+  ansible.builtin.assert:
+    that:
+      - (pxe_content_host_port | int) >= 1
+      - (pxe_content_host_port | int) <= 65535
+    fail_msg: "pxe_content_host_port must be between 1 and 65535."
+- name: Assert valid pxe_content_container_port
+  ansible.builtin.assert:
+    that:
+      - (pxe_content_container_port | int) >= 1
+      - (pxe_content_container_port | int) <= 65535
+    fail_msg: "pxe_content_container_port must be between 1 and 65535."
+- name: Assert PXE content ISO root is safe
+  ansible.builtin.assert:
+    that:
+      - pxe_content_iso_root | length > 1
+      - pxe_content_iso_root != '/'
+    fail_msg: "pxe_content_iso_root must be a safe directory path and cannot be '/'."
+- name: Install Podman package(s)
+  ansible.builtin.package:
+    name: "{{ pxe_content_packages }}"
+    state: present
+- name: Install firewall package(s) when firewall management is enabled
+  ansible.builtin.package:
+    name: "{{ pxe_content_firewall_packages }}"
+    state: present
+  when: pxe_content_manage_firewall | bool
+- name: Ensure pxe-content state directory exists
+  ansible.builtin.file:
+    path: "{{ pxe_content_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+- name: Ensure PXE extracted ISO root exists
+  ansible.builtin.file:
+    path: "{{ pxe_content_iso_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+- name: Ensure Quadlet directory exists
+  ansible.builtin.file:
+    path: "{{ pxe_content_quadlet_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+- name: Ensure pxe-content env file parent directory exists
+  ansible.builtin.file:
+    path: "{{ pxe_content_env_file | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+- name: Ensure pxe-content checksum file parent directory exists
+  ansible.builtin.file:
+    path: "{{ pxe_content_image_tar_checksum_file | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+- name: Ensure tar image parent directory exists when using tar source
+  ansible.builtin.file:
+    path: "{{ pxe_content_image_tar_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: pxe_content_image_source == 'tar'
+- name: Copy pxe-content image tar from controller when provided
+  ansible.builtin.copy:
+    src: "{{ pxe_content_image_tar_src }}"
+    dest: "{{ pxe_content_image_tar_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - pxe_content_image_source == 'tar'
+    - pxe_content_image_tar_src | length > 0
+- name: Stat target-side pxe-content image tar
+  ansible.builtin.stat:
+    path: "{{ pxe_content_image_tar_path }}"
+    checksum_algorithm: sha256
+  register: pxe_content_tar_stat
+  when: pxe_content_image_source == 'tar'
+- name: Assert pxe-content image tar exists
+  ansible.builtin.assert:
+    that:
+      - pxe_content_tar_stat.stat.exists
+      - not pxe_content_tar_stat.stat.isdir
+    fail_msg: "pxe_content_image_tar_path does not exist or is not a file."
+  when:
+    - pxe_content_image_source == 'tar'
+    - not ansible_check_mode
+- name: Stat loaded image checksum stamp
+  ansible.builtin.stat:
+    path: "{{ pxe_content_image_tar_checksum_file }}"
+  register: pxe_content_tar_checksum_stamp
+  when: pxe_content_image_source == 'tar'
+- name: Read loaded image checksum stamp
+  ansible.builtin.slurp:
+    src: "{{ pxe_content_image_tar_checksum_file }}"
+  register: pxe_content_tar_checksum_slurp
+  when:
+    - pxe_content_image_source == 'tar'
+    - pxe_content_tar_checksum_stamp.stat.exists
+- name: Set loaded image checksum fact
+  ansible.builtin.set_fact:
+    pxe_content_loaded_tar_checksum: >-
+      {{
+        (pxe_content_tar_checksum_slurp.content | b64decode | trim)
+        if pxe_content_tar_checksum_stamp.stat.exists
+        else ''
+      }}
+  when: pxe_content_image_source == 'tar'
+- name: Check whether runtime image exists locally before tar load
+  ansible.builtin.command:
+    cmd: "podman image exists {{ pxe_content_runtime_image }}"
+  register: pxe_content_runtime_image_exists_pre
+  changed_when: false
+  failed_when: false
+  when:
+    - pxe_content_image_source == 'tar'
+    - not ansible_check_mode
+- name: Load pxe-content image tar into Podman
+  ansible.builtin.command:
+    cmd: "podman load -i {{ pxe_content_image_tar_path }}"
+  register: pxe_content_load_result
+  changed_when: true
+  when:
+    - pxe_content_image_source == 'tar'
+    - not ansible_check_mode
+    - >
+      ((pxe_content_loaded_tar_checksum | default('')) != (pxe_content_tar_stat.stat.checksum | default('')))
+      or ((pxe_content_runtime_image_exists_pre.rc | default(1)) != 0)
+- name: Write loaded image checksum stamp
+  ansible.builtin.copy:
+    dest: "{{ pxe_content_image_tar_checksum_file }}"
+    content: "{{ pxe_content_tar_stat.stat.checksum }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - pxe_content_image_source == 'tar'
+    - not ansible_check_mode
+    - pxe_content_tar_stat.stat.checksum is defined
+    - >
+      ((pxe_content_loaded_tar_checksum | default('')) != (pxe_content_tar_stat.stat.checksum | default('')))
+      or ((pxe_content_runtime_image_exists_pre.rc | default(1)) != 0)
+- name: Assert runtime image exists locally after tar load
+  ansible.builtin.command:
+    cmd: "podman image exists {{ pxe_content_runtime_image }}"
+  register: pxe_content_runtime_image_exists_post
+  changed_when: false
+  failed_when: pxe_content_runtime_image_exists_post.rc != 0
+  when:
+    - pxe_content_image_source == 'tar'
+    - not ansible_check_mode
+- name: Check whether registry image already exists locally
+  ansible.builtin.command:
+    cmd: "podman image exists {{ pxe_content_image }}"
+  register: pxe_content_image_exists
+  changed_when: false
+  failed_when: false
+  when:
+    - pxe_content_image_source == 'registry'
+    - pxe_content_image_pull_policy == 'missing'
+    - not ansible_check_mode
+- name: Pull pxe-content image from registry
+  ansible.builtin.command:
+    cmd: "podman pull {{ pxe_content_image }}"
+  register: pxe_content_pull_result
+  changed_when: true
+  when:
+    - pxe_content_image_source == 'registry'
+    - not ansible_check_mode
+    - >
+      pxe_content_image_pull_policy == 'always'
+      or
+      (pxe_content_image_pull_policy == 'missing' and (pxe_content_image_exists.rc | default(1)) != 0)
+- name: Assert runtime image exists locally after registry handling
+  ansible.builtin.command:
+    cmd: "podman image exists {{ pxe_content_runtime_image }}"
+  register: pxe_content_runtime_image_exists_registry
+  changed_when: false
+  failed_when: pxe_content_runtime_image_exists_registry.rc != 0
+  when:
+    - pxe_content_image_source == 'registry'
+    - not ansible_check_mode
+# UNCLASSIFIED
+
+⸻
+
+tasks/configure.yml
+
+---
+# UNCLASSIFIED
+- name: Stat legacy handcrafted pxe-content service file
+  ansible.builtin.stat:
+    path: "{{ pxe_content_legacy_service_file }}"
+  register: pxe_content_legacy_service_file_stat
+  when: pxe_content_remove_legacy_service_file | bool
+- name: Stop legacy handcrafted pxe-content service before removing it
+  ansible.builtin.systemd:
+    name: "{{ pxe_content_service_name }}.service"
+    state: stopped
+  register: pxe_content_stop_legacy_service
+  failed_when: false
+  changed_when: false
+  when:
+    - pxe_content_remove_legacy_service_file | bool
+    - pxe_content_legacy_service_file_stat.stat.exists | default(false)
+    - not ansible_check_mode
+- name: Remove legacy handcrafted pxe-content service file
+  ansible.builtin.file:
+    path: "{{ pxe_content_legacy_service_file }}"
+    state: absent
+  register: pxe_content_legacy_service_unit
+  when: pxe_content_remove_legacy_service_file | bool
+  notify:
+    - Reload systemd
+- name: Render pxe-content environment file
+  ansible.builtin.template:
+    src: "pxe-content.env.j2"
+    dest: "{{ pxe_content_env_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Restart pxe-content
+- name: Render pxe-content Quadlet container file
+  ansible.builtin.template:
+    src: "pxe-content.container.j2"
+    dest: "{{ pxe_content_quadlet_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: pxe_content_quadlet_result
+  notify:
+    - Reload systemd
+    - Restart pxe-content
+- name: Reload systemd immediately when Quadlet changed or legacy service was removed
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when:
+    - not ansible_check_mode
+    - >
+      (pxe_content_quadlet_result is defined and pxe_content_quadlet_result.changed)
+      or
+      (pxe_content_legacy_service_unit is defined and pxe_content_legacy_service_unit.changed)
+- name: Ensure firewalld is running when firewall management is enabled
+  ansible.builtin.service:
+    name: firewalld
+    state: started
+    enabled: true
+  when: pxe_content_manage_firewall | bool
+- name: Open firewall ports for pxe-content
+  ansible.posix.firewalld:
+    zone: "{{ pxe_content_firewall_zone }}"
+    port: "{{ item }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ pxe_content_firewall_ports }}"
+  when: pxe_content_manage_firewall | bool
+# UNCLASSIFIED
+
+⸻
+
+tasks/service.yml
+
+---
+# UNCLASSIFIED
+- name: Dry-run note for pxe-content service
+  ansible.builtin.debug:
+    msg: >-
+      DRY RUN: would enable and start {{ pxe_content_service_name }}.service,
+      then validate {{ pxe_content_validate_scheme }}://{{ pxe_content_validate_host }}:{{ pxe_content_host_port }}{{ pxe_content_validate_path }}.
+  when: ansible_check_mode
+- name: Enable and start pxe-content service
+  ansible.builtin.systemd:
+    name: "{{ pxe_content_service_name }}.service"
+    daemon_reload: true
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+- name: Flush handlers before validation
+  ansible.builtin.meta: flush_handlers
+  when: not ansible_check_mode
+- name: Wait for pxe-content port to become reachable
+  ansible.builtin.wait_for:
+    host: "{{ pxe_content_validate_host }}"
+    port: "{{ pxe_content_host_port }}"
+    timeout: "{{ pxe_content_validate_timeout }}"
+  when:
+    - pxe_content_validate_deployment | bool
+    - not ansible_check_mode
+- name: Validate pxe-content is serving expected content
+  ansible.builtin.uri:
+    url: "{{ pxe_content_validate_scheme }}://{{ pxe_content_validate_host }}:{{ pxe_content_host_port }}{{ pxe_content_validate_path }}"
+    method: GET
+    status_code: "{{ pxe_content_validate_status_code }}"
+    return_content: false
+  register: pxe_content_validation_result
+  failed_when: false
+  retries: "{{ pxe_content_validate_retries }}"
+  delay: "{{ pxe_content_validate_delay }}"
+  until: pxe_content_validation_result.status == (pxe_content_validate_status_code | int)
+  when:
+    - pxe_content_validate_deployment | bool
+    - not ansible_check_mode
+- name: Assert pxe-content validation succeeded
+  ansible.builtin.assert:
+    that:
+      - pxe_content_validation_result.status == (pxe_content_validate_status_code | int)
+    fail_msg: >-
+      pxe-content did not return expected status {{ pxe_content_validate_status_code }}
+      from {{ pxe_content_validate_scheme }}://{{ pxe_content_validate_host }}:{{ pxe_content_host_port }}{{ pxe_content_validate_path }}.
+  when:
+    - pxe_content_validate_deployment | bool
+    - not ansible_check_mode
+# UNCLASSIFIED
+
+⸻
+
+templates/pxe-content.env.j2
+
+PXE_SERVER={{ pxe_content_server_ip }}
+PXE_PORT={{ pxe_content_host_port }}
+{% for key, value in pxe_content_extra_env.items() %}
+{{ key }}={{ value }}
+{% endfor %}
+
+⸻
+
+templates/pxe-content.container.j2
+
+[Unit]
+Description=PXE content container
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor={{ pxe_content_iso_root }}
+[Container]
+Image={{ pxe_content_runtime_image }}
+ContainerName={{ pxe_content_container_name }}
+PublishPort={{ pxe_content_host_port }}:{{ pxe_content_container_port }}
+{% for port in pxe_content_extra_ports %}
+PublishPort={{ port }}
+{% endfor %}
+{% for volume in pxe_content_volume_mounts %}
+Volume={{ volume }}
+{% endfor %}
+EnvironmentFile={{ pxe_content_env_file }}
+{% if pxe_content_security_opt_label_disable %}
+SecurityLabelDisable=true
+{% endif %}
+{% for arg in pxe_content_quadlet_podman_args %}
+PodmanArgs={{ arg }}
+{% endfor %}
+{% for arg in pxe_content_extra_run_args %}
+PodmanArgs={{ arg }}
+{% endfor %}
+[Service]
+Restart={{ pxe_content_restart_policy }}
+RestartSec={{ pxe_content_restart_sec }}
+TimeoutStopSec={{ pxe_content_stop_timeout }}
+[Install]
+WantedBy=multi-user.target
+
+⸻
+
+meta/main.yml
+
+---
+# UNCLASSIFIED
+galaxy_info:
+  author: AeroLIT
+  description: Deploy the pxe-content Podman container as a persistent Quadlet-managed service.
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: EL
+      versions:
+        - "8"
+        - "9"
+        - "10"
+dependencies: []
+# UNCLASSIFIED
+
+⸻
+
+Optional playbook: lit/ansible/resources/playbooks/setup-pxe-content.yml
+
+---
+# UNCLASSIFIED
+- name: Setup pxe-content HTTP container service
+  hosts: all
+  become: true
+  gather_facts: true
+  collections:
+    - ansible.posix
+  roles:
+    - role: deployments/pxe-content
+# UNCLASSIFIED
+
+⸻
+
+For your current bundle layout, the key variable is this:
+
+aerolit_bundle_root: "/path/to/opened/aerolit_bundle"
+
+Then the role automatically uses:
+
+pxe_content_iso_root: "{{ aerolit_bundle_root }}/extracted_isos"
+pxe_content_image_tar_path: "{{ aerolit_bundle_root }}/files/pxe/pxe-content.tar"
+
+So in your screenshot example, if the bundle root is:
+
+/root/aerolit_rhel8_standard
+
+then the role will mount:
+
+/root/aerolit_rhel8_standard/extracted_isos:/iso:ro,Z
+
+That is the piece that fixes the /iso versus extracted_isos confusion. Host side is extracted_isos; container side stays /iso.
