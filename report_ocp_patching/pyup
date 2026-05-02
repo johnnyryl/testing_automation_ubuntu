@@ -1,3 +1,43 @@
+
+
+
+
+
+
+
+DEFAULT_HTTP_PORT = 18080
+MIN_PXE_PREFIXLEN = 29
+DEFAULT_BOOTSTRAP_SCRIPT_NAME = "aerolit_network_bootstrap.sh"
+DEFAULT_INTERFACE_SCRIPT_NAME = "aerolit_configure_interface_ip.sh"
+
+SECTION_WIDTH = 78
+SECTION_COUNTER = 0
+
+
+def print_section(title, numbered=True):
+    global SECTION_COUNTER
+
+    if numbered:
+        SECTION_COUNTER += 1
+        heading = "Step {}. {}".format(SECTION_COUNTER, title)
+    else:
+        heading = title
+
+    print()
+    print("#" * SECTION_WIDTH)
+    print("# {}".format(heading))
+    print("#" * SECTION_WIDTH)
+
+
+PRIVATE_LAB_NETWORKS = [
+
+
+
+
+
+
+
+
 """
 AeroLIT bootstrap network helper.
 
