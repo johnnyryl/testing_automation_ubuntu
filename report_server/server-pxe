@@ -1,0 +1,552 @@
+Yes — you caught the right issue. The bundle host path should be extracted_isos/, not a hardcoded host path like /iso.
+
+The clean pattern is:
+
+Host / bundle path:
+  /path/to/aerolit_bundle/extracted_isos
+Container internal path:
+  /iso
+
+So the container still uses /iso internally because that is simple and stable, but the Quadlet/role bind-mounts your real bundle path into the container:
+
+/path/to/bundle/extracted_isos:/iso:ro,Z
+
+That means the generator can always scan /iso, while the Ansible role can point /iso at whatever bundle got extracted.
+
+⸻
+
+What to change in pxe-content container project
+
+1. Create this new folder
+
+In the pxe-content project, create:
+
+scripts/
+
+Then create:
+
+scripts/generate-pxe-content.py
+
+2. Add this file: scripts/generate-pxe-content.py
+
+#!/usr/bin/env python3
+import os
+import time
+import hashlib
+from pathlib import Path
+from string import Template
+PXE_SERVER = os.environ.get("PXE_SERVER", "").strip()
+PXE_PORT = os.environ.get("PXE_PORT", "18080").strip()
+# This is the path inside the container.
+# The host/bundle extracted_isos directory should be bind-mounted here.
+ISO_ROOT = Path(os.environ.get("PXE_ISO_ROOT", "/iso"))
+HTML_ROOT = Path(os.environ.get("PXE_HTML_ROOT", "/etc/nginx/html"))
+TEMPLATE_ROOT = Path(os.environ.get("PXE_TEMPLATE_ROOT", "/templates"))
+BACKGROUND_PATH = os.environ.get("PXE_BACKGROUND_PATH", "/ui/background.png")
+WATCH_INTERVAL = int(os.environ.get("PXE_WATCH_INTERVAL", "15"))
+ROOTPW_HASH = os.environ.get("ROOTPW_HASH", "").strip()
+ALLOW_DEFAULT_ROOTPW = os.environ.get("ALLOW_DEFAULT_ROOTPW", "true").lower() == "true"
+DEFAULT_ROOTPW_HASH = "$6$RREkK0eQ2R3z8Y64USCA2sEUK/HJ4dPEAZ/CqSK2Rauff3tbR00t2apKmPTbXaXUALwgHWXdUggyaKOQQJ6Pwucavq4I35SXAZj5P/"
+OS_DEFINITIONS = {
+    "rhel7": {
+        "title": "RHEL 7",
+        "iso_dir": "rhel7iso",
+        "ks_template": "rhel7-minimal.ks.tmpl",
+        "uefi": False,
+        "bios": True,
+    },
+    "rhel8": {
+        "title": "RHEL 8",
+        "iso_dir": "rhel8iso",
+        "ks_template": "rhel8-minimal.ks.tmpl",
+        "uefi": True,
+        "bios": True,
+    },
+    "rhel9": {
+        "title": "RHEL 9",
+        "iso_dir": "rhel9iso",
+        "ks_template": "rhel9-minimal.ks.tmpl",
+        "uefi": True,
+        "bios": False,
+    },
+    "rhel10": {
+        "title": "RHEL 10",
+        "iso_dir": "rhel10iso",
+        "ks_template": "rhel10-minimal.ks.tmpl",
+        "uefi": True,
+        "bios": False,
+    },
+}
+def fail(message: str) -> None:
+    raise SystemExit(f"ERROR: {message}")
+def validate_env() -> str:
+    if not PXE_SERVER:
+        fail("PXE_SERVER is required.")
+    if ROOTPW_HASH:
+        return ROOTPW_HASH
+    if ALLOW_DEFAULT_ROOTPW:
+        return DEFAULT_ROOTPW_HASH
+    fail("ROOTPW_HASH is required unless ALLOW_DEFAULT_ROOTPW=true.")
+    return ""
+def detect_isos() -> dict:
+    detected = {}
+    for os_id, data in OS_DEFINITIONS.items():
+        iso_path = ISO_ROOT / data["iso_dir"]
+        pxeboot_path = iso_path / "images" / "pxeboot"
+        has_kernel = (pxeboot_path / "vmlinuz").is_file()
+        has_initrd = (pxeboot_path / "initrd.img").is_file()
+        if iso_path.is_dir() and has_kernel and has_initrd:
+            detected[os_id] = {
+                **data,
+                "iso_path": str(iso_path),
+            }
+    return detected
+def render_template(src: Path, dest: Path, values: dict) -> None:
+    if not src.is_file():
+        print(f"WARN: missing template: {src}")
+        return
+    raw = src.read_text()
+    rendered = Template(raw).safe_substitute(values)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(rendered)
+def render_kickstarts(detected: dict, rootpw_hash: str) -> None:
+    ks_out_dir = HTML_ROOT / "ks"
+    ks_out_dir.mkdir(parents=True, exist_ok=True)
+    for os_id, data in detected.items():
+        src = TEMPLATE_ROOT / data["ks_template"]
+        dest = ks_out_dir / f"{os_id}-minimal.ks"
+        values = {
+            "PXE_SERVER": PXE_SERVER,
+            "PXE_PORT": PXE_PORT,
+            "ROOTPW_HASH": rootpw_hash,
+        }
+        render_template(src, dest, values)
+def menu_item(label: str, target: str) -> str:
+    return f"item {target:<24} {label}"
+def render_boot_ipxe(detected: dict) -> None:
+    lines = []
+    lines.extend([
+        "#!ipxe",
+        "",
+        f"set server {PXE_SERVER}",
+        f"set port {PXE_PORT}",
+        "set base http://${server}:${port}",
+        "",
+        f"console --picture ${{base}}{BACKGROUND_PATH} --left 80 --right 80 --top 60 --bottom 80 || goto main",
+        "",
+        ":main",
+        "menu AeroLIT PXE Menu",
+        "item minimal                 Minimal Installs",
+        "item rescue                  Utilities / Rescue",
+        "item shell                   Drop to iPXE shell",
+        "choose target || goto shell",
+        "goto ${target}",
+        "",
+        ":minimal",
+        "menu Minimal Installs",
+    ])
+    for os_id, data in detected.items():
+        if data["uefi"]:
+            lines.append(menu_item(f"Install {data['title']} Minimal (UEFI)", f"{os_id}_minimal_uefi"))
+    if any(data["bios"] for data in detected.values()):
+        lines.append("item minimal_legacy          Legacy / BIOS Options")
+    lines.extend([
+        "item main                    Back to Main Menu",
+        "item shell                   Drop to iPXE shell",
+        "choose target || goto main",
+        "goto ${target}",
+        "",
+        ":minimal_legacy",
+        "menu Minimal Installs - Legacy / BIOS",
+    ])
+    for os_id, data in detected.items():
+        if data["bios"]:
+            lines.append(menu_item(f"Install {data['title']} Minimal (BIOS / Legacy)", f"{os_id}_minimal_bios"))
+    lines.extend([
+        "item minimal                 Back to Minimal Installs",
+        "item main                    Back to Main Menu",
+        "item shell                   Drop to iPXE shell",
+        "choose target || goto minimal",
+        "goto ${target}",
+        "",
+    ])
+    for os_id, data in detected.items():
+        if data["uefi"]:
+            lines.extend([
+                f":{os_id}_minimal_uefi",
+                f"kernel ${{base}}/{os_id}/images/pxeboot/vmlinuz initrd=initrd.img ip=dhcp inst.repo=${{base}}/{os_id} inst.stage2=${{base}}/{os_id} inst.ks=${{base}}/ks/{os_id}-minimal.ks inst.text nomodeset",
+                f"initrd --name initrd.img ${{base}}/{os_id}/images/pxeboot/initrd.img",
+                "boot",
+                "",
+            ])
+        if data["bios"]:
+            lines.extend([
+                f":{os_id}_minimal_bios",
+                f"kernel ${{base}}/{os_id}/images/pxeboot/vmlinuz ip=dhcp inst.repo=${{base}}/{os_id} inst.stage2=${{base}}/{os_id} inst.ks=${{base}}/ks/{os_id}-minimal.ks inst.text nomodeset",
+                f"initrd ${{base}}/{os_id}/images/pxeboot/initrd.img",
+                "boot",
+                "",
+            ])
+    lines.extend([
+        ":rescue",
+        "menu Utilities / Rescue",
+        "item main                    Back to Main Menu",
+        "item shell                   Drop to iPXE shell",
+        "choose target || goto main",
+        "goto ${target}",
+        "",
+        ":shell",
+        "shell",
+        "",
+    ])
+    boot_file = HTML_ROOT / "boot.ipxe"
+    boot_file.write_text("\n".join(lines))
+def render_status(detected: dict) -> None:
+    generated_dir = HTML_ROOT / "generated"
+    generated_dir.mkdir(parents=True, exist_ok=True)
+    detected_list = sorted(detected.keys())
+    status = [
+        "{",
+        f'  "pxe_server": "{PXE_SERVER}",',
+        f'  "pxe_port": "{PXE_PORT}",',
+        f'  "container_iso_root": "{ISO_ROOT}",',
+        f'  "detected_isos": {detected_list},',
+        '  "enabled_profiles": ["minimal"],',
+        '  "boot_menu": "/boot.ipxe"',
+        "}",
+        "",
+    ]
+    (generated_dir / "status.json").write_text("\n".join(status))
+def watched_state_hash() -> str:
+    """
+    Do not hash the whole extracted ISO tree.
+    That could be huge. Only watch the marker files that matter for PXE boot.
+    """
+    h = hashlib.sha256()
+    watched_paths = []
+    for os_id, data in OS_DEFINITIONS.items():
+        iso_path = ISO_ROOT / data["iso_dir"]
+        watched_paths.extend([
+            iso_path,
+            iso_path / "images" / "pxeboot" / "vmlinuz",
+            iso_path / "images" / "pxeboot" / "initrd.img",
+            TEMPLATE_ROOT / data["ks_template"],
+        ])
+    watched_paths.append(HTML_ROOT / BACKGROUND_PATH.lstrip("/"))
+    for path in watched_paths:
+        h.update(str(path).encode())
+        if path.exists():
+            stat = path.stat()
+            h.update(str(stat.st_mtime_ns).encode())
+            h.update(str(stat.st_size).encode())
+            h.update(b"exists")
+        else:
+            h.update(b"missing")
+    return h.hexdigest()
+def generate_once() -> None:
+    rootpw_hash = validate_env()
+    detected = detect_isos()
+    HTML_ROOT.mkdir(parents=True, exist_ok=True)
+    render_kickstarts(detected, rootpw_hash)
+    render_boot_ipxe(detected)
+    render_status(detected)
+    print(f"Generated PXE content. Detected ISOs: {', '.join(sorted(detected.keys())) or 'none'}", flush=True)
+def watch_loop() -> None:
+    last_hash = ""
+    while True:
+        current_hash = watched_state_hash()
+        if current_hash != last_hash:
+            generate_once()
+            last_hash = current_hash
+        time.sleep(WATCH_INTERVAL)
+if __name__ == "__main__":
+    watch_loop()
+
+⸻
+
+3. Replace entrypoint.sh
+
+Replace the whole file with:
+
+#!/bin/sh
+set -eu
+: "${PXE_SERVER:?PXE_SERVER is required}"
+PXE_PORT="${PXE_PORT:-18080}"
+PXE_ISO_ROOT="${PXE_ISO_ROOT:-/iso}"
+PXE_HTML_ROOT="${PXE_HTML_ROOT:-/etc/nginx/html}"
+PXE_TEMPLATE_ROOT="${PXE_TEMPLATE_ROOT:-/templates}"
+PXE_WATCH_INTERVAL="${PXE_WATCH_INTERVAL:-15}"
+PXE_BACKGROUND_PATH="${PXE_BACKGROUND_PATH:-/ui/background.png}"
+ALLOW_DEFAULT_ROOTPW="${ALLOW_DEFAULT_ROOTPW:-true}"
+export PXE_SERVER
+export PXE_PORT
+export PXE_ISO_ROOT
+export PXE_HTML_ROOT
+export PXE_TEMPLATE_ROOT
+export PXE_WATCH_INTERVAL
+export PXE_BACKGROUND_PATH
+export ALLOW_DEFAULT_ROOTPW
+mkdir -p /etc/nginx/html/ks
+mkdir -p /etc/nginx/html/generated
+/usr/local/bin/generate-pxe-content.py &
+exec /docker-entrypoint.sh nginx -g 'daemon off;'
+
+⸻
+
+4. Replace Dockerfile
+
+Replace the whole file with:
+
+ARG DOCKER_FROM_IMAGE
+FROM ${DOCKER_FROM_IMAGE}
+USER 0
+RUN mkdir -p \
+    /etc/nginx/html \
+    /etc/nginx/html/ks \
+    /etc/nginx/html/ui \
+    /etc/nginx/conf.d \
+    /etc/nginx/http.d \
+    /templates \
+    /usr/local/bin
+COPY content/ks/rhel7-minimal.ks.tmpl /templates/rhel7-minimal.ks.tmpl
+COPY content/ks/rhel8-minimal.ks.tmpl /templates/rhel8-minimal.ks.tmpl
+COPY content/ks/rhel9-minimal.ks.tmpl /templates/rhel9-minimal.ks.tmpl
+COPY content/ks/rhel10-minimal.ks.tmpl /templates/rhel10-minimal.ks.tmpl
+COPY content/ui/background.png /etc/nginx/html/ui/background.png
+COPY nginx/pxe.conf /etc/nginx/conf.d/default.conf
+COPY nginx/pxe.conf /etc/nginx/http.d/default.conf
+COPY scripts/generate-pxe-content.py /usr/local/bin/generate-pxe-content.py
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod 0755 /entrypoint.sh /usr/local/bin/generate-pxe-content.py
+EXPOSE 8080
+ENTRYPOINT ["/entrypoint.sh"]
+
+⸻
+
+5. Keep nginx/pxe.conf like this
+
+This should stay using /iso because /iso is the inside-the-container mount point:
+
+server {
+    listen 8080 default_server;
+    server_name _;
+    root /etc/nginx/html;
+    location / {
+        try_files $uri $uri/ =404;
+    }
+    location /rhel7 {
+        alias /iso/rhel7iso;
+    }
+    location /rhel8 {
+        alias /iso/rhel8iso;
+    }
+    location /rhel9 {
+        alias /iso/rhel9iso;
+    }
+    location /rhel10 {
+        alias /iso/rhel10iso;
+    }
+}
+
+Do not change this to extracted_isos inside the container unless you also change the Quadlet mount and script. Keeping /iso internal is cleaner.
+
+⸻
+
+What to change in the pxe-content Ansible role
+
+This is the important part that handles your bundle layout.
+
+Your role should mount this:
+
+{{ pxe_content_bundle_root }}/extracted_isos
+
+into the container as:
+
+/iso
+
+In defaults/main.yml, add/replace these variables
+
+Keep your existing defaults, but replace the ISO/root/volume section with this pattern:
+
+# Bundle / ISO source
+# If pxe_content_bundle_root is set, the role uses:
+#   {{ pxe_content_bundle_root }}/extracted_isos
+#
+# If pxe_content_bundle_root is blank, it falls back to pxe_content_iso_root.
+pxe_content_bundle_root: ""
+pxe_content_iso_root: "/srv/ipxe"
+pxe_content_host_iso_root: "{{ (pxe_content_bundle_root | length > 0) | ternary(pxe_content_bundle_root ~ '/extracted_isos', pxe_content_iso_root) }}"
+pxe_content_container_iso_root: "/iso"
+# Main content mount plus any extras.
+pxe_content_volume_mounts:
+  - "{{ pxe_content_host_iso_root }}:{{ pxe_content_container_iso_root }}:ro,Z"
+# Dynamic generator settings
+pxe_content_watch_interval: 15
+pxe_content_html_root: "/etc/nginx/html"
+pxe_content_template_root: "/templates"
+pxe_content_background_path: "/ui/background.png"
+pxe_content_allow_default_rootpw: true
+pxe_content_rootpw_hash: ""
+
+So in your bundle example, you could set:
+
+pxe_content_bundle_root: "/root/aerolit_rhel8_standard"
+
+Then the role automatically uses:
+
+/root/aerolit_rhel8_standard/extracted_isos
+
+and mounts it into the container as:
+
+/iso
+
+⸻
+
+In tasks/install.yml, change the “ensure PXE content root exists” task
+
+Find the old task that probably says something like:
+
+- name: Ensure PXE content root exists
+  ansible.builtin.file:
+    path: "{{ pxe_content_iso_root }}"
+
+Replace it with:
+
+- name: Ensure host ISO source path exists
+  ansible.builtin.file:
+    path: "{{ pxe_content_host_iso_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+That makes the role care about the real host path, whether it is /srv/ipxe or /path/to/bundle/extracted_isos.
+
+⸻
+
+In templates/pxe-content.env.j2, replace the file
+
+Replace the whole file with:
+
+PXE_SERVER={{ pxe_content_server_ip }}
+PXE_PORT={{ pxe_content_host_port }}
+PXE_ISO_ROOT={{ pxe_content_container_iso_root }}
+PXE_HTML_ROOT={{ pxe_content_html_root }}
+PXE_TEMPLATE_ROOT={{ pxe_content_template_root }}
+PXE_WATCH_INTERVAL={{ pxe_content_watch_interval }}
+PXE_BACKGROUND_PATH={{ pxe_content_background_path }}
+ALLOW_DEFAULT_ROOTPW={{ pxe_content_allow_default_rootpw | lower }}
+{% if pxe_content_rootpw_hash | length > 0 %}
+ROOTPW_HASH={{ pxe_content_rootpw_hash }}
+{% endif %}
+{% for key, value in pxe_content_extra_env.items() %}
+{{ key }}={{ value }}
+{% endfor %}
+
+This is the env file your Quadlet was missing earlier, and now it also tells the generator where to look inside the container.
+
+⸻
+
+In templates/pxe-content.container.j2, change RequiresMountsFor
+
+Find:
+
+RequiresMountsFor={{ pxe_content_iso_root }}
+
+Replace it with:
+
+RequiresMountsFor={{ pxe_content_host_iso_root }}
+
+The full Quadlet template should look like this:
+
+[Unit]
+Description=PXE content container
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor={{ pxe_content_host_iso_root }}
+[Container]
+Image={{ pxe_content_runtime_image }}
+ContainerName={{ pxe_content_container_name }}
+PublishPort={{ pxe_content_host_port }}:{{ pxe_content_container_port }}
+{% for port in pxe_content_extra_ports %}
+PublishPort={{ port }}
+{% endfor %}
+{% for volume in pxe_content_volume_mounts %}
+Volume={{ volume }}
+{% endfor %}
+EnvironmentFile={{ pxe_content_env_file }}
+{% if pxe_content_security_opt_label_disable %}
+SecurityLabelDisable=true
+{% endif %}
+{% for arg in pxe_content_quadlet_podman_args %}
+PodmanArgs={{ arg }}
+{% endfor %}
+{% for arg in pxe_content_extra_run_args %}
+PodmanArgs={{ arg }}
+{% endfor %}
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStopSec={{ pxe_content_stop_timeout }}
+[Install]
+WantedBy=multi-user.target
+
+⸻
+
+What not to change yet
+
+For this phase, do not restructure profiles yet.
+
+Keep these files where they are:
+
+content/ks/rhel7-minimal.ks.tmpl
+content/ks/rhel8-minimal.ks.tmpl
+content/ks/rhel9-minimal.ks.tmpl
+content/ks/rhel10-minimal.ks.tmpl
+content/ui/background.png
+nginx/pxe.conf
+
+Also, content/boot.ipxe.tmpl becomes unused after this change. You can leave it for now, but the generated /etc/nginx/html/boot.ipxe will come from:
+
+scripts/generate-pxe-content.py
+
+Later, we can either delete content/boot.ipxe.tmpl or repurpose it as an override template.
+
+⸻
+
+How to test with your exact bundle layout
+
+Based on your screenshot, your bundle root looks like:
+
+/root/aerolit_rhel8_standard
+
+and the ISO path is:
+
+/root/aerolit_rhel8_standard/extracted_isos/rhel8iso
+
+So your role vars should include:
+
+pxe_content_bundle_root: "/root/aerolit_rhel8_standard"
+pxe_content_server_ip: "192.168.109.139"
+pxe_content_host_port: 18080
+
+After deployment, run:
+
+systemctl status pxe-content.service --no-pager
+podman ps
+curl http://127.0.0.1:18080/generated/status.json
+curl http://127.0.0.1:18080/boot.ipxe
+
+With only rhel8iso present, the generated menu should only show RHEL 8 install options.
+
+Then if you add:
+
+/root/aerolit_rhel8_standard/extracted_isos/rhel9iso
+
+wait about 15 seconds and run:
+
+curl http://127.0.0.1:18080/boot.ipxe
+
+RHEL 9 should appear without restarting the container.
+
+So the corrected answer is: use extracted_isos on the host side, but keep /iso inside the container. That gives you the dynamic bundle behavior without hardcoding one absolute path.
