@@ -3,6 +3,80 @@
 
 
 
+Yes. Only add print_section() to the major workflow functions, not every small validation helper.
+
+Use this command to find the spots:
+
+grep -nE '^def (choose_run_mode|choose_interface|choose_network|prompt_server_ip|choose_http_port|choose_gateway|prompt_dhcp_range|choose_dns_servers|choose_nfs_options|choose_interface_script_generation|print_plan|print_final_instructions)\(' collections-hub/scripts/aerolit_ip_helper.py
+
+Then add these as the first line inside each function, replacing the plain print() at the top if there is one.
+
+def choose_run_mode():
+    print_section("Bootstrap mode")
+def choose_interface(interfaces, default_route):
+    print_section("Provisioning interface")
+def choose_network(selected, default_route, run_mode):
+    print_section("Client/provisioning network")
+def prompt_server_ip(default_ip, network, run_mode):
+    print_section("Server IP")
+def choose_http_port():
+    print_section("PXE HTTP port")
+def choose_gateway(network, default_route, isolated_or_custom, server_ip):
+    print_section("PXE gateway")
+def prompt_dhcp_range(network, server_ip, gateway_ip):
+    print_section("DHCP client range")
+def choose_dns_servers(default_gateway, server_ip):
+    print_section("PXE DNS")
+def choose_nfs_options(network, server_ip):
+    print_section("NFS options")
+def choose_interface_script_generation(selected, server_interface):
+    print_section("Interface IP setup")
+
+For the final two, use numbered=False:
+
+def print_plan(run_mode, plan, command):
+    print_section("Suggested network plan", numbered=False)
+def print_final_instructions(interface_script_path, bootstrap_script_path, interface_name, interface_needs_ip):
+    print_section("Generated scripts and next steps", numbered=False)
+
+Do not add section headers to these lower-level helper functions:
+
+prompt()
+yes_no()
+choose()
+prompt_int()
+prompt_network()
+prompt_ip()
+prompt_gateway()
+prompt_dns_server()
+prompt_nfs_client_spec()
+
+Those are reused inside bigger steps, so adding banners there would make the output too noisy.
+
+Also change this line in print_interface_summary():
+
+extra = "  (likely virtual/container interface; usually not for physical PXE)"
+
+to:
+
+extra = "  (virtual/container; usually not for PXE)"
+
+Then run:
+
+python3 -m py_compile collections-hub/scripts/aerolit_ip_helper.py
+./bootstrap.sh --network-helper
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 DEFAULT_HTTP_PORT = 18080
