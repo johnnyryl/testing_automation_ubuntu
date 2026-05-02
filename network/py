@@ -1,0 +1,11 @@
+def main():
+    global SECTION_COUNTER
+    SECTION_COUNTER = 0
+
+    parser = argparse.ArgumentParser(description="Generate AeroLIT bootstrap network options.")
+    parser.add_argument("--bootstrap-path", default=None)
+    parser.add_argument(
+        "--output",
+        help="Advanced/testing only: optional bootstrap script output path. Normal use writes next to bootstrap.sh automatically.",
+    )
+    args = parser.parse_args()
