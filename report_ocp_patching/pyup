@@ -1,4 +1,72 @@
 
+
+
+
+
+
+Yes — I would fix that inside choose_gateway() so users see that none is valid before they answer the default gateway question.
+
+Replace your current choose_gateway() function with this:
+
+def choose_gateway(network, default_route, isolated_or_custom, server_ip):
+    default_gateway = "none"
+    route_gateway = default_route.get("gateway", "")
+    parsed_route_gateway = parse_ipv4(route_gateway)
+    if not isolated_or_custom and parsed_route_gateway and parsed_route_gateway in network and parsed_route_gateway != server_ip:
+        default_gateway = str(parsed_route_gateway)
+    print()
+    if isolated_or_custom:
+        print("For isolated PXE labs, 'none' is usually correct because clients only need to reach this AeroLIT host during provisioning.")
+    else:
+        print("The PXE gateway is what DHCP advertises to PXE clients as their router/default gateway.")
+        print("If this is an isolated lab or you are not sure a gateway is needed, you can choose 'none'.")
+    print("Current suggested PXE gateway: {}".format(default_gateway))
+    print("Choose yes to use that value, or choose no to enter a different gateway IP or 'none'.")
+    if yes_no("Use the suggested PXE gateway '{}' ?".format(default_gateway), True):
+        return default_gateway
+    return prompt_gateway(default_gateway, network, server_ip)
+
+Also, I would make the related line in prompt_gateway() a little clearer. Replace this:
+
+print("The PXE gateway is optional. Use 'none' for an isolated lab with no router/gateway.")
+
+with this:
+
+print("The PXE gateway is optional. Type 'none' for an isolated lab with no router/gateway.")
+
+So if they say no to the suggested gateway, the next prompt makes it obvious they can type:
+
+none
+
+One tiny formatting thing: I’d remove the space before the question mark here:
+
+if yes_no("Use the suggested PXE gateway '{}' ?".format(default_gateway), True):
+
+Use this instead:
+
+if yes_no("Use the suggested PXE gateway '{}' ?".format(default_gateway), True):
+
+Actually better:
+
+if yes_no("Use the suggested PXE gateway '{}'?".format(default_gateway), True):
+
+So the final clean line is:
+
+if yes_no("Use the suggested PXE gateway '{}'?".format(default_gateway), True):
+
+That should make the gateway step much less confusing.
+
+
+
+
+
+
+
+
+
+
+
+
 run_ip_helper() {
   local helper="${SCRIPT_DIR}/aerolit_ip_helper.py"
   local py=""
