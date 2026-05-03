@@ -1,3 +1,20 @@
+
+echo "Running initial PXE content generation..."
+python3 /usr/local/bin/generate-pxe-content.py --once
+
+if [ ! -s "${PXE_HTML_ROOT}/boot.ipxe" ]; then
+  echo "ERROR: ${PXE_HTML_ROOT}/boot.ipxe was not generated." >&2
+  exit 1
+fi
+
+echo "Starting PXE content watcher..."
+python3 /usr/local/bin/generate-pxe-content.py --watch &
+
+echo "Starting nginx..."
+exec /docker-entrypoint.sh nginx -g 'daemon off;'
+
+
+
 Yes. Based on what your screenshots show, replace these 4 files in the pxe-content container project:
 
 Dockerfile
