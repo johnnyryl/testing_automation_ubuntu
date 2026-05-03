@@ -1,0 +1,22 @@
+podman exec -it pxe-content-test sh -lc '
+echo "=== ENV ==="
+env | grep -E "PXE|ROOTPW|SCAN|ISO" || true
+
+echo
+echo "=== /iso ==="
+find /iso -maxdepth 2 -type d -print
+
+echo
+echo "=== /etc/nginx/html ==="
+find /etc/nginx/html -maxdepth 3 -type f -print
+
+echo
+echo "=== boot.ipxe check ==="
+ls -l /etc/nginx/html/boot.ipxe || true
+head -40 /etc/nginx/html/boot.ipxe || true
+
+echo
+echo "=== templates/scripts check ==="
+ls -l /entrypoint.sh /generate-pxe-content.py 2>/dev/null || true
+ls -la /templates 2>/dev/null || true
+'
