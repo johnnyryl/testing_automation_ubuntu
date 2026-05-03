@@ -1,0 +1,106 @@
+Yes — that is the right move. Build a new internal base image once, push it as its own project, then make pxe-content use that as DOCKER_FROM_IMAGE.
+
+The important thing: do not keep installing Python inside the pxe-content image. Put Python in the new base image.
+
+1. Set your image names
+
+Adjust the new image path if your GitLab project path is slightly different.
+
+BASE_IMAGE="registry.gitlab.us.lmco.com/lit/containers/images/base-images/nginx-alpine:latest"
+NEW_IMAGE="registry.gitlab.us.lmco.com/lit/containers/images/nginx-python-alpine:latest"
+
+Pull and inspect the current image:
+
+podman login registry.gitlab.us.lmco.com
+podman pull "$BASE_IMAGE"
+podman run --rm "$BASE_IMAGE" sh -lc '
+cat /etc/os-release || true
+nginx -v || true
+command -v apk || true
+python3 --version || true
+'
+
+You should see nginx, apk, and probably no python3.
+
+2. Create the new nginx-python-alpine project files
+
+Create a new folder locally:
+
+mkdir -p nginx-python-alpine
+cd nginx-python-alpine
+
+Create Dockerfile:
+
+ARG DOCKER_FROM_IMAGE
+FROM ${DOCKER_FROM_IMAGE}
+USER 0
+RUN if ! command -v apk >/dev/null 2>&1; then \
+      echo "ERROR: this image is expected to be Alpine-based and have apk." >&2; \
+      exit 1; \
+    fi
+RUN apk add --no-cache python3
+RUN nginx -v && python3 --version
+
+That is all this image needs for your current PXE generator. No pip is needed because your Python script uses standard library modules only.
+
+3. Build it locally
+
+podman build \
+  --pull=never \
+  --build-arg DOCKER_FROM_IMAGE="$BASE_IMAGE" \
+  -t "$NEW_IMAGE" \
+  .
+
+Test it:
+
+podman run --rm "$NEW_IMAGE" sh -lc '
+nginx -v
+python3 --version
+command -v python3
+'
+
+4. Push it to the new GitLab project registry
+
+podman push "$NEW_IMAGE"
+
+Optional but recommended: also push a dated tag so you are not only relying on latest.
+
+DATE_TAG="$(date +%Y%m%d)"
+DATED_IMAGE="${NEW_IMAGE%:latest}:${DATE_TAG}"
+podman tag "$NEW_IMAGE" "$DATED_IMAGE"
+podman push "$DATED_IMAGE"
+
+5. Update pxe-content/.gitlab-ci.yml
+
+Change this:
+
+DOCKER_FROM_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/base-images/nginx-alpine:latest"
+
+To this:
+
+DOCKER_FROM_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/nginx-python-alpine:latest"
+
+Or use the dated tag for repeatability:
+
+DOCKER_FROM_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/nginx-python-alpine:20260503"
+
+6. Keep the simplified pxe-content Dockerfile
+
+Once the new base image has Python, your pxe-content Dockerfile should not run apk add python3 anymore.
+
+Keep this kind of check only:
+
+RUN command -v python3 >/dev/null 2>&1 || \
+    (echo "ERROR: base image must include python3." >&2 && exit 1)
+
+Important warning
+
+The new nginx-python-alpine project pipeline may fail the same way if GitLab CI still cannot reach the Alpine package repo. Your local build and push will solve the immediate issue because the final image already contains Python.
+
+Later, for a fully repeatable CI build, the nginx-python-alpine project needs one of these:
+
+1. access to an internal Alpine package mirror, or
+2. an internal base image that already includes python3, or
+3. a vendored/offline apk package approach
+
+For now, local build → push internal image → use it in pxe-content is a good practical path.
