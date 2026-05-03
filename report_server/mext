@@ -1,0 +1,479 @@
+#!/usr/bin/env python3
+
+import argparse
+import hashlib
+import json
+import os
+import time
+from pathlib import Path
+from string import Template
+from typing import Dict, List, Optional, Any
+
+
+def getenv(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
+
+
+PXE_SERVER = getenv("PXE_SERVER")
+PXE_PORT = getenv("PXE_PORT", "18080")
+
+# This is the stable path inside the container.
+# The host bundle extracted_isos directory should be bind-mounted here.
+PXE_ISO_ROOT = Path(getenv("PXE_ISO_ROOT", "/iso"))
+
+PXE_HTML_ROOT = Path(getenv("PXE_HTML_ROOT", "/etc/nginx/html"))
+PXE_TEMPLATE_ROOT = Path(getenv("PXE_TEMPLATE_ROOT", "/templates"))
+PXE_BACKGROUND_PATH = getenv("PXE_BACKGROUND_PATH", "/ui/background.png")
+PXE_WATCH_INTERVAL = int(getenv("PXE_WATCH_INTERVAL", "15"))
+
+ROOTPW_HASH = getenv("ROOTPW_HASH")
+ALLOW_DEFAULT_ROOTPW = getenv("ALLOW_DEFAULT_ROOTPW", "true").lower() == "true"
+
+# Default password is "changeme".
+DEFAULT_ROOTPW_HASH = "$6$REKKqe02R3z8Y64USCA2sFUk/H/4dPEAZ/CqSX2Rauff3tbR00t2apKmPTbXAXUALwgwHWXdoggAKOQQuJ6PWWCavgQi35S8XAIj5P/"
+
+OS_DEFINITIONS: Dict[str, Dict[str, Any]] = {
+    "rhel10": {
+        "major": 10,
+        "title": "RHEL 10",
+        "iso_dir": "rhel10iso",
+        "ks_template": "rhel10-minimal.ks.tmpl",
+        "uefi": True,
+        "bios": True,
+    },
+    "rhel9": {
+        "major": 9,
+        "title": "RHEL 9",
+        "iso_dir": "rhel9iso",
+        "ks_template": "rhel9-minimal.ks.tmpl",
+        "uefi": True,
+        "bios": True,
+    },
+    "rhel8": {
+        "major": 8,
+        "title": "RHEL 8",
+        "iso_dir": "rhel8iso",
+        "ks_template": "rhel8-minimal.ks.tmpl",
+        "uefi": True,
+        "bios": True,
+    },
+    "rhel7": {
+        "major": 7,
+        "title": "RHEL 7",
+        "iso_dir": "rhel7iso",
+        "ks_template": "rhel7-minimal.ks.tmpl",
+        "uefi": False,
+        "bios": True,
+    },
+}
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"ERROR: {message}")
+
+
+def validate_env() -> str:
+    if not PXE_SERVER:
+        fail("PXE_SERVER is required.")
+
+    if ROOTPW_HASH:
+        return ROOTPW_HASH
+
+    if ALLOW_DEFAULT_ROOTPW:
+        return DEFAULT_ROOTPW_HASH
+
+    fail("ROOTPW_HASH is required unless ALLOW_DEFAULT_ROOTPW=true.")
+    return ""
+
+
+def atomic_write(path: Path, content: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.chmod(mode)
+    tmp_path.replace(path)
+
+
+def detect_isos() -> Dict[str, Dict[str, Any]]:
+    detected: Dict[str, Dict[str, Any]] = {}
+
+    for os_id, data in OS_DEFINITIONS.items():
+        iso_path = PXE_ISO_ROOT / data["iso_dir"]
+        pxeboot_path = iso_path / "images" / "pxeboot"
+
+        has_kernel = (pxeboot_path / "vmlinuz").is_file()
+        has_initrd = (pxeboot_path / "initrd.img").is_file()
+
+        if iso_path.is_dir() and has_kernel and has_initrd:
+            detected[os_id] = {
+                **data,
+                "os_id": os_id,
+                "iso_path": str(iso_path),
+                "http_path": os_id,
+                "ks_name": f"{os_id}-minimal.ks",
+                "uefi_target": f"{os_id}_minimal_uefi",
+                "bios_target": f"{os_id}_minimal_bios",
+            }
+
+    return detected
+
+
+def find_template(template_name: str) -> Optional[Path]:
+    candidates = [
+        PXE_TEMPLATE_ROOT / "ks" / template_name,
+        PXE_TEMPLATE_ROOT / template_name,
+    ]
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    return None
+
+
+def render_template(src: Path, dest: Path, values: Dict[str, str]) -> None:
+    raw = src.read_text(encoding="utf-8")
+    rendered = Template(raw).safe_substitute(values)
+    atomic_write(dest, rendered)
+
+
+def default_kickstart(data: Dict[str, Any], rootpw_hash: str) -> str:
+    major = data["major"]
+    os_id = data["os_id"]
+
+    return f"""#version=RHEL{major}
+text
+reboot
+
+lang en_US.UTF-8
+keyboard us
+timezone America/Chicago --utc
+
+network --bootproto=dhcp --device=link --activate
+
+rootpw --iscrypted {rootpw_hash}
+firstboot --disable
+selinux --enforcing
+firewall --enabled --service=ssh
+services --enabled=sshd
+
+url --url="http://{PXE_SERVER}:{PXE_PORT}/{os_id}"
+
+zerombr
+clearpart --all --initlabel
+autopart --type=lvm
+
+%packages
+@^minimal-environment
+%end
+
+%addon com_redhat_kdump --enable
+%end
+"""
+
+
+def render_kickstarts(detected: Dict[str, Dict[str, Any]], rootpw_hash: str) -> None:
+    ks_out_dir = PXE_HTML_ROOT / "ks"
+    ks_out_dir.mkdir(parents=True, exist_ok=True)
+
+    values = {
+        "PXE_SERVER": PXE_SERVER,
+        "PXE_PORT": PXE_PORT,
+        "ROOTPW_HASH": rootpw_hash,
+    }
+
+    for os_id, data in detected.items():
+        template_path = find_template(data["ks_template"])
+        dest = ks_out_dir / data["ks_name"]
+
+        if template_path:
+            render_template(template_path, dest, values)
+        else:
+            atomic_write(dest, default_kickstart(data, rootpw_hash))
+
+
+def menu_item(label: str, target: str) -> str:
+    return f"item {target:<28} {label}"
+
+
+def kernel_block(data: Dict[str, Any], target: str) -> str:
+    os_id = data["os_id"]
+
+    return f""":{target}
+kernel ${{base}}/{os_id}/images/pxeboot/vmlinuz initrd=initrd.img ip=dhcp inst.repo=${{base}}/{os_id} inst.stage2=${{base}}/{os_id} inst.ks=${{base}}/ks/{data["ks_name"]} inst.text nomodeset
+initrd --name initrd.img ${{base}}/{os_id}/images/pxeboot/initrd.img
+boot
+"""
+
+
+def render_boot_ipxe(detected: Dict[str, Dict[str, Any]]) -> None:
+    lines: List[str] = []
+
+    lines.extend(
+        [
+            "#!ipxe",
+            "",
+            f"set server {PXE_SERVER}",
+            f"set port {PXE_PORT}",
+            "set base http://${server}:${port}",
+            "",
+            f"console --picture ${{base}}{PXE_BACKGROUND_PATH} --left 80 --right 80 --top 60 --bottom 60 || goto main",
+            "",
+            ":main",
+            "menu AeroLIT PXE Menu",
+        ]
+    )
+
+    if detected:
+        lines.append(menu_item("Minimal Installs", "minimal"))
+
+    lines.extend(
+        [
+            menu_item("Utilities / Rescue", "rescue"),
+            menu_item("Drop to iPXE shell", "shell"),
+            "choose target || goto shell",
+            "goto ${target}",
+            "",
+        ]
+    )
+
+    if detected:
+        lines.extend(
+            [
+                ":minimal",
+                "menu Minimal Installs",
+            ]
+        )
+
+        for os_id, data in detected.items():
+            if data["uefi"]:
+                lines.append(menu_item(f"Install {data['title']} Minimal (UEFI)", data["uefi_target"]))
+
+        if any(data["bios"] for data in detected.values()):
+            lines.append(menu_item("Legacy / BIOS Options", "minimal_legacy"))
+
+        lines.extend(
+            [
+                menu_item("Back to Main Menu", "main"),
+                menu_item("Drop to iPXE shell", "shell"),
+                "choose target || goto main",
+                "goto ${target}",
+                "",
+                ":minimal_legacy",
+                "menu Minimal Installs - Legacy / BIOS",
+            ]
+        )
+
+        for os_id, data in detected.items():
+            if data["bios"]:
+                lines.append(menu_item(f"Install {data['title']} Minimal (BIOS / Legacy)", data["bios_target"]))
+
+        lines.extend(
+            [
+                menu_item("Back to Minimal Installs", "minimal"),
+                menu_item("Back to Main Menu", "main"),
+                menu_item("Drop to iPXE shell", "shell"),
+                "choose target || goto minimal",
+                "goto ${target}",
+                "",
+            ]
+        )
+
+        for os_id, data in detected.items():
+            if data["uefi"]:
+                lines.append(kernel_block(data, data["uefi_target"]))
+
+            if data["bios"]:
+                lines.append(kernel_block(data, data["bios_target"]))
+
+    lines.extend(
+        [
+            ":rescue",
+            "menu Utilities / Rescue",
+            menu_item("Back to Main Menu", "main"),
+            menu_item("Drop to iPXE shell", "shell"),
+            "choose target || goto main",
+            "goto ${target}",
+            "",
+            ":shell",
+            "shell",
+            "",
+        ]
+    )
+
+    atomic_write(PXE_HTML_ROOT / "boot.ipxe", "\n".join(lines))
+
+
+def render_status(detected: Dict[str, Dict[str, Any]]) -> None:
+    generated_dir = PXE_HTML_ROOT / "generated"
+    generated_dir.mkdir(parents=True, exist_ok=True)
+
+    detected_list = []
+    for os_id, data in detected.items():
+        detected_list.append(
+            {
+                "os_id": os_id,
+                "title": data["title"],
+                "iso_dir": data["iso_dir"],
+                "iso_path": data["iso_path"],
+                "http_path": f"/{data['http_path']}",
+                "kickstart": f"/ks/{data['ks_name']}",
+                "uefi_enabled": data["uefi"],
+                "bios_enabled": data["bios"],
+            }
+        )
+
+    status = {
+        "pxe_server": PXE_SERVER,
+        "pxe_port": PXE_PORT,
+        "container_iso_root": str(PXE_ISO_ROOT),
+        "html_root": str(PXE_HTML_ROOT),
+        "detected_isos": detected_list,
+        "enabled_profiles": ["minimal"],
+        "boot_menu": "/boot.ipxe",
+    }
+
+    atomic_write(
+        generated_dir / "status.json",
+        json.dumps(status, indent=2, sort_keys=True) + "\n",
+    )
+
+    inventory_lines = []
+    if detected_list:
+        for item in detected_list:
+            inventory_lines.append(f"{item['os_id']} {item['iso_dir']} {item['iso_path']}")
+    else:
+        inventory_lines.append("No supported RHEL ISO trees detected.")
+
+    atomic_write(generated_dir / "isos.txt", "\n".join(inventory_lines) + "\n")
+
+
+def render_index(detected: Dict[str, Dict[str, Any]]) -> None:
+    lines = [
+        "<html>",
+        "<head><title>AeroLIT PXE Content</title></head>",
+        "<body>",
+        "<h1>AeroLIT PXE Content</h1>",
+        "<h2>Detected ISO Trees</h2>",
+        "<ul>",
+    ]
+
+    if detected:
+        for os_id, data in detected.items():
+            lines.append(
+                f"<li>{data['title']}: /{data['http_path']}/ from {data['iso_path']}</li>"
+            )
+    else:
+        lines.append("<li>No supported RHEL ISO trees detected.</li>")
+
+    lines.extend(
+        [
+            "</ul>",
+            "<h2>Generated Files</h2>",
+            "<ul>",
+            '<li><a href="/boot.ipxe">boot.ipxe</a></li>',
+            '<li><a href="/generated/status.json">generated/status.json</a></li>',
+            '<li><a href="/generated/isos.txt">generated/isos.txt</a></li>',
+            "</ul>",
+            "</body>",
+            "</html>",
+            "",
+        ]
+    )
+
+    atomic_write(PXE_HTML_ROOT / "index.html", "\n".join(lines))
+
+
+def watched_state_hash() -> str:
+    h = hashlib.sha256()
+
+    watched_paths: List[Path] = []
+
+    for os_id, data in OS_DEFINITIONS.items():
+        iso_path = PXE_ISO_ROOT / data["iso_dir"]
+        watched_paths.extend(
+            [
+                iso_path,
+                iso_path / "images" / "pxeboot" / "vmlinuz",
+                iso_path / "images" / "pxeboot" / "initrd.img",
+                PXE_TEMPLATE_ROOT / "ks" / data["ks_template"],
+                PXE_TEMPLATE_ROOT / data["ks_template"],
+            ]
+        )
+
+    watched_paths.append(PXE_HTML_ROOT / PXE_BACKGROUND_PATH.lstrip("/"))
+
+    env_values = [
+        PXE_SERVER,
+        PXE_PORT,
+        str(PXE_ISO_ROOT),
+        str(PXE_HTML_ROOT),
+        str(PXE_TEMPLATE_ROOT),
+        PXE_BACKGROUND_PATH,
+        ROOTPW_HASH,
+        str(ALLOW_DEFAULT_ROOTPW),
+    ]
+
+    for value in env_values:
+        h.update(value.encode("utf-8"))
+
+    for path in watched_paths:
+        h.update(str(path).encode("utf-8"))
+
+        if path.exists():
+            stat = path.stat()
+            h.update(str(stat.st_mtime_ns).encode("utf-8"))
+            h.update(str(stat.st_size).encode("utf-8"))
+            h.update(b"exists")
+        else:
+            h.update(b"missing")
+
+    return h.hexdigest()
+
+
+def generate_once() -> None:
+    rootpw_hash = validate_env()
+    detected = detect_isos()
+
+    PXE_HTML_ROOT.mkdir(parents=True, exist_ok=True)
+    (PXE_HTML_ROOT / "ks").mkdir(parents=True, exist_ok=True)
+    (PXE_HTML_ROOT / "generated").mkdir(parents=True, exist_ok=True)
+
+    render_kickstarts(detected, rootpw_hash)
+    render_boot_ipxe(detected)
+    render_status(detected)
+    render_index(detected)
+
+    detected_names = ", ".join(sorted(detected.keys())) if detected else "none"
+    print(f"Generated PXE content. Detected ISOs: {detected_names}", flush=True)
+
+
+def watch_loop() -> None:
+    last_hash = ""
+
+    while True:
+        current_hash = watched_state_hash()
+
+        if current_hash != last_hash:
+            generate_once()
+            last_hash = current_hash
+
+        time.sleep(PXE_WATCH_INTERVAL)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate dynamic AeroLIT PXE content.")
+    parser.add_argument("--once", action="store_true", help="Generate once and exit.")
+    parser.add_argument("--watch", action="store_true", help="Watch for changes and regenerate.")
+    args = parser.parse_args()
+
+    if args.once:
+        generate_once()
+        return
+
+    # Default to watch mode so older entrypoints that run this script with no args still work.
+    watch_loop()
+
+
+if __name__ == "__main__":
+    main()
