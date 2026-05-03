@@ -1,0 +1,163 @@
+Yes — assuming the pxe-content image project and the pxe-content Ansible role both contain the changes we talked through, Phase 1 is basically code-complete.
+
+Phase 1 is not “done-done” until you prove these things after merge:
+
+1. The new image builds.
+2. The role deploys the image using Quadlet.
+3. The role mounts the bundle’s extracted_isos correctly.
+4. The container dynamically generates content based on available ISOs.
+5. The service survives reboot.
+6. A real PXE client can still boot.
+
+I would merge/test in this order:
+
+1. Merge and test the pxe-content image project first
+
+After merge, make sure the pipeline builds/pushes the image.
+
+On the PXE host:
+
+podman pull registry.gitlab.us.lmco.com/lit/containers/pxe-content:latest
+podman image inspect registry.gitlab.us.lmco.com/lit/containers/pxe-content:latest
+
+Then do a quick manual container smoke test before blaming the role:
+
+podman rm -f pxe-content-test 2>/dev/null || true
+podman run -d \
+  --name pxe-content-test \
+  --security-opt label=disable \
+  -p 18081:8080 \
+  -v /path/to/bundle/extracted_isos:/iso:ro,Z \
+  -e PXE_SERVER=192.168.109.139 \
+  -e PXE_PORT=18081 \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:latest
+
+Then test:
+
+curl -I http://127.0.0.1:18081/boot.ipxe
+curl http://127.0.0.1:18081/boot.ipxe
+curl -I http://127.0.0.1:18081/ks/rhel8-minimal.ks
+curl -I http://127.0.0.1:18081/rhel8/images/pxeboot/vmlinuz
+curl -I http://127.0.0.1:18081/rhel8/images/pxeboot/initrd.img
+
+Then clean up:
+
+podman rm -f pxe-content-test
+
+2. Test ISO detection behavior
+
+Start with a bundle that only has this:
+
+extracted_isos/rhel8iso
+
+Then check:
+
+curl http://127.0.0.1:18081/boot.ipxe
+
+You should only see RHEL 8 options.
+
+Then add or copy in another ISO folder:
+
+extracted_isos/rhel9iso
+
+Wait 10–30 seconds, then run:
+
+curl http://127.0.0.1:18081/boot.ipxe
+
+Now you should see RHEL 8 and RHEL 9 options.
+
+Then repeat with:
+
+extracted_isos/rhel10iso
+
+That proves the watcher/generator idea works.
+
+3. Merge and test the pxe-content Ansible role
+
+After the role is merged, run it against the PXE host.
+
+For your bundle layout, the important variable is the bundle root. Something like:
+
+cd /path/to/aerolit_bundle_root
+ansible-playbook \
+  collections-hub/ansible/resources/playbooks/setup-pxe-content.yml \
+  -i localhost, \
+  -c local \
+  -e aerolit_bundle_root="$PWD" \
+  -e pxe_content_image_source=registry \
+  -e pxe_content_server_ip=192.168.109.139 \
+  -e pxe_content_host_port=18080
+
+Then verify:
+
+systemctl status pxe-content.service --no-pager
+podman ps
+curl -I http://127.0.0.1:18080/boot.ipxe
+curl http://127.0.0.1:18080/boot.ipxe
+
+Also check that Quadlet exists:
+
+ls -l /etc/containers/systemd/pxe-content.container
+cat /etc/containers/systemd/pxe-content.container
+
+And verify the old handcrafted service is gone:
+
+ls -l /etc/systemd/system/pxe-content.service
+
+That should say it does not exist.
+
+4. Reboot persistence test
+
+This one matters a lot because it was one of the original problems.
+
+reboot
+
+After the PXE host comes back:
+
+systemctl status pxe-content.service --no-pager
+podman ps
+curl -I http://127.0.0.1:18080/boot.ipxe
+curl http://127.0.0.1:18080/boot.ipxe
+
+Expected result:
+
+pxe-content.service active/running
+podman ps shows pxe-content
+curl /boot.ipxe returns 200
+
+5. PXE boot test
+
+Then boot the PXE laptop.
+
+Test in this order:
+
+1. Confirm the AeroLIT menu appears.
+2. Confirm only the OS versions present in extracted_isos appear.
+3. Select RHEL 8 minimal since you already know RHEL 8 was working.
+4. Then test RHEL 9.
+5. Then test RHEL 10 separately, because RHEL 10 had its own package/signature/installer issue before.
+
+For RHEL 10, do not assume a failure means the pxe-content work is broken. If it reaches Anaconda and starts package work, the PXE handoff succeeded. RHEL 10 package signature errors are a separate repo/content/signature issue.
+
+6. Final Phase 1 pass/fail checklist
+
+I would call Phase 1 complete when all of this is true:
+
+[ ] pxe-content image pipeline passes
+[ ] image pulls successfully from registry
+[ ] role installs Podman/firewalld as needed
+[ ] role creates /etc/pxe-content/pxe-content.env
+[ ] role creates /etc/containers/systemd/pxe-content.container
+[ ] role removes old /etc/systemd/system/pxe-content.service
+[ ] pxe-content.service starts successfully
+[ ] curl /boot.ipxe returns 200
+[ ] curl /ks/<profile>.ks returns 200
+[ ] curl /rhel8/images/pxeboot/vmlinuz returns 200
+[ ] menu changes when extracted_isos changes
+[ ] service survives reboot
+[ ] PXE laptop sees the generated menu
+[ ] at least one OS fully boots into installer
+
+So yes: Phase 1 is code-complete, but not finished until those tests pass.
+
+The main thing I would not do yet is start adding all the profile sets until this basic dynamic ISO discovery + Quadlet deployment path is proven end-to-end.
