@@ -1,4 +1,63 @@
 
+
+
+
+
+
+
+
+
+
+
+
+detect_default_pxe_iso_root() {
+  local candidate=""
+  local major=""
+  local iso_dir=""
+
+  # Preferred AeroLIT bundle layout:
+  #   <bundle root>/extracted_isos/rhel8iso
+  #   <bundle root>/extracted_isos/rhel9iso
+  #   <bundle root>/extracted_isos/rhel10iso
+  #
+  # The pxe-content container must mount the parent directory so it sees:
+  #   /iso/rhel8iso
+  #   /iso/rhel9iso
+  #   /iso/rhel10iso
+
+  for candidate in \
+    "${BUNDLE_ROOT}/extracted_isos" \
+    "${BUNDLE_ROOT}/isos" \
+    "${BUNDLE_ROOT}"; do
+
+    [[ -d "${candidate}" ]] || continue
+
+    for major in 7 8 9 10; do
+      for iso_dir in \
+        "${candidate}/rhel${major}iso" \
+        "${candidate}/rhel${major}"; do
+
+        if [[ -d "${iso_dir}" ]]; then
+          printf '%s' "${candidate}"
+          return 0
+        fi
+      done
+    done
+  done
+
+  # Default to the standard bundle parent path even if it does not exist yet.
+  # Validation later will fail clearly if PXE is enabled and the directory is missing.
+  printf '%s' "${BUNDLE_ROOT}/extracted_isos"
+}
+
+
+
+
+
+
+
+
+
 echo "Running initial PXE content generation..."
 python3 /usr/local/bin/generate-pxe-content.py --once
 
