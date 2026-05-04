@@ -1,0 +1,116 @@
+Yes — I’d call the next piece Phase 3B.
+
+Phase 3A added the profile framework but kept future profiles hidden.
+
+Phase 3B should expose the future profile sets in the PXE menu as safe placeholders only. That means users can see:
+
+Minimal Installs
+Security Baseline Installs
+Security + LUKS Installs
+Small Disk Installs
+Developer Workstation Installs
+Embedded / Edge Hardware Installs
+Utilities / Rescue
+Drop to iPXE shell
+
+…but only Minimal Installs actually boots anything. The other profile menus should say something like “Profile not implemented yet” and return to the main menu. No new kickstarts yet. No new boot targets yet. No role/bootstrap changes yet.
+
+Edit 1 — scripts/generate-pxe-content.py
+
+Find your PROFILE_DEFINITIONS section.
+
+For each future profile, change this:
+
+implemented=False,
+show_in_main_menu=False,
+
+to this:
+
+implemented=False,
+show_in_main_menu=True,
+
+So the future profiles become visible but still non-booting.
+
+You can also update the comment above them to this:
+
+    # Future profile sets.
+    # These are visible in Phase 3B as safe placeholders only.
+    # implemented=False prevents boot targets and kickstarts from being generated.
+
+Edit 2 — improve status.json
+
+In render_status(), add these variables before status = { ... }:
+
+    visible_profiles = [
+        profile.profile_id
+        for profile in PROFILE_DEFINITIONS
+        if profile.show_in_main_menu
+    ]
+    enabled_profiles = [
+        profile.profile_id
+        for profile in PROFILE_DEFINITIONS
+        if profile.show_in_main_menu and profile.implemented
+    ]
+    unimplemented_profiles = [
+        profile.profile_id
+        for profile in PROFILE_DEFINITIONS
+        if profile.show_in_main_menu and not profile.implemented
+    ]
+
+Then replace this part:
+
+        "enabled_profiles": [
+            profile.profile_id
+            for profile in PROFILE_DEFINITIONS
+            if profile.show_in_main_menu and profile.implemented
+        ],
+
+with this:
+
+        "visible_profiles": visible_profiles,
+        "enabled_profiles": enabled_profiles,
+        "unimplemented_profiles": unimplemented_profiles,
+
+That will make the status clearer. You should see minimal in enabled_profiles, and the other Phase 3 profile sets in unimplemented_profiles.
+
+What should change after Phase 3B
+
+Expected changes:
+
+boot.ipxe      changes
+status.json    changes
+isos.txt       should not change
+rhel8-minimal.ks should not change
+
+Test commands after the new image is running
+
+rm -rf /tmp/pxe-phase3b
+mkdir -p /tmp/pxe-phase3b
+curl -fss http://127.0.0.1:18080/boot.ipxe \
+  -o /tmp/pxe-phase3b/boot.ipxe
+curl -fss http://127.0.0.1:18080/generated/isos.txt \
+  -o /tmp/pxe-phase3b/isos.txt
+curl -fss http://127.0.0.1:18080/generated/status.json \
+  -o /tmp/pxe-phase3b/status.json
+curl -fss http://127.0.0.1:18080/ks/rhel8-minimal.ks \
+  -o /tmp/pxe-phase3b/rhel8-minimal.ks
+curl -fss -o /dev/null http://127.0.0.1:18080/ui/background.png
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/vmlinuz
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/initrd.img
+
+Then compare against Phase 3A:
+
+diff -u /tmp/pxe-phase3a/isos.txt /tmp/pxe-phase3b/isos.txt
+diff -u /tmp/pxe-phase3a/rhel8-minimal.ks /tmp/pxe-phase3b/rhel8-minimal.ks
+diff -u /tmp/pxe-phase3a/boot.ipxe /tmp/pxe-phase3b/boot.ipxe
+diff -u /tmp/pxe-phase3a/status.json /tmp/pxe-phase3b/status.json
+
+The first two diffs should be empty. The last two should show the new visible placeholder profiles.
+
+Also run:
+
+grep -n "Security Baseline\|Security + LUKS\|Small Disk\|Developer Workstation\|Embedded" /tmp/pxe-phase3b/boot.ipxe
+grep -n "Profile not implemented yet" /tmp/pxe-phase3b/boot.ipxe
+grep -n "rhel8_security\|rhel9_security\|rhel10_security\|rhel8_developer\|rhel9_developer\|rhel10_developer" /tmp/pxe-phase3b/boot.ipxe || true
+
+The first two should find matches. The last one should find nothing. That proves the profile menus are visible, but they are not accidentally bootable yet.
