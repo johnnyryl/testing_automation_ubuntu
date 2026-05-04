@@ -1,0 +1,116 @@
+This is a good place to keep the MR small. Phase 2 should start with a refactor-only MR where the generated output stays the same as Phase 1.
+
+The goal is:
+
+Same behavior.
+Cleaner generator structure.
+No new menu sets yet.
+No new profile YAML yet.
+No new kickstart template system yet.
+
+Phase 2 starting scope
+
+For this first Phase 2 MR, I would only touch:
+
+lit/containers/pxe-content/scripts/generate-pxe-content.py
+
+Do not touch these yet unless testing proves we must:
+
+Dockerfile
+entrypoint.sh
+nginx/pxe.conf
+content/ks/*
+content/ui/*
+ansible role pxe-content
+bootstrap_controller.sh
+
+That keeps Phase 2 focused and safe.
+
+What Phase 2 should do first
+
+Start by reorganizing generate-pxe-content.py into cleaner sections:
+
+1. Config loading
+2. OS definitions
+3. ISO discovery
+4. Kickstart rendering
+5. boot.ipxe menu rendering
+6. inventory/status rendering
+7. one-shot generation
+8. watch loop
+9. CLI entrypoint
+
+But the output should still be basically the same:
+
+/boot.ipxe
+/ks/rhel8-minimal.ks
+/ks/rhel9-minimal.ks
+/ks/rhel10-minimal.ks
+/generated/isos.txt
+/index.html
+
+First thing I’d do before editing anything
+
+Capture a working Phase 1 baseline from your PXE host.
+
+Run this on the machine where pxe-content is currently working:
+
+mkdir -p /tmp/pxe-phase1-baseline
+curl -fsS http://127.0.0.1:18080/boot.ipxe \
+  -o /tmp/pxe-phase1-baseline/boot.ipxe
+curl -fsS http://127.0.0.1:18080/generated/isos.txt \
+  -o /tmp/pxe-phase1-baseline/isos.txt
+curl -fsSI http://127.0.0.1:18080/boot.ipxe \
+  | tee /tmp/pxe-phase1-baseline/boot-ipxe.headers
+curl -fsSI http://127.0.0.1:18080/ui/background.png \
+  | tee /tmp/pxe-phase1-baseline/background.headers
+curl -fsSI http://127.0.0.1:18080/ks/rhel8-minimal.ks \
+  | tee /tmp/pxe-phase1-baseline/rhel8-ks.headers
+curl -fsSI http://127.0.0.1:18080/rhel8/images/pxeboot/vmlinuz \
+  | tee /tmp/pxe-phase1-baseline/rhel8-vmlinuz.headers
+curl -fsSI http://127.0.0.1:18080/rhel8/images/pxeboot/initrd.img \
+  | tee /tmp/pxe-phase1-baseline/rhel8-initrd.headers
+
+Then confirm:
+
+ls -l /tmp/pxe-phase1-baseline
+cat /tmp/pxe-phase1-baseline/isos.txt
+grep -n "menu AeroLIT PXE Menu\|menu Minimal Installs\|rhel" /tmp/pxe-phase1-baseline/boot.ipxe
+
+That gives us something to compare against after the refactor.
+
+Branch name
+
+I’d create a new branch like:
+
+git checkout main
+git pull
+git checkout -b phase2-generator-refactor
+
+Acceptance criteria for Phase 2
+
+Before merging Phase 2, these should still work:
+
+curl -f http://127.0.0.1:18080/boot.ipxe
+curl -f http://127.0.0.1:18080/generated/isos.txt
+curl -f http://127.0.0.1:18080/ui/background.png
+curl -f http://127.0.0.1:18080/ks/rhel8-minimal.ks
+curl -f http://127.0.0.1:18080/rhel8/images/pxeboot/vmlinuz
+curl -f http://127.0.0.1:18080/rhel8/images/pxeboot/initrd.img
+
+And the dynamic behavior should still work:
+
+- rhel8iso only present → menu only shows RHEL 8
+- add rhel9iso with real pxeboot files → menu adds RHEL 9 after watcher interval
+- add rhel10iso with real pxeboot files → menu adds RHEL 10 after watcher interval
+- remove rhel9iso → menu removes RHEL 9 after watcher interval
+- background image still displays
+- BIOS/UEFI logic remains the same as Phase 1
+
+The next thing I need from you
+
+Paste the current full contents of:
+
+scripts/generate-pxe-content.py
+
+Not screenshots this time if possible — the actual text. Then we can make the Phase 2 replacement cleanly without accidentally losing the working Phase 1 behavior.
