@@ -1,0 +1,250 @@
+Yes — let’s make 4C a strict validation-only MR. For your current good YAML files, this should not change the PXE menu output. It should only make bad profile files fail clearly.
+
+Make these changes.
+
+1. Add re import
+
+At the top, change this:
+
+import os
+import time
+
+to this:
+
+import os
+import re
+import time
+
+2. Add these validation helpers under # Profile definitions
+
+Put this directly under:
+
+# =============================================================================
+# Profile definitions
+# =============================================================================
+
+and above @dataclass(frozen=True) class ProfileDefinition:.
+
+SAFE_PROFILE_IDENTIFIER_RE = re.compile(r"^[a-z0-9][a-z0-9_]*$")
+def require_string_field(data: Dict[str, Any], field: str, source: str) -> str:
+    if field not in data:
+        fail(f"Profile file {source} is missing required field: {field}")
+    value = data[field]
+    if not isinstance(value, str):
+        fail(
+            f"Profile file {source} field {field} must be a string. "
+            f"Got: {type(value).__name__}"
+        )
+    value = value.strip()
+    if not value:
+        fail(f"Profile file {source} field {field} cannot be empty.")
+    return value
+def require_bool_field(data: Dict[str, Any], field: str, source: str) -> bool:
+    if field not in data:
+        fail(f"Profile file {source} is missing required field: {field}")
+    value = data[field]
+    if not isinstance(value, bool):
+        fail(
+            f"Profile file {source} field {field} must be a YAML boolean true/false. "
+            f"Do not quote booleans. Got: {value!r}"
+        )
+    return value
+def optional_bool_field(
+    data: Dict[str, Any],
+    field: str,
+    source: str,
+    default: bool,
+) -> bool:
+    if field not in data:
+        return default
+    value = data[field]
+    if not isinstance(value, bool):
+        fail(
+            f"Profile file {source} field {field} must be a YAML boolean true/false. "
+            f"Do not quote booleans. Got: {value!r}"
+        )
+    return value
+def validate_safe_identifier(value: str, field: str, source: str) -> None:
+    if not SAFE_PROFILE_IDENTIFIER_RE.match(value):
+        fail(
+            f"Profile file {source} field {field} has invalid value: {value!r}. "
+            "Use lowercase letters, numbers, and underscores only. "
+            "It must start with a lowercase letter or number."
+        )
+
+3. Replace the ProfileDefinition.from_dict() method
+
+Inside your existing ProfileDefinition class, replace the whole current from_dict() method with this:
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], source: str) -> "ProfileDefinition":
+        profile_id = require_string_field(data, "profile_id", source)
+        title = require_string_field(data, "title", source)
+        install_label = require_string_field(data, "install_label", source)
+        menu_target = require_string_field(data, "menu_target", source)
+        validate_safe_identifier(profile_id, "profile_id", source)
+        validate_safe_identifier(menu_target, "menu_target", source)
+        implemented = require_bool_field(data, "implemented", source)
+        show_in_main_menu = optional_bool_field(data, "show_in_main_menu", source, True)
+        uefi = optional_bool_field(data, "uefi", source, True)
+        bios = optional_bool_field(data, "bios", source, True)
+        supported_os_raw = data.get("supported_os", [])
+        if supported_os_raw is None:
+            supported_os_raw = []
+        if not isinstance(supported_os_raw, list):
+            fail(f"Profile file {source} field supported_os must be a list.")
+        supported_os_items: List[str] = []
+        for index, value in enumerate(supported_os_raw):
+            if not isinstance(value, str):
+                fail(
+                    f"Profile file {source} field supported_os[{index}] "
+                    f"must be a string. Got: {type(value).__name__}"
+                )
+            os_id = value.strip()
+            if not os_id:
+                fail(f"Profile file {source} field supported_os[{index}] cannot be empty.")
+            supported_os_items.append(os_id)
+        supported_os = tuple(supported_os_items)
+        return cls(
+            profile_id=profile_id,
+            title=title,
+            install_label=install_label,
+            menu_target=menu_target,
+            implemented=implemented,
+            show_in_main_menu=show_in_main_menu,
+            uefi=uefi,
+            bios=bios,
+            supported_os=supported_os,
+            source=source,
+        )
+
+4. Replace validate_profile_definitions()
+
+Replace your whole current validate_profile_definitions() function with this:
+
+def validate_profile_definitions(profiles: List[ProfileDefinition]) -> None:
+    if not profiles:
+        fail("At least one PXE profile must be defined.")
+    profile_ids = set()
+    menu_targets = set()
+    known_os_ids = {definition.os_id for definition in OS_DEFINITIONS}
+    visible_profile_count = 0
+    for profile in profiles:
+        source = profile.source
+        if not profile.profile_id:
+            fail(f"Profile from {source} has an empty profile_id.")
+        if not profile.title:
+            fail(f"Profile {profile.profile_id} has an empty title.")
+        if not profile.install_label:
+            fail(f"Profile {profile.profile_id} has an empty install_label.")
+        if not profile.menu_target:
+            fail(f"Profile {profile.profile_id} has an empty menu_target.")
+        validate_safe_identifier(profile.profile_id, "profile_id", source)
+        validate_safe_identifier(profile.menu_target, "menu_target", source)
+        if not isinstance(profile.implemented, bool):
+            fail(f"Profile {profile.profile_id} field implemented must be a boolean.")
+        if not isinstance(profile.show_in_main_menu, bool):
+            fail(f"Profile {profile.profile_id} field show_in_main_menu must be a boolean.")
+        if not isinstance(profile.uefi, bool):
+            fail(f"Profile {profile.profile_id} field uefi must be a boolean.")
+        if not isinstance(profile.bios, bool):
+            fail(f"Profile {profile.profile_id} field bios must be a boolean.")
+        if profile.show_in_main_menu:
+            visible_profile_count += 1
+        if profile.profile_id in profile_ids:
+            fail(f"Duplicate profile_id found: {profile.profile_id}")
+        if profile.menu_target in menu_targets:
+            fail(f"Duplicate menu_target found: {profile.menu_target}")
+        profile_ids.add(profile.profile_id)
+        menu_targets.add(profile.menu_target)
+        if not isinstance(profile.supported_os, tuple):
+            fail(f"Profile {profile.profile_id} field supported_os must be stored as a tuple.")
+        for os_id in profile.supported_os:
+            if not isinstance(os_id, str):
+                fail(f"Profile {profile.profile_id} has a non-string supported_os value.")
+            if os_id not in known_os_ids:
+                fail(
+                    f"Profile {profile.profile_id} references unknown supported_os value: {os_id}"
+                )
+    if visible_profile_count == 0:
+        fail("At least one PXE profile must have show_in_main_menu=true.")
+    if "minimal" not in profile_ids:
+        fail("The minimal profile must be defined.")
+
+5. Your YAML booleans must look like this
+
+Good:
+
+implemented: false
+show_in_main_menu: true
+uefi: true
+bios: true
+
+Bad:
+
+implemented: "false"
+show_in_main_menu: "true"
+uefi: yes
+bios: "no"
+
+The important one is avoiding quoted booleans. Quoted "false" is exactly what we want to reject because Python would otherwise treat it dangerously.
+
+6. Quick 4C smoke test
+
+After the image builds and the service restarts:
+
+rm -rf /tmp/pxe-phase4c
+mkdir -p /tmp/pxe-phase4c
+curl -fss http://127.0.0.1:18080/boot.ipxe \
+  -o /tmp/pxe-phase4c/boot.ipxe
+curl -fss http://127.0.0.1:18080/generated/isos.txt \
+  -o /tmp/pxe-phase4c/isos.txt
+curl -fss http://127.0.0.1:18080/generated/status.json \
+  -o /tmp/pxe-phase4c/status.json
+curl -fss http://127.0.0.1:18080/index.html \
+  -o /tmp/pxe-phase4c/index.html
+curl -fss http://127.0.0.1:18080/ks/rhel8-minimal.ks \
+  -o /tmp/pxe-phase4c/rhel8-minimal.ks
+curl -fss -o /dev/null http://127.0.0.1:18080/ui/background.png
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/vmlinuz
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/initrd.img
+python3 -m json.tool /tmp/pxe-phase4c/status.json >/dev/null
+
+Then compare against 4B:
+
+diff -u /tmp/pxe-phase4b/boot.ipxe /tmp/pxe-phase4c/boot.ipxe
+diff -u /tmp/pxe-phase4b/isos.txt /tmp/pxe-phase4c/isos.txt
+diff -u /tmp/pxe-phase4b/rhel8-minimal.ks /tmp/pxe-phase4c/rhel8-minimal.ks
+diff -u /tmp/pxe-phase4b/status.json /tmp/pxe-phase4c/status.json
+diff -u /tmp/pxe-phase4b/index.html /tmp/pxe-phase4c/index.html
+
+For valid YAML, I’d expect those to match. The only purpose of 4C is to fail faster and safer when a bad profile file gets added.
+
+7. Optional bad-profile validation test
+
+This tests that quoted booleans now fail safely without touching your real /profiles.
+
+rm -rf /tmp/pxe-bad-profiles /tmp/pxe-bad-output
+mkdir -p /tmp/pxe-bad-profiles
+cat > /tmp/pxe-bad-profiles/10-minimal.yml <<'EOF'
+profile_id: minimal
+title: Minimal Installs
+install_label: Minimal
+menu_target: minimal
+implemented: "true"
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+EOF
+PXE_SERVER=127.0.0.1 \
+PXE_PROFILE_ROOT=/tmp/pxe-bad-profiles \
+PXE_HTML_ROOT=/tmp/pxe-bad-output \
+generate-pxe-content.py --once
+
+Expected result:
+
+ERROR: Profile file /tmp/pxe-bad-profiles/10-minimal.yml field implemented must be a YAML boolean true/false.
+
+If the normal smoke test passes and this bad-profile test fails clearly, 4C is good to merge.
