@@ -1,3 +1,29 @@
+
+
+
+
+
+mkdir -p /tmp/pxe-phase2-refactor
+
+curl -fsS http://127.0.0.1:18080/boot.ipxe \
+  -o /tmp/pxe-phase2-refactor/boot.ipxe
+
+curl -fsS http://127.0.0.1:18080/generated/isos.txt \
+  -o /tmp/pxe-phase2-refactor/isos.txt
+
+curl -fsS http://127.0.0.1:18080/generated/status.json \
+  -o /tmp/pxe-phase2-refactor/status.json
+
+curl -fsS http://127.0.0.1:18080/ks/rhel8-minimal.ks \
+  -o /tmp/pxe-phase2-refactor/rhel8-minimal.ks
+
+curl -fsS -o /dev/null http://127.0.0.1:18080/ui/background.png
+curl -fsS -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/vmlinuz
+curl -fsS -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/initrd.img
+
+
+
+
 This is a good place to keep the MR small. Phase 2 should start with a refactor-only MR where the generated output stays the same as Phase 1.
 
 The goal is:
