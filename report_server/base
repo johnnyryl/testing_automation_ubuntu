@@ -1,3 +1,12 @@
+
+diff -u /tmp/pxe-phase1-baseline/boot.ipxe /tmp/pxe-phase2-refactor/boot.ipxe
+diff -u /tmp/pxe-phase1-baseline/isos.txt /tmp/pxe-phase2-refactor/isos.txt
+diff -u /tmp/pxe-phase1-baseline/status.json /tmp/pxe-phase2-refactor/status.json
+diff -u /tmp/pxe-phase1-baseline/rhel8-minimal.ks /tmp/pxe-phase2-refactor/rhel8-minimal.ks
+
+
+
+
 mkdir -p /tmp/pxe-phase1-baseline
 
 curl -fsS http://127.0.0.1:18080/boot.ipxe \
