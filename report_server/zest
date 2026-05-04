@@ -248,3 +248,63 @@ Expected result:
 ERROR: Profile file /tmp/pxe-bad-profiles/10-minimal.yml field implemented must be a YAML boolean true/false.
 
 If the normal smoke test passes and this bad-profile test fails clearly, 4C is good to merge.
+
+
+You’re functionally good from the normal PXE side: the menu loads, the profile order looks right, status.json is serving, and the future profiles are still safe placeholders.
+
+But for 4C specifically, I would run one negative validation test before merging, because 4C’s whole point is “bad YAML fails clearly.” You do not need the Python file local. Run the bad-profile test inside the running container.
+
+First find the container:
+
+podman ps --format '{{.ID}} {{.Names}}'
+
+Then use the container name or ID in this command:
+
+CID="<container_name_or_id>"
+podman exec -it "$CID" /bin/sh -lc '
+rm -rf /tmp/pxe-bad-profiles /tmp/pxe-bad-output
+mkdir -p /tmp/pxe-bad-profiles
+cat > /tmp/pxe-bad-profiles/10-minimal.yml <<'"'"'EOF'"'"'
+profile_id: minimal
+title: Minimal Installs
+install_label: Minimal
+menu_target: minimal
+implemented: "true"
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+EOF
+set +e
+PXE_SERVER=127.0.0.1 \
+PXE_PROFILE_ROOT=/tmp/pxe-bad-profiles \
+PXE_HTML_ROOT=/tmp/pxe-bad-output \
+/usr/local/bin/generate-pxe-content.py --once > /tmp/pxe-bad-test.out 2>&1
+rc=$?
+set -e
+cat /tmp/pxe-bad-test.out
+if [ "$rc" -eq 0 ]; then
+  echo "ERROR: bad profile unexpectedly passed"
+  exit 1
+fi
+if grep -Eiq "implemented.*boolean|implemented.*true/false|must be.*boolean" /tmp/pxe-bad-test.out; then
+  echo "OK: bad profile failed clearly"
+  exit 0
+fi
+echo "ERROR: bad profile failed, but not with the expected clear validation message"
+exit 1
+'
+
+Expected result should be something like:
+
+ERROR: Profile file /tmp/pxe-bad-profiles/10-minimal.yml field implemented must be a YAML boolean true/false.
+OK: bad profile failed clearly
+
+That test is safe because it uses:
+
+PXE_HTML_ROOT=/tmp/pxe-bad-output
+
+So it should not overwrite your real PXE content.
+
+If that test passes, I’d call 4C good to merge. If it does not fail clearly, then we need to fix the boolean validation before merging, because quoted "true" / "false" is exactly the kind of bad YAML that can silently break behavior if the code uses normal Python bool() conversion.
