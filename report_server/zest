@@ -308,3 +308,65 @@ PXE_HTML_ROOT=/tmp/pxe-bad-output
 So it should not overwrite your real PXE content.
 
 If that test passes, I’d call 4C good to merge. If it does not fail clearly, then we need to fix the boolean validation before merging, because quoted "true" / "false" is exactly the kind of bad YAML that can silently break behavior if the code uses normal Python bool() conversion.
+
+
+
+
+
+
+
+
+Your test is still failing before it reaches the 4C validation. The key clue is this:
+
+: No such file or directory
+ERROR: bad profile failed, but not with the expected clear validation message
+
+That usually means the shell script has a syntax/line-ending/quoting issue, not that the generator validation failed.
+
+Two likely causes:
+
+1. The script may have Windows CRLF line endings.
+    Your editor screenshot showed Windows CRLF earlier. That can make shell scripts behave weirdly.
+2. The nested here-doc quoting is too fragile.
+    The cat << '"'"'EOF'"'"' style is correct when pasted as one command, but it is easy to break when saving inside another shell script.
+
+Do this simpler version instead. It avoids the weird nested quoting.
+
+CID=pxe-content
+podman exec -it "$CID" /bin/sh
+
+Then inside the container shell, run this:
+
+rm -rf /tmp/pxe-bad-profiles /tmp/pxe-bad-output
+mkdir -p /tmp/pxe-bad-profiles
+cat > /tmp/pxe-bad-profiles/10-minimal.yml <<'EOF'
+profile_id: minimal
+title: Minimal Installs
+install_label: Minimal
+menu_target: minimal
+implemented: "true"
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+EOF
+PXE_SERVER=127.0.0.1 \
+PXE_PROFILE_ROOT=/tmp/pxe-bad-profiles \
+PXE_HTML_ROOT=/tmp/pxe-bad-output \
+/usr/local/bin/generate-pxe-content.py --once
+
+What we want to see is something like:
+
+ERROR: Profile file /tmp/pxe-bad-profiles/10-minimal.yml field implemented must be a YAML boolean true/false.
+
+If it instead generates successfully, then 4C strict boolean validation is not actually in the image.
+
+Also run this inside the container:
+
+grep -n "must be a YAML boolean" /usr/local/bin/generate-pxe-content.py
+grep -n "parse_bool_field" /usr/local/bin/generate-pxe-content.py
+
+If both return nothing, then the image does not contain the final 4C validation code yet.
+
+I would not merge based on this current test because the test itself is broken. The normal smoke test looked fine, but the bad-profile validation has not been proven yet.
