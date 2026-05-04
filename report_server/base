@@ -1,4 +1,20 @@
+mkdir -p /tmp/pxe-phase1-baseline
 
+curl -fsS http://127.0.0.1:18080/boot.ipxe \
+  -o /tmp/pxe-phase1-baseline/boot.ipxe
+
+curl -fsS http://127.0.0.1:18080/generated/isos.txt \
+  -o /tmp/pxe-phase1-baseline/isos.txt
+
+curl -fsS http://127.0.0.1:18080/generated/status.json \
+  -o /tmp/pxe-phase1-baseline/status.json
+
+curl -fsS http://127.0.0.1:18080/ks/rhel8-minimal.ks \
+  -o /tmp/pxe-phase1-baseline/rhel8-minimal.ks
+
+curl -fsS -o /dev/null http://127.0.0.1:18080/ui/background.png
+curl -fsS -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/vmlinuz
+curl -fsS -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/initrd.img
 
 
 
