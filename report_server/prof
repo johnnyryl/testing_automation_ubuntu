@@ -1,0 +1,124 @@
+Yes — the structure looks right for Phase 4B:
+
+COPY content/profiles/ /profiles/
+
+That is the correct path as long as your Phase 4A Python default is:
+
+profile_root=Path(getenv("PXE_PROFILE_ROOT", "/profiles")),
+
+But Phase 4B is only complete if each YAML file has valid contents. From the screenshot, 10-developer-workstation.yml looks empty right now, so do not transfer/build yet unless you already added the content after the picture.
+
+Use these files:
+
+content/profiles/10-developer-workstation.yml
+
+profile_id: developer_workstation
+title: Developer Workstation Installs
+install_label: Developer Workstation
+menu_target: developer_workstation
+implemented: false
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel10
+  - rhel9
+  - rhel8
+  - rhel7
+
+content/profiles/20-security-baseline.yml
+
+profile_id: security_baseline
+title: Security Baseline Installs
+install_label: Security Baseline
+menu_target: security_baseline
+implemented: false
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel10
+  - rhel9
+  - rhel8
+  - rhel7
+
+content/profiles/30-security-luks.yml
+
+profile_id: security_luks
+title: Security + LUKS Installs
+install_label: Security + LUKS
+menu_target: security_luks
+implemented: false
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel10
+  - rhel9
+  - rhel8
+  - rhel7
+
+content/profiles/40-embedded-edge.yml
+
+profile_id: embedded_edge
+title: Embedded / Edge Hardware Installs
+install_label: Embedded / Edge
+menu_target: embedded_edge
+implemented: false
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel10
+  - rhel9
+  - rhel8
+  - rhel7
+
+content/profiles/50-minimal.yml
+
+profile_id: minimal
+title: Minimal Installs
+install_label: Minimal
+menu_target: minimal
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel10
+  - rhel9
+  - rhel8
+  - rhel7
+
+content/profiles/60-small-disk.yml
+
+profile_id: small_disk
+title: Small Disk Installs
+install_label: Small Disk
+menu_target: small_disk
+implemented: false
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel10
+  - rhel9
+  - rhel8
+  - rhel7
+
+One important thing: once those YAML files exist, the generator will use them instead of the built-in fallback. So all six files need to be present and valid.
+
+For Phase 4B, expected result is:
+
+Developer Workstation Installs
+Security Baseline Installs
+Security + LUKS Installs
+Embedded / Edge Hardware Installs
+Minimal Installs
+Small Disk Installs
+Utilities / Rescue
+Drop to iPXE shell
+
+And only Minimal Installs should generate real boot targets. The other profiles should still be safe “not implemented” placeholders.
+
+So: Dockerfile path looks good, folder/file names look good, but fill the YAML files before building.
