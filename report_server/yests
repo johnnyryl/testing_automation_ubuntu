@@ -1,0 +1,373 @@
+Perfect. Then I’d start with Phase 4A as a very safe loader-only MR.
+
+The goal for 4A is:
+
+Add YAML profile-loader support
+Add PXE_PROFILE_ROOT
+Keep built-in profiles as fallback
+Do not add profile YAML files yet
+Do not change visible PXE output yet
+
+So after 4A, your generated boot.ipxe, isos.txt, rhel8-minimal.ks, and probably index.html/status.json should still match Phase 3D unless we intentionally add new status fields.
+
+1. Add PyYAML to the image
+
+Use the RPM package first if it works in your image:
+
+RUN dnf -y install python3-pyyaml && dnf clean all
+
+If your base image does not have that package available, then use a pip/wheel path instead, but I’d try the RPM package first.
+
+2. Phase 4A code changes
+
+Replace this import line
+
+Current:
+
+from typing import Dict, Iterable, List, Optional
+
+Use:
+
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+Then directly under the imports, add:
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+Add profile_root to GeneratorConfig
+
+Add this field:
+
+    profile_root: Path
+
+So the config class becomes:
+
+@dataclass(frozen=True)
+class GeneratorConfig:
+    pxe_server: str
+    pxe_port: str
+    iso_root: Path
+    html_root: Path
+    template_root: Path
+    profile_root: Path
+    background_path: str
+    watch_interval: int
+    rootpw_hash: str
+    allow_default_rootpw: bool
+
+And add this line inside from_env():
+
+            profile_root=Path(getenv("PXE_PROFILE_ROOT", "/profiles")),
+
+Put it after template_root.
+
+Replace ProfileDefinition
+
+Replace your current ProfileDefinition class with this:
+
+@dataclass(frozen=True)
+class ProfileDefinition:
+    profile_id: str
+    title: str
+    install_label: str
+    menu_target: str
+    implemented: bool
+    show_in_main_menu: bool = True
+    uefi: bool = True
+    bios: bool = True
+    supported_os: Tuple[str, ...] = ()
+    source: str = "built-in"
+    @property
+    def legacy_target(self) -> str:
+        return f"{self.menu_target}_legacy"
+    def supports_os(self, item: DetectedISO) -> bool:
+        return not self.supported_os or item.os_id in self.supported_os
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], source: str) -> "ProfileDefinition":
+        required_fields = [
+            "profile_id",
+            "title",
+            "install_label",
+            "menu_target",
+            "implemented",
+        ]
+        for field in required_fields:
+            if field not in data:
+                fail(f"Profile file {source} is missing required field: {field}")
+        supported_os_raw = data.get("supported_os", [])
+        if supported_os_raw is None:
+            supported_os_raw = []
+        if not isinstance(supported_os_raw, list):
+            fail(f"Profile file {source} field supported_os must be a list.")
+        supported_os = tuple(str(item).strip() for item in supported_os_raw if str(item).strip())
+        return cls(
+            profile_id=str(data["profile_id"]).strip(),
+            title=str(data["title"]).strip(),
+            install_label=str(data["install_label"]).strip(),
+            menu_target=str(data["menu_target"]).strip(),
+            implemented=bool(data["implemented"]),
+            show_in_main_menu=bool(data.get("show_in_main_menu", True)),
+            uefi=bool(data.get("uefi", True)),
+            bios=bool(data.get("bios", True)),
+            supported_os=supported_os,
+            source=source,
+        )
+
+Rename PROFILE_DEFINITIONS
+
+Change this:
+
+PROFILE_DEFINITIONS: List[ProfileDefinition] = [
+
+to:
+
+BUILTIN_PROFILE_DEFINITIONS: List[ProfileDefinition] = [
+
+For each built-in profile, you can leave it mostly the same. But I’d add supported_os now so Phase 4B is clean.
+
+Example for Minimal:
+
+    ProfileDefinition(
+        profile_id="minimal",
+        title="Minimal Installs",
+        install_label="Minimal",
+        menu_target="minimal",
+        implemented=True,
+        supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
+    ),
+
+For the future profiles, also add:
+
+        supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
+
+Add profile loading helpers after BUILTIN_PROFILE_DEFINITIONS
+
+Add this whole section after the built-in profile list:
+
+def profile_definition_files(profile_root: Path) -> List[Path]:
+    if not profile_root.is_dir():
+        return []
+    files: List[Path] = []
+    files.extend(sorted(profile_root.glob("*.yml")))
+    files.extend(sorted(profile_root.glob("*.yaml")))
+    return files
+def load_profile_file(path: Path) -> ProfileDefinition:
+    if yaml is None:
+        fail(
+            "PyYAML is required when profile YAML files are present. "
+            "Install python3-pyyaml in the pxe-content image."
+        )
+    raw = path.read_text(encoding="utf-8")
+    data = yaml.safe_load(raw)
+    if data is None:
+        fail(f"Profile file {path} is empty.")
+    if not isinstance(data, dict):
+        fail(f"Profile file {path} must contain a YAML mapping/object.")
+    return ProfileDefinition.from_dict(data, source=str(path))
+def validate_profile_definitions(profiles: List[ProfileDefinition]) -> None:
+    if not profiles:
+        fail("At least one PXE profile must be defined.")
+    profile_ids = set()
+    menu_targets = set()
+    known_os_ids = {definition.os_id for definition in OS_DEFINITIONS}
+    for profile in profiles:
+        if not profile.profile_id:
+            fail(f"Profile from {profile.source} has an empty profile_id.")
+        if not profile.title:
+            fail(f"Profile {profile.profile_id} has an empty title.")
+        if not profile.install_label:
+            fail(f"Profile {profile.profile_id} has an empty install_label.")
+        if not profile.menu_target:
+            fail(f"Profile {profile.profile_id} has an empty menu_target.")
+        if profile.profile_id in profile_ids:
+            fail(f"Duplicate profile_id found: {profile.profile_id}")
+        if profile.menu_target in menu_targets:
+            fail(f"Duplicate menu_target found: {profile.menu_target}")
+        profile_ids.add(profile.profile_id)
+        menu_targets.add(profile.menu_target)
+        for os_id in profile.supported_os:
+            if os_id not in known_os_ids:
+                fail(
+                    f"Profile {profile.profile_id} references unknown supported_os value: {os_id}"
+                )
+    if "minimal" not in profile_ids:
+        fail("The minimal profile must be defined.")
+def load_profile_definitions(config: GeneratorConfig) -> List[ProfileDefinition]:
+    files = profile_definition_files(config.profile_root)
+    if not files:
+        profiles = list(BUILTIN_PROFILE_DEFINITIONS)
+        validate_profile_definitions(profiles)
+        return profiles
+    profiles = [load_profile_file(path) for path in files]
+    validate_profile_definitions(profiles)
+    return profiles
+
+3. Update BootMenuRenderer to use loaded profiles
+
+Change the constructor from:
+
+    def __init__(self, config: GeneratorConfig) -> None:
+        self.config = config
+
+to:
+
+    def __init__(self, config: GeneratorConfig, profiles: List[ProfileDefinition]) -> None:
+        self.config = config
+        self.profiles = profiles
+
+Then replace all PROFILE_DEFINITIONS inside BootMenuRenderer with:
+
+self.profiles
+
+Also update the OS checks inside profile rendering so profiles can limit supported OS later.
+
+Change places like:
+
+if item.uefi and profile.uefi:
+
+to:
+
+if profile.supports_os(item) and item.uefi and profile.uefi:
+
+And places like:
+
+if any(item.bios and profile.bios for item in detected):
+
+to:
+
+if any(profile.supports_os(item) and item.bios and profile.bios for item in detected):
+
+Do that everywhere inside BootMenuRenderer where the profile is deciding whether an OS option should show.
+
+4. Update write_boot_ipxe
+
+Replace:
+
+def write_boot_ipxe(config: GeneratorConfig, detected: List[DetectedISO]) -> None:
+    renderer = BootMenuRenderer(config)
+    atomic_write(config.html_root / "boot.ipxe", renderer.render(detected))
+
+with:
+
+def write_boot_ipxe(
+    config: GeneratorConfig,
+    detected: List[DetectedISO],
+    profiles: List[ProfileDefinition],
+) -> None:
+    renderer = BootMenuRenderer(config, profiles)
+    atomic_write(config.html_root / "boot.ipxe", renderer.render(detected))
+
+5. Update status/index functions to accept profiles
+
+For Phase 4A, keep output mostly the same, but stop using the old global.
+
+Change:
+
+def render_status(config: GeneratorConfig, detected: List[DetectedISO]) -> None:
+
+to:
+
+def render_status(
+    config: GeneratorConfig,
+    detected: List[DetectedISO],
+    profiles: List[ProfileDefinition],
+) -> None:
+
+Then replace every PROFILE_DEFINITIONS inside that function with:
+
+profiles
+
+Do the same for render_index:
+
+def render_index(
+    config: GeneratorConfig,
+    detected: List[DetectedISO],
+    profiles: List[ProfileDefinition],
+) -> None:
+
+And replace PROFILE_DEFINITIONS with profiles.
+
+6. Update watch hashing
+
+Add this to watched_paths(config) before the background path:
+
+    paths.append(config.profile_root)
+    for path in profile_definition_files(config.profile_root):
+        paths.append(path)
+
+And add this to watched_env_values(config):
+
+        str(config.profile_root),
+
+Put it near template_root.
+
+7. Update generate_once
+
+Replace this section:
+
+    rootpw_hash = config.resolved_rootpw_hash()
+    detected = discover_isos(config)
+
+with:
+
+    rootpw_hash = config.resolved_rootpw_hash()
+    profiles = load_profile_definitions(config)
+    detected = discover_isos(config)
+
+Then replace:
+
+    write_boot_ipxe(config, detected)
+    render_status(config, detected)
+    render_index(config, detected)
+
+with:
+
+    write_boot_ipxe(config, detected, profiles)
+    render_status(config, detected, profiles)
+    render_index(config, detected, profiles)
+
+And update the print line to include profiles:
+
+    detected_names = ", ".join(item.os_id for item in detected) if detected else "none"
+    profile_names = ", ".join(profile.profile_id for profile in profiles)
+    print(
+        f"Generated PXE content. Detected ISOs: {detected_names}. Profiles: {profile_names}",
+        flush=True,
+    )
+
+8. Phase 4A test expectation
+
+Since we are not adding profile YAML files yet, this should still use the built-in profiles. Run the same smoke test as 3D, but save it as 4A:
+
+rm -rf /tmp/pxe-phase4a
+mkdir -p /tmp/pxe-phase4a
+curl -fss http://127.0.0.1:18080/boot.ipxe \
+  -o /tmp/pxe-phase4a/boot.ipxe
+curl -fss http://127.0.0.1:18080/generated/isos.txt \
+  -o /tmp/pxe-phase4a/isos.txt
+curl -fss http://127.0.0.1:18080/generated/status.json \
+  -o /tmp/pxe-phase4a/status.json
+curl -fss http://127.0.0.1:18080/index.html \
+  -o /tmp/pxe-phase4a/index.html
+curl -fss http://127.0.0.1:18080/ks/rhel8-minimal.ks \
+  -o /tmp/pxe-phase4a/rhel8-minimal.ks
+curl -fss -o /dev/null http://127.0.0.1:18080/ui/background.png
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/vmlinuz
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/initrd.img
+python3 -m json.tool /tmp/pxe-phase4a/status.json >/dev/null
+
+Then compare against 3D:
+
+diff -u /tmp/pxe-phase3d/boot.ipxe /tmp/pxe-phase4a/boot.ipxe
+diff -u /tmp/pxe-phase3d/isos.txt /tmp/pxe-phase4a/isos.txt
+diff -u /tmp/pxe-phase3d/rhel8-minimal.ks /tmp/pxe-phase4a/rhel8-minimal.ks
+
+For status.json and index.html, I’d expect them to match too if you only changed the loader and did not add source/profile-root fields yet:
+
+diff -u /tmp/pxe-phase3d/status.json /tmp/pxe-phase4a/status.json
+diff -u /tmp/pxe-phase3d/index.html /tmp/pxe-phase4a/index.html
+
+If those all pass, Phase 4A is good. Then Phase 4B is where we add the actual /profiles/*.yml files and confirm the output stays functionally the same.
