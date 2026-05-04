@@ -1,0 +1,5 @@
+grep -n "Security Baseline\|Security + LUKS\|Small Disk\|Developer Workstation\|Embedded" /tmp/pxe-phase3a/boot.ipxe || true
+
+grep -n "Minimal Installs\|Utilities / Rescue\|Drop to iPXE shell" /tmp/pxe-phase3a/boot.ipxe
+
+cat /tmp/pxe-phase3a/status.json
