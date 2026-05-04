@@ -1,0 +1,54 @@
+Yes. The order should be:
+
+1. Add the comment/code.
+2. Run a quick syntax check.
+3. Build the new image.
+4. Run the new image.
+5. Run the curl capture commands.
+6. Diff against the Phase 2 baseline.
+
+Use this flow:
+
+python3 -m py_compile scripts/generate-pxe-content.py
+
+Then rebuild/push or build locally the new pxe-content image.
+
+On the PXE VM, stop the existing service/container first if you’re testing manually:
+
+systemctl stop pxe-content.service
+podman rm -f pxe-content 2>/dev/null || true
+
+Run the new image:
+
+podman run -d \
+  --name pxe-content \
+  --security-opt label=disable \
+  -p 18080:8080 \
+  -v /aerolit_rhel8_standard/extracted_isos:/iso:ro,Z \
+  -e PXE_SERVER=192.168.98.148 \
+  -e PXE_PORT=18080 \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:latest
+
+Then capture Phase 3A output:
+
+mkdir -p /tmp/pxe-phase3a
+curl -fss http://127.0.0.1:18080/boot.ipxe \
+  -o /tmp/pxe-phase3a/boot.ipxe
+curl -fss http://127.0.0.1:18080/generated/isos.txt \
+  -o /tmp/pxe-phase3a/isos.txt
+curl -fss http://127.0.0.1:18080/generated/status.json \
+  -o /tmp/pxe-phase3a/status.json
+curl -fss http://127.0.0.1:18080/ks/rhel8-minimal.ks \
+  -o /tmp/pxe-phase3a/rhel8-minimal.ks
+curl -fss -o /dev/null http://127.0.0.1:18080/ui/background.png
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/vmlinuz
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/initrd.img
+
+Then compare:
+
+diff -u /tmp/pxe-phase2-refactor/boot.ipxe /tmp/pxe-phase3a/boot.ipxe
+diff -u /tmp/pxe-phase2-refactor/isos.txt /tmp/pxe-phase3a/isos.txt
+diff -u /tmp/pxe-phase2-refactor/status.json /tmp/pxe-phase3a/status.json
+diff -u /tmp/pxe-phase2-refactor/rhel8-minimal.ks /tmp/pxe-phase3a/rhel8-minimal.ks
+
+For 3A, the ideal result is no diff. If boot.ipxe has a diff, show me before merging.
