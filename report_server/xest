@@ -1,0 +1,480 @@
+Yes. For Phase 3D, I would make this a focused cleanup/pass-fail MR. Replace these sections in:
+
+scripts/generate-pxe-content.py
+
+1. Replace the entire BootMenuRenderer class
+
+Replace everything from:
+
+class BootMenuRenderer:
+
+down through the end of that class with this:
+
+class BootMenuRenderer:
+    def __init__(self, config: GeneratorConfig) -> None:
+        self.config = config
+    def visible_profiles(self) -> List[ProfileDefinition]:
+        return [
+            profile
+            for profile in PROFILE_DEFINITIONS
+            if profile.show_in_main_menu
+        ]
+    def enabled_profiles(self) -> List[ProfileDefinition]:
+        return [
+            profile
+            for profile in PROFILE_DEFINITIONS
+            if profile.show_in_main_menu and profile.implemented
+        ]
+    def render(self, detected: List[DetectedISO]) -> str:
+        lines: List[str] = []
+        lines.extend(
+            [
+                "#!ipxe",
+                "",
+                f"set server {self.config.pxe_server}",
+                f"set port {self.config.pxe_port}",
+                "set base http://${server}:${port}",
+                "",
+                f"console --picture ${{base}}{self.config.background_path} --left 360 --right 360 --top 140 --bottom 140 || goto main",
+                "",
+                ":main",
+                "menu AeroLIT PXE Menu",
+            ]
+        )
+        for profile in self.visible_profiles():
+            lines.append(menu_item(profile.title, profile.menu_target))
+        lines.extend(
+            [
+                menu_item("Utilities / Rescue", "rescue"),
+                menu_item("Drop to iPXE shell", "shell"),
+                "choose target || goto shell",
+                "goto ${target}",
+                "",
+            ]
+        )
+        for profile in self.visible_profiles():
+            if profile.implemented:
+                lines.extend(self.render_implemented_profile_menu(profile, detected))
+            else:
+                lines.extend(self.render_unimplemented_profile_menu(profile, detected))
+        lines.extend(self.render_boot_targets(detected))
+        lines.extend(self.render_rescue_menu())
+        lines.extend([":shell", "shell", ""])
+        return "\n".join(lines)
+    def render_implemented_profile_menu(
+        self,
+        profile: ProfileDefinition,
+        detected: List[DetectedISO],
+    ) -> List[str]:
+        lines: List[str] = [
+            f":{profile.menu_target}",
+            f"menu {profile.title}",
+        ]
+        if not detected:
+            lines.append(menu_item("No supported RHEL ISO trees detected", "main"))
+        else:
+            for item in detected:
+                if item.uefi and profile.uefi:
+                    lines.append(
+                        menu_item(
+                            f"Install {item.title} {profile.install_label} (UEFI)",
+                            self.profile_target(item, profile, "uefi"),
+                        )
+                    )
+            if any(item.bios and profile.bios for item in detected):
+                lines.append(menu_item("Legacy / BIOS Options", profile.legacy_target))
+        lines.extend(
+            [
+                menu_item("Back to Main Menu", "main"),
+                menu_item("Drop to iPXE shell", "shell"),
+                "choose target || goto main",
+                "goto ${target}",
+                "",
+            ]
+        )
+        if any(item.bios and profile.bios for item in detected):
+            lines.extend(self.render_implemented_legacy_menu(profile, detected))
+        return lines
+    def render_implemented_legacy_menu(
+        self,
+        profile: ProfileDefinition,
+        detected: List[DetectedISO],
+    ) -> List[str]:
+        lines: List[str] = [
+            f":{profile.legacy_target}",
+            f"menu {profile.title} - Legacy / BIOS",
+        ]
+        for item in detected:
+            if item.bios and profile.bios:
+                lines.append(
+                    menu_item(
+                        f"Install {item.title} {profile.install_label} (BIOS / Legacy)",
+                        self.profile_target(item, profile, "bios"),
+                    )
+                )
+        lines.extend(
+            [
+                menu_item(f"Back to {profile.title}", profile.menu_target),
+                menu_item("Back to Main Menu", "main"),
+                menu_item("Drop to iPXE shell", "shell"),
+                f"choose target || goto {profile.menu_target}",
+                "goto ${target}",
+                "",
+            ]
+        )
+        return lines
+    def render_unimplemented_profile_menu(
+        self,
+        profile: ProfileDefinition,
+        detected: List[DetectedISO],
+    ) -> List[str]:
+        lines: List[str] = [
+            f":{profile.menu_target}",
+            f"menu {profile.title}",
+            menu_item("Profile not implemented yet", "main"),
+        ]
+        if not detected:
+            lines.append(menu_item("No supported RHEL ISO trees detected", "main"))
+        else:
+            for item in detected:
+                if item.uefi and profile.uefi:
+                    lines.append(
+                        menu_item(
+                            f"{item.title} {profile.install_label} (UEFI) - not implemented",
+                            self.not_implemented_target(item, profile, "uefi"),
+                        )
+                    )
+            if any(item.bios and profile.bios for item in detected):
+                lines.append(menu_item("Legacy / BIOS Options", profile.legacy_target))
+        lines.extend(
+            [
+                menu_item("Back to Main Menu", "main"),
+                menu_item("Drop to iPXE shell", "shell"),
+                "choose target || goto main",
+                "goto ${target}",
+                "",
+            ]
+        )
+        if any(item.bios and profile.bios for item in detected):
+            lines.extend(self.render_unimplemented_legacy_menu(profile, detected))
+        for item in detected:
+            if item.uefi and profile.uefi:
+                lines.extend(self.render_not_implemented_target_menu(item, profile, "uefi"))
+            if item.bios and profile.bios:
+                lines.extend(self.render_not_implemented_target_menu(item, profile, "bios"))
+        return lines
+    def render_unimplemented_legacy_menu(
+        self,
+        profile: ProfileDefinition,
+        detected: List[DetectedISO],
+    ) -> List[str]:
+        lines: List[str] = [
+            f":{profile.legacy_target}",
+            f"menu {profile.title} - Legacy / BIOS",
+        ]
+        for item in detected:
+            if item.bios and profile.bios:
+                lines.append(
+                    menu_item(
+                        f"{item.title} {profile.install_label} (BIOS / Legacy) - not implemented",
+                        self.not_implemented_target(item, profile, "bios"),
+                    )
+                )
+        lines.extend(
+            [
+                menu_item(f"Back to {profile.title}", profile.menu_target),
+                menu_item("Back to Main Menu", "main"),
+                menu_item("Drop to iPXE shell", "shell"),
+                f"choose target || goto {profile.menu_target}",
+                "goto ${target}",
+                "",
+            ]
+        )
+        return lines
+    def render_not_implemented_target_menu(
+        self,
+        item: DetectedISO,
+        profile: ProfileDefinition,
+        firmware: str,
+    ) -> List[str]:
+        firmware_label = "UEFI" if firmware == "uefi" else "BIOS"
+        back_target = profile.legacy_target if firmware == "bios" else profile.menu_target
+        back_label = (
+            f"Back to {profile.title} Legacy / BIOS"
+            if firmware == "bios"
+            else f"Back to {profile.title}"
+        )
+        return [
+            f":{self.not_implemented_target(item, profile, firmware)}",
+            f"menu {profile.title}",
+            menu_item(
+                f"{item.title} {profile.install_label} {firmware_label} is not implemented yet",
+                back_target,
+            ),
+            menu_item(back_label, back_target),
+            menu_item("Back to Main Menu", "main"),
+            menu_item("Drop to iPXE shell", "shell"),
+            f"choose target || goto {back_target}",
+            "goto ${target}",
+            "",
+        ]
+    def render_boot_targets(self, detected: List[DetectedISO]) -> List[str]:
+        lines: List[str] = []
+        for profile in self.enabled_profiles():
+            for item in detected:
+                if item.uefi and profile.uefi:
+                    lines.append(
+                        self.kernel_block(
+                            item,
+                            profile,
+                            self.profile_target(item, profile, "uefi"),
+                        )
+                    )
+                if item.bios and profile.bios:
+                    lines.append(
+                        self.kernel_block(
+                            item,
+                            profile,
+                            self.profile_target(item, profile, "bios"),
+                        )
+                    )
+        return lines
+    def render_rescue_menu(self) -> List[str]:
+        return [
+            ":rescue",
+            "menu Utilities / Rescue",
+            menu_item("Back to Main Menu", "main"),
+            menu_item("Drop to iPXE shell", "shell"),
+            "choose target || goto main",
+            "goto ${target}",
+            "",
+        ]
+    def profile_target(
+        self,
+        item: DetectedISO,
+        profile: ProfileDefinition,
+        firmware: str,
+    ) -> str:
+        return f"{item.os_id}_{profile.profile_id}_{firmware}"
+    def not_implemented_target(
+        self,
+        item: DetectedISO,
+        profile: ProfileDefinition,
+        firmware: str,
+    ) -> str:
+        return f"{self.profile_target(item, profile, firmware)}_not_implemented"
+    def profile_kickstart_name(
+        self,
+        item: DetectedISO,
+        profile: ProfileDefinition,
+    ) -> str:
+        if profile.profile_id == "minimal":
+            return item.ks_name
+        return f"{item.os_id}-{profile.profile_id.replace('_', '-')}.ks"
+    def kernel_block(
+        self,
+        item: DetectedISO,
+        profile: ProfileDefinition,
+        target: str,
+    ) -> str:
+        kickstart_name = self.profile_kickstart_name(item, profile)
+        return f""":{target}
+kernel ${{base}}/{item.http_path}/images/pxeboot/vmlinuz initrd=initrd.img ip=dhcp inst.repo=${{base}}/{item.http_path} inst.stage2=${{base}}/{item.http_path} inst.ks=${{base}}/ks/{kickstart_name} inst.text nomodeset
+initrd --name initrd.img ${{base}}/{item.http_path}/images/pxeboot/initrd.img
+boot
+"""
+
+2. Add this helper after detected_iso_status()
+
+Put this directly under your existing detected_iso_status() function:
+
+def profile_status(profile: ProfileDefinition) -> Dict[str, object]:
+    return {
+        "profile_id": profile.profile_id,
+        "title": profile.title,
+        "install_label": profile.install_label,
+        "menu_target": profile.menu_target,
+        "implemented": profile.implemented,
+        "show_in_main_menu": profile.show_in_main_menu,
+        "uefi_enabled": profile.uefi,
+        "bios_enabled": profile.bios,
+    }
+
+3. Replace render_status()
+
+Replace your whole render_status() function with this:
+
+def render_status(config: GeneratorConfig, detected: List[DetectedISO]) -> None:
+    generated_dir = config.html_root / "generated"
+    generated_dir.mkdir(parents=True, exist_ok=True)
+    detected_list = [detected_iso_status(item) for item in detected]
+    visible_profiles = [
+        profile.profile_id
+        for profile in PROFILE_DEFINITIONS
+        if profile.show_in_main_menu
+    ]
+    enabled_profiles = [
+        profile.profile_id
+        for profile in PROFILE_DEFINITIONS
+        if profile.show_in_main_menu and profile.implemented
+    ]
+    unimplemented_profiles = [
+        profile.profile_id
+        for profile in PROFILE_DEFINITIONS
+        if profile.show_in_main_menu and not profile.implemented
+    ]
+    status = {
+        "pxe_server": config.pxe_server,
+        "pxe_port": config.pxe_port,
+        "container_iso_root": str(config.iso_root),
+        "html_root": str(config.html_root),
+        "detected_isos": detected_list,
+        "profiles": [
+            profile_status(profile)
+            for profile in PROFILE_DEFINITIONS
+            if profile.show_in_main_menu
+        ],
+        "visible_profiles": visible_profiles,
+        "enabled_profiles": enabled_profiles,
+        "unimplemented_profiles": unimplemented_profiles,
+        "boot_menu": "/boot.ipxe",
+    }
+    atomic_write(
+        generated_dir / "status.json",
+        json.dumps(status, indent=2, sort_keys=True) + "\n",
+    )
+    inventory_lines = [
+        f"{item.os_id} {item.iso_dir} {item.iso_path}" for item in detected
+    ]
+    if not inventory_lines:
+        inventory_lines.append("No supported RHEL ISO trees detected.")
+    atomic_write(generated_dir / "isos.txt", "\n".join(inventory_lines) + "\n")
+
+4. Replace render_index()
+
+Replace your whole render_index() function with this:
+
+def render_index(config: GeneratorConfig, detected: List[DetectedISO]) -> None:
+    lines = [
+        "<html>",
+        "<head><title>AeroLIT PXE Content</title></head>",
+        "<body>",
+        "<h1>AeroLIT PXE Content</h1>",
+        "<h2>Detected ISO Trees</h2>",
+        "<ul>",
+    ]
+    if detected:
+        for item in detected:
+            lines.append(f"<li>{item.title}: /{item.http_path}/ from {item.iso_path}</li>")
+    else:
+        lines.append("<li>No supported RHEL ISO trees detected.</li>")
+    lines.extend(
+        [
+            "</ul>",
+            "<h2>Profile Sets</h2>",
+            "<ul>",
+        ]
+    )
+    for profile in PROFILE_DEFINITIONS:
+        if not profile.show_in_main_menu:
+            continue
+        state = "implemented" if profile.implemented else "placeholder / not implemented"
+        lines.append(f"<li>{profile.title}: {state}</li>")
+    lines.extend(
+        [
+            "</ul>",
+            "<h2>Generated Files</h2>",
+            "<ul>",
+            '<li><a href="/boot.ipxe">boot.ipxe</a></li>',
+            '<li><a href="/generated/status.json">generated/status.json</a></li>',
+            '<li><a href="/generated/isos.txt">generated/isos.txt</a></li>',
+            "</ul>",
+            "</body>",
+            "</html>",
+            "",
+        ]
+    )
+    atomic_write(config.html_root / "index.html", "\n".join(lines))
+
+5. Test commands after the image/service is updated
+
+After the pipeline builds the new image and the PXE service is restarted, run this:
+
+rm -rf /tmp/pxe-phase3d
+mkdir -p /tmp/pxe-phase3d
+curl -fss http://127.0.0.1:18080/boot.ipxe \
+  -o /tmp/pxe-phase3d/boot.ipxe
+curl -fss http://127.0.0.1:18080/generated/isos.txt \
+  -o /tmp/pxe-phase3d/isos.txt
+curl -fss http://127.0.0.1:18080/generated/status.json \
+  -o /tmp/pxe-phase3d/status.json
+curl -fss http://127.0.0.1:18080/index.html \
+  -o /tmp/pxe-phase3d/index.html
+curl -fss http://127.0.0.1:18080/ks/rhel8-minimal.ks \
+  -o /tmp/pxe-phase3d/rhel8-minimal.ks
+curl -fss -o /dev/null http://127.0.0.1:18080/ui/background.png
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/vmlinuz
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/initrd.img
+python3 -m json.tool /tmp/pxe-phase3d/status.json >/dev/null
+
+Then verify the new menu structure:
+
+grep -n "item minimal.*Minimal Installs" /tmp/pxe-phase3d/boot.ipxe
+grep -n "item security_baseline.*Security Baseline Installs" /tmp/pxe-phase3d/boot.ipxe
+grep -n "item security_luks.*Security + LUKS Installs" /tmp/pxe-phase3d/boot.ipxe
+grep -n "item small_disk.*Small Disk Installs" /tmp/pxe-phase3d/boot.ipxe
+grep -n "item developer_workstation.*Developer Workstation Installs" /tmp/pxe-phase3d/boot.ipxe
+grep -n "item embedded_edge.*Embedded / Edge Hardware Installs" /tmp/pxe-phase3d/boot.ipxe
+grep -n "item rescue.*Utilities / Rescue" /tmp/pxe-phase3d/boot.ipxe
+grep -n "item shell.*Drop to iPXE shell" /tmp/pxe-phase3d/boot.ipxe
+
+Verify Minimal is still the only real bootable profile:
+
+grep -n ":rhel8_minimal_uefi" /tmp/pxe-phase3d/boot.ipxe
+grep -n "inst.ks=\${base}/ks/rhel8-minimal.ks" /tmp/pxe-phase3d/boot.ipxe
+if grep -En 'inst\.ks=.*(security-baseline|security-luks|small-disk|developer-workstation|embedded-edge)' /tmp/pxe-phase3d/boot.ipxe; then
+  echo "ERROR: future profile generated a real boot target"
+else
+  echo "OK: future profiles do not generate real boot targets"
+fi
+
+Verify future profiles are visible but safe:
+
+grep -n "not implemented" /tmp/pxe-phase3d/boot.ipxe
+grep -n "_not_implemented" /tmp/pxe-phase3d/boot.ipxe
+for profile in security-baseline security-luks small-disk developer-workstation embedded-edge; do
+  if curl -fss -o /dev/null "http://127.0.0.1:18080/ks/rhel8-${profile}.ks" 2>/dev/null; then
+    echo "ERROR: unexpected future kickstart exists: rhel8-${profile}.ks"
+  else
+    echo "OK: no generated future kickstart for rhel8-${profile}.ks"
+  fi
+done
+
+Verify status.json clearly shows the Phase 3D fields:
+
+grep -n '"visible_profiles"' /tmp/pxe-phase3d/status.json
+grep -n '"enabled_profiles"' /tmp/pxe-phase3d/status.json
+grep -n '"unimplemented_profiles"' /tmp/pxe-phase3d/status.json
+grep -n '"detected_isos"' /tmp/pxe-phase3d/status.json
+grep -n '"profiles"' /tmp/pxe-phase3d/status.json
+
+Optional compare against 3C. These two should usually still match:
+
+diff -u /tmp/pxe-phase3b/isos.txt /tmp/pxe-phase3d/isos.txt || true
+diff -u /tmp/pxe-phase3b/rhel8-minimal.ks /tmp/pxe-phase3d/rhel8-minimal.ks || true
+
+For boot.ipxe and status.json, differences are expected because 3D adds safer placeholder targets and better status output.
+
+Manual PXE test should show:
+
+AeroLIT PXE Menu
+  Minimal Installs
+  Security Baseline Installs
+  Security + LUKS Installs
+  Small Disk Installs
+  Developer Workstation Installs
+  Embedded / Edge Hardware Installs
+  Utilities / Rescue
+  Drop to iPXE shell
+
+Minimal should still show real RHEL install options. Future profiles should show RHEL options marked not implemented, and selecting one should only take you to a safe placeholder menu, not start a boot.
