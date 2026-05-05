@@ -1,0 +1,220 @@
+Yes, 5B is a good next step. The exact goal is:
+
+Phase 5B = make kickstart_template and kernel_args actually do something, but still only for implemented profiles.
+
+Right now 5A made the profile YAML smarter and validated the fields. 5B wires those fields into the generator.
+
+What we need to do in 5B
+
+1. Keep the profile YAML files
+
+Each profile should have these two fields:
+
+kickstart_template: "{{ os_id }}-minimal.ks.tmpl"
+kernel_args:
+  - inst.text
+  - nomodeset
+
+For future profiles, the template names can point to future template names, but since they are still implemented: false, they should not generate anything yet.
+
+Example:
+
+kickstart_template: "{{ os_id }}-developer-workstation.ks.j2"
+kernel_args:
+  - inst.text
+  - nomodeset
+
+That is okay even if the template does not exist yet, because the profile is not implemented.
+
+⸻
+
+2. Update KickstartRenderer
+
+Right now the script renders kickstarts mostly by detected OS.
+
+5B should render kickstarts by:
+
+detected OS + implemented profile
+
+So for now, because only minimal is implemented, the only generated kickstarts should still be:
+
+/ks/rhel10-minimal.ks
+/ks/rhel9-minimal.ks
+/ks/rhel8-minimal.ks
+/ks/rhel7-minimal.ks
+
+Depending on which ISOs are detected.
+
+The renderer should skip all profiles where:
+
+profile.implemented is False
+
+That keeps future profiles safe.
+
+⸻
+
+3. Resolve {{ os_id }} in kickstart_template
+
+For minimal, this:
+
+kickstart_template: "{{ os_id }}-minimal.ks.tmpl"
+
+should resolve to:
+
+rhel8-minimal.ks.tmpl
+
+for RHEL 8.
+
+The script should look for that template in:
+
+/templates/ks/rhel8-minimal.ks.tmpl
+/templates/rhel8-minimal.ks.tmpl
+
+For minimal only, if the template is missing, it can keep using the built-in fallback kickstart.
+
+For any future implemented profile, I would make it fail clearly if the template is missing. That prevents accidentally turning on a profile and having it silently install the wrong thing.
+
+⸻
+
+4. Use kernel_args in boot.ipxe
+
+Right now your kernel line hardcodes this:
+
+inst.text nomodeset
+
+5B should build that part from the profile:
+
+kernel_args:
+  - inst.text
+  - nomodeset
+
+The output should still be the same for now:
+
+inst.text nomodeset
+
+But later, a profile could safely add things like:
+
+kernel_args:
+  - inst.text
+  - nomodeset
+  - inst.sshd
+
+without changing Python code.
+
+⸻
+
+5. Add generated kickstart info to status.json
+
+I would add a new status section like:
+
+"generated_kickstarts": [
+  {
+    "os_id": "rhel8",
+    "profile_id": "minimal",
+    "template": "rhel8-minimal.ks.tmpl",
+    "output": "/ks/rhel8-minimal.ks"
+  }
+]
+
+That gives you a clean way to prove 5B is working.
+
+⸻
+
+6. Keep future profiles safe
+
+After 5B, these should not exist:
+
+/ks/rhel8-developer-workstation.ks
+/ks/rhel8-security-baseline.ks
+/ks/rhel8-security-luks.ks
+/ks/rhel8-embedded-edge.ks
+/ks/rhel8-small-disk.ks
+
+And boot.ipxe should not contain real inst.ks= boot targets for those profiles.
+
+They should still only have placeholder/not-implemented targets.
+
+⸻
+
+Files likely touched
+
+For 5B, probably only:
+
+scripts/generate-pxe-content.py
+
+Possibly also the profile YAML files if they do not already have:
+
+kickstart_template:
+kernel_args:
+
+No Dockerfile change should be needed now that PyYAML is already in the image.
+
+⸻
+
+5B test plan
+
+After rebuilding/restarting, save the output:
+
+rm -rf /tmp/pxe-phase5b
+mkdir -p /tmp/pxe-phase5b
+curl -fss http://127.0.0.1:18080/boot.ipxe \
+  -o /tmp/pxe-phase5b/boot.ipxe
+curl -fss http://127.0.0.1:18080/generated/isos.txt \
+  -o /tmp/pxe-phase5b/isos.txt
+curl -fss http://127.0.0.1:18080/generated/status.json \
+  -o /tmp/pxe-phase5b/status.json
+curl -fss http://127.0.0.1:18080/index.html \
+  -o /tmp/pxe-phase5b/index.html
+curl -fss http://127.0.0.1:18080/ks/rhel8-minimal.ks \
+  -o /tmp/pxe-phase5b/rhel8-minimal.ks
+curl -fss -o /dev/null http://127.0.0.1:18080/ui/background.png
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/vmlinuz
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/initrd.img
+python3 -m json.tool /tmp/pxe-phase5b/status.json >/dev/null
+
+Compare the important stable files:
+
+diff -u /tmp/pxe-phase5a/isos.txt /tmp/pxe-phase5b/isos.txt
+diff -u /tmp/pxe-phase5a/rhel8-minimal.ks /tmp/pxe-phase5b/rhel8-minimal.ks
+
+Verify the new fields are visible:
+
+grep -n '"generated_kickstarts"' /tmp/pxe-phase5b/status.json
+grep -n '"kickstart_template"' /tmp/pxe-phase5b/status.json
+grep -n '"kernel_args"' /tmp/pxe-phase5b/status.json
+
+Verify minimal still has the real boot target:
+
+grep -n ":rhel8_minimal_uefi" /tmp/pxe-phase5b/boot.ipxe
+grep -n 'inst.ks=${base}/ks/rhel8-minimal.ks' /tmp/pxe-phase5b/boot.ipxe
+grep -n 'inst.text nomodeset' /tmp/pxe-phase5b/boot.ipxe
+
+Verify future profiles still do not generate real boot targets:
+
+if grep -En 'inst\.ks=.*(developer-workstation|security-baseline|security-luks|embedded-edge|small-disk)' /tmp/pxe-phase5b/boot.ipxe; then
+  echo "ERROR: future profile generated a real boot target"
+else
+  echo "OK: future profiles do not generate real boot targets"
+fi
+
+Verify future kickstarts do not exist:
+
+for profile in developer-workstation security-baseline security-luks embedded-edge small-disk; do
+  if curl -fss -o /dev/null "http://127.0.0.1:18080/ks/rhel8-${profile}.ks" 2>/dev/null; then
+    echo "ERROR: unexpected future kickstart exists: rhel8-${profile}.ks"
+  else
+    echo "OK: no generated future kickstart for rhel8-${profile}.ks"
+  fi
+done
+
+My recommended 5B scope
+
+Do exactly this and nothing more:
+
+Use kickstart_template
+Use kernel_args
+Generate kickstarts only for implemented profiles
+Add generated_kickstarts to status.json
+Keep future profiles as safe placeholders
+
+Then 5C can add richer template variables and more flexible kickstart rendering.
