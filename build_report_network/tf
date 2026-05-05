@@ -1,0 +1,194 @@
+Yes. For Phase 5F, I would keep it tight and make Small Disk the first real non-minimal profile, but only for RHEL 8 right now. That proves the whole profile/template/boot-target chain without accidentally requiring RHEL 7/9/10 small-disk templates.
+
+Phase 5F exact work
+
+You need to do 4 changes.
+
+⸻
+
+1. Update content/profiles/60-small-disk.yml
+
+Change it from placeholder to implemented, and limit it to RHEL 8 for now.
+
+Use this full file:
+
+profile_id: small_disk
+title: Small Disk Installs
+install_label: Small Disk
+menu_target: small_disk
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+kickstart_template: "ks/{{ os_id }}-small-disk.ks.j2"
+kernel_args:
+  - inst.text
+  - nomodeset
+
+The important parts are:
+
+implemented: true
+supported_os:
+  - rhel8
+kickstart_template: "ks/{{ os_id }}-small-disk.ks.j2"
+
+That means it should generate:
+
+/ks/rhel8-small-disk.ks
+
+And boot targets like:
+
+:rhel8_small_disk_uefi
+:rhel8_small_disk_bios
+
+⸻
+
+2. Add templates/partials/storage-small-disk.ks.j2
+
+Create this new file:
+
+zerombr
+clearpart --all --initlabel
+reqpart --add-boot
+part / --fstype=xfs --size=8192 --grow
+
+This is the main thing that makes the profile different from minimal.
+
+Your minimal profile uses:
+
+autopart --type=lvm
+
+Small Disk will use a simpler layout with:
+
+reqpart --add-boot
+part / --fstype=xfs --size=8192 --grow
+
+That gives you a small-disk-friendly layout and avoids LVM/swap complexity for this first proof.
+
+⸻
+
+3. Add templates/ks/rhel8-small-disk.ks.j2
+
+Create this new file:
+
+#version=RHEL{{ os_major }}
+{% include "partials/install-mode-text.ks.j2" %}
+{% include "partials/language-keyboard.ks.j2" %}
+{% include "partials/timezone.ks.j2" %}
+{% include "partials/network-dhcp.ks.j2" %}
+{% include "partials/root-password.ks.j2" %}
+{% include "partials/repo-url.ks.j2" %}
+{% include "partials/storage-small-disk.ks.j2" %}
+{% include "partials/packages-minimal.ks.j2" %}
+{% include "partials/services-basic.ks.j2" %}
+{% include "partials/kdump-enabled.ks.j2" %}
+{% include "partials/post-empty.ks.j2" %}
+
+Notice the only major difference from your minimal template is this line:
+
+{% include "partials/storage-small-disk.ks.j2" %}
+
+instead of:
+
+{% include "partials/storage-default-lvm.ks.j2" %}
+
+⸻
+
+4. Update the built-in small_disk profile in scripts/generate-pxe-content.py
+
+Find the built-in ProfileDefinition for small_disk.
+
+Change it to this:
+
+ProfileDefinition(
+    profile_id="small_disk",
+    title="Small Disk Installs",
+    install_label="Small Disk",
+    menu_target="small_disk",
+    implemented=True,
+    show_in_main_menu=True,
+    supported_os=("rhel8",),
+    kickstart_template="ks/{{ os_id }}-small-disk.ks.j2",
+    kernel_args=("inst.text", "nomodeset"),
+),
+
+This matters because if /profiles is ever missing or not mounted, the built-in fallback still behaves like Phase 5F.
+
+⸻
+
+Do not change these yet
+
+Leave these as placeholders:
+
+developer_workstation
+security_baseline
+security_luks
+embedded_edge
+
+Do not implement those yet.
+
+Also, do not add RHEL 7/9/10 small-disk support yet unless you are ready to add and test these too:
+
+templates/ks/rhel7-small-disk.ks.j2
+templates/ks/rhel9-small-disk.ks.j2
+templates/ks/rhel10-small-disk.ks.j2
+
+For 5F, RHEL 8 only is the cleanest proof because it gives you both UEFI and BIOS behavior.
+
+⸻
+
+Quick tests before merging
+
+After rebuilding/redeploying the container, run:
+
+rm -rf /tmp/pxe-phase5f
+mkdir -p /tmp/pxe-phase5f
+curl -fss http://127.0.0.1:18080/boot.ipxe \
+  -o /tmp/pxe-phase5f/boot.ipxe
+curl -fss http://127.0.0.1:18080/generated/status.json \
+  -o /tmp/pxe-phase5f/status.json
+curl -fss http://127.0.0.1:18080/ks/rhel8-minimal.ks \
+  -o /tmp/pxe-phase5f/rhel8-minimal.ks
+curl -fss http://127.0.0.1:18080/ks/rhel8-small-disk.ks \
+  -o /tmp/pxe-phase5f/rhel8-small-disk.ks
+
+Then verify small disk is real:
+
+grep -q 'rhel8_small_disk_uefi' /tmp/pxe-phase5f/boot.ipxe
+grep -q 'rhel8_small_disk_bios' /tmp/pxe-phase5f/boot.ipxe
+grep -q 'inst.ks=${base}/ks/rhel8-small-disk.ks' /tmp/pxe-phase5f/boot.ipxe
+grep -q 'part / --fstype=xfs --size=8192 --grow' /tmp/pxe-phase5f/rhel8-small-disk.ks
+grep -q 'reqpart --add-boot' /tmp/pxe-phase5f/rhel8-small-disk.ks
+
+Verify the future profiles are still placeholders:
+
+if grep -E 'inst\.ks=.*(developer-workstation|security-baseline|security-luks|embedded-edge)' /tmp/pxe-phase5f/boot.ipxe; then
+  echo "ERROR: future profile generated a real boot target"
+  exit 1
+else
+  echo "OK: future profiles are still placeholders"
+fi
+
+Verify status JSON:
+
+python3 -m json.tool /tmp/pxe-phase5f/status.json >/dev/null
+grep -q '"profile_id": "small_disk"' /tmp/pxe-phase5f/status.json
+grep -q '"kickstart_name": "rhel8-small-disk.ks"' /tmp/pxe-phase5f/status.json
+grep -q '"template_engine": "jinja2"' /tmp/pxe-phase5f/status.json
+
+Merge criteria
+
+I’d merge 5F when all of this is true:
+
+/ks/rhel8-minimal.ks still works
+/ks/rhel8-small-disk.ks exists
+boot.ipxe has rhel8_small_disk_uefi
+boot.ipxe has rhel8_small_disk_bios
+boot.ipxe points small_disk to /ks/rhel8-small-disk.ks
+small-disk Kickstart includes storage-small-disk behavior
+developer/security/embedded profiles do not generate real inst.ks targets
+status.json shows small_disk as an implemented generated kickstart
+
+Once that passes, Phase 5 is actually complete.
