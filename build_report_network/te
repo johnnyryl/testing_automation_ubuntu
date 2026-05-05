@@ -1,3 +1,19 @@
+curl -fss http://127.0.0.1:18080/boot.ipxe -o /tmp/boot.ipxe
+curl -fss http://127.0.0.1:18080/generated/status.json -o /tmp/status.json
+python3 -m json.tool /tmp/status.json >/dev/null
+
+grep -q 'template_engine.*jinja2' /tmp/status.json
+grep -q 'ks/rhel8-minimal.ks.j2' /tmp/status.json
+
+if grep -E 'inst\.ks=.*(developer-workstation|security-baseline|security-luks|embedded-edge|small-disk)' /tmp/boot.ipxe; then
+  echo "ERROR: future profile generated a real boot target"
+  exit 1
+else
+  echo "OK: future profiles are still placeholders"
+fi
+
+
+
 Perfect. For 5E, we should not implement a new real profile yet. This phase should make the Kickstart template system clean and reusable.
 
 Phase 5E goal
