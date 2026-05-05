@@ -1,0 +1,182 @@
+Yes, I feel good about the 5D code direction. The main thing it accomplished is important: templates now get a real context, .j2 files can use real Jinja2, and bad variables fail clearly instead of silently generating wrong Kickstarts.
+
+The one caveat: 5D supports whole-file Jinja templates, but not reusable Jinja include/partial files yet. That is the next step.
+
+What I would test before merging 5D
+
+Run your normal smoke test first:
+
+rm -rf /tmp/pxe-phase5d
+mkdir -p /tmp/pxe-phase5d
+curl -fss http://127.0.0.1:18080/boot.ipxe \
+  -o /tmp/pxe-phase5d/boot.ipxe
+curl -fss http://127.0.0.1:18080/generated/isos.txt \
+  -o /tmp/pxe-phase5d/isos.txt
+curl -fss http://127.0.0.1:18080/generated/status.json \
+  -o /tmp/pxe-phase5d/status.json
+curl -fss http://127.0.0.1:18080/index.html \
+  -o /tmp/pxe-phase5d/index.html
+curl -fss http://127.0.0.1:18080/ks/rhel8-minimal.ks \
+  -o /tmp/pxe-phase5d/rhel8-minimal.ks
+curl -fss -o /dev/null http://127.0.0.1:18080/ui/background.png
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/vmlinuz
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/initrd.img
+python3 -m json.tool /tmp/pxe-phase5d/status.json >/dev/null
+
+Then check the new 5D status fields:
+
+grep -n '"generated_kickstarts"' /tmp/pxe-phase5d/status.json
+grep -n '"template_engine"' /tmp/pxe-phase5d/status.json
+grep -n '"template_context_keys"' /tmp/pxe-phase5d/status.json
+grep -n '"base_url"' /tmp/pxe-phase5d/status.json
+grep -n '"repo_url"' /tmp/pxe-phase5d/status.json
+grep -n '"kickstart_url"' /tmp/pxe-phase5d/status.json
+
+Then make sure future profiles still do not create real boot targets:
+
+if grep -En 'inst\.ks=.*(developer-workstation|security-baseline|security-luks|embedded-edge|small-disk)' /tmp/pxe-phase5d/boot.ipxe; then
+  echo "ERROR: future profile generated a real boot target"
+  exit 1
+else
+  echo "OK: future profiles do not generate real boot targets"
+fi
+
+Test real Jinja2 rendering
+
+Run this inside the container:
+
+set -e
+rm -rf /tmp/pxe-5d-jinja-profiles /tmp/pxe-5d-jinja-templates /tmp/pxe-5d-jinja-output
+mkdir -p /tmp/pxe-5d-jinja-profiles /tmp/pxe-5d-jinja-templates/ks
+cat > /tmp/pxe-5d-jinja-profiles/10-minimal.yml <<'EOF'
+profile_id: minimal
+title: Minimal Installs
+install_label: Minimal
+menu_target: minimal
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+kickstart_template: "{{ os_id }}-minimal.ks.tmpl"
+kernel_args:
+  - inst.text
+  - nomodeset
+EOF
+cat > /tmp/pxe-5d-jinja-profiles/20-developer-workstation.yml <<'EOF'
+profile_id: developer_workstation
+title: Developer Workstation Installs
+install_label: Developer Workstation
+menu_target: developer_workstation
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+kickstart_template: rhel8-developer-workstation.ks.j2
+kernel_args:
+  - inst.text
+  - nomodeset
+EOF
+cat > /tmp/pxe-5d-jinja-templates/ks/rhel8-developer-workstation.ks.j2 <<'EOF'
+#version=RHEL{{ os_major }}
+text
+url --url="{{ repo_url }}"
+rootpw --iscrypted {{ ROOTPW_HASH }}
+# profile={{ profile_id }}
+# kickstart={{ kickstart_name }}
+%packages
+@^minimal-environment
+%end
+EOF
+PXE_SERVER=127.0.0.1 \
+PXE_PROFILE_ROOT=/tmp/pxe-5d-jinja-profiles \
+PXE_TEMPLATE_ROOT=/tmp/pxe-5d-jinja-templates \
+PXE_HTML_ROOT=/tmp/pxe-5d-jinja-output \
+python3 /usr/local/bin/generate-pxe-content.py --once
+test -f /tmp/pxe-5d-jinja-output/ks/rhel8-developer-workstation.ks
+grep -q 'url --url="http://127.0.0.1:18080/rhel8"' /tmp/pxe-5d-jinja-output/ks/rhel8-developer-workstation.ks
+grep -q '# profile=developer_workstation' /tmp/pxe-5d-jinja-output/ks/rhel8-developer-workstation.ks
+grep -q '# kickstart=rhel8-developer-workstation.ks' /tmp/pxe-5d-jinja-output/ks/rhel8-developer-workstation.ks
+grep -q 'rhel8_developer_workstation_uefi' /tmp/pxe-5d-jinja-output/boot.ipxe
+grep -q 'inst.ks=${base}/ks/rhel8-developer-workstation.ks' /tmp/pxe-5d-jinja-output/boot.ipxe
+echo "OK: Jinja2 profile Kickstart rendered correctly"
+
+Test Jinja2 fails clearly on a bad variable
+
+Still inside the container:
+
+cat > /tmp/pxe-5d-jinja-templates/ks/rhel8-developer-workstation.ks.j2 <<'EOF'
+#version=RHEL{{ os_major }}
+text
+url --url="{{ repo_url }}"
+# bad variable should fail:
+{{ not_a_real_variable }}
+EOF
+set +e
+PXE_SERVER=127.0.0.1 \
+PXE_PROFILE_ROOT=/tmp/pxe-5d-jinja-profiles \
+PXE_TEMPLATE_ROOT=/tmp/pxe-5d-jinja-templates \
+PXE_HTML_ROOT=/tmp/pxe-5d-jinja-output \
+python3 /usr/local/bin/generate-pxe-content.py --once > /tmp/pxe-5d-jinja-bad.out 2>&1
+rc=$?
+set -e
+cat /tmp/pxe-5d-jinja-bad.out
+if [ "$rc" -eq 0 ]; then
+  echo "ERROR: bad Jinja2 template unexpectedly passed"
+  exit 1
+fi
+if grep -Eq 'not_a_real_variable|undefined|failed Jinja2 rendering' /tmp/pxe-5d-jinja-bad.out; then
+  echo "OK: bad Jinja2 template failed clearly"
+else
+  echo "ERROR: bad Jinja2 template failed, but not with a clear message"
+  exit 1
+fi
+
+If those pass, I would feel good merging 5D.
+
+About the different Kickstart pieces
+
+You are not misunderstanding. Eventually the Kickstart should not be one giant repeated file for every profile. The clean design is:
+
+content/
+  profiles/
+    50-minimal.yml
+    20-security-baseline.yml
+    10-developer-workstation.yml
+  ks/
+    rhel8-minimal.ks.j2
+    rhel9-minimal.ks.j2
+    rhel10-minimal.ks.j2
+    profiles/
+      rhel8-developer-workstation.ks.j2
+      rhel9-developer-workstation.ks.j2
+      rhel8-security-baseline.ks.j2
+      rhel9-security-baseline.ks.j2
+    partials/
+      header.ks.j2
+      network-dhcp.ks.j2
+      root-password.ks.j2
+      storage-lvm.ks.j2
+      packages-minimal.ks.j2
+      packages-developer.ks.j2
+      services-basic.ks.j2
+      post-aerolit.ks.j2
+
+But your current 5D code does not support {% include %} yet, because it renders Jinja from a raw string. For includes/partials to work, the next phase should add a Jinja2 FileSystemLoader pointed at the template folders.
+
+So I would make 5E:
+
+Phase 5E — Add Jinja2 template library / partial support
+
+That means:
+
+* Support {% include "partials/network-dhcp.ks.j2" %}.
+* Support templates under subdirectories like profiles/rhel8-developer-workstation.ks.j2.
+* Add starter partial files.
+* Convert the minimal template to use those partials.
+* Keep generated /ks/*.ks as output only.
+
+Then Phase 6 stays what we said before: overrides and emergency edit behavior.
