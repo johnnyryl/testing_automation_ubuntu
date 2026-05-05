@@ -1,0 +1,177 @@
+Perfect. For 5E, we should not implement a new real profile yet. This phase should make the Kickstart template system clean and reusable.
+
+Phase 5E goal
+
+Add a real Jinja2 template library so Kickstarts can be built from shared pieces:
+
+/templates/
+  ks/
+    rhel8-minimal.ks.j2
+    rhel9-minimal.ks.j2
+    rhel10-minimal.ks.j2
+    rhel7-minimal.ks.j2
+  partials/
+    install-mode-text.ks.j2
+    language-keyboard.ks.j2
+    timezone.ks.j2
+    network-dhcp.ks.j2
+    root-password.ks.j2
+    repo-url.ks.j2
+    storage-default-lvm.ks.j2
+    packages-minimal.ks.j2
+    services-basic.ks.j2
+    kdump-enabled.ks.j2
+    post-empty.ks.j2
+
+The important boundary is:
+
+/templates/... = source templates users edit
+/html_root/ks/... = generated Kickstart output only
+
+What changes in the Python script
+
+Since 5D added Jinja2, 5E mainly needs to make sure Jinja2 uses a real loader rooted at PXE_TEMPLATE_ROOT.
+
+That is what allows this to work:
+
+{% include "partials/network-dhcp.ks.j2" %}
+
+The key script behavior should be:
+
+Jinja2 templates render through Environment(loader=FileSystemLoader(PXE_TEMPLATE_ROOT))
+includes are resolved relative to PXE_TEMPLATE_ROOT
+/templates/ks/rhel8-minimal.ks.j2 can include /templates/partials/*.ks.j2
+missing include fails clearly
+undefined variable fails clearly
+generated files still go only to /ks/*.ks
+
+If your 5D code currently reads the template file manually and renders it from a string, includes may not work correctly. So the main 5E script change is likely inside the Jinja render function.
+
+Conceptually it should render like this:
+
+env = Environment(
+    loader=FileSystemLoader(str(self.config.template_root)),
+    undefined=StrictUndefined,
+    autoescape=False,
+    keep_trailing_newline=True,
+)
+template = env.get_template(template_name_relative_to_template_root)
+rendered = template.render(**values)
+
+Minimal Kickstart template after 5E
+
+Example:
+
+#version=RHEL{{ os_major }}
+{% include "partials/install-mode-text.ks.j2" %}
+{% include "partials/language-keyboard.ks.j2" %}
+{% include "partials/timezone.ks.j2" %}
+{% include "partials/network-dhcp.ks.j2" %}
+{% include "partials/root-password.ks.j2" %}
+{% include "partials/repo-url.ks.j2" %}
+{% include "partials/storage-default-lvm.ks.j2" %}
+{% include "partials/packages-minimal.ks.j2" %}
+{% include "partials/services-basic.ks.j2" %}
+{% include "partials/kdump-enabled.ks.j2" %}
+{% include "partials/post-empty.ks.j2" %}
+
+Starter partials
+
+partials/install-mode-text.ks.j2
+
+text
+reboot
+
+partials/language-keyboard.ks.j2
+
+lang en_US.UTF-8
+keyboard us
+
+partials/timezone.ks.j2
+
+timezone America/Chicago --utc
+
+partials/network-dhcp.ks.j2
+
+network --bootproto=dhcp --device=link --activate
+
+partials/root-password.ks.j2
+
+rootpw --iscrypted {{ ROOTPW_HASH }}
+firstboot --disable
+
+partials/repo-url.ks.j2
+
+url --url="{{ repo_url }}"
+
+partials/storage-default-lvm.ks.j2
+
+zerombr
+clearpart --all --initlabel
+autopart --type=lvm
+
+partials/packages-minimal.ks.j2
+
+%packages
+@^minimal-environment
+%end
+
+partials/services-basic.ks.j2
+
+selinux --enforcing
+firewall --enabled --service=ssh
+services --enabled=sshd
+
+partials/kdump-enabled.ks.j2
+
+%addon com_redhat_kdump --enable
+%end
+
+partials/post-empty.ks.j2
+
+%post
+%end
+
+Profile YAML change for minimal
+
+For the minimal profile, I would change this:
+
+kickstart_template: "{{ os_id }}-minimal.ks.tmpl"
+
+to this:
+
+kickstart_template: "ks/{{ os_id }}-minimal.ks.j2"
+
+That makes the lookup more obvious because the profile points exactly at the source template under /templates/ks.
+
+What I would test before merging 5E
+
+After the changes, test these:
+
+curl -fss http://127.0.0.1:18080/ks/rhel8-minimal.ks -o /tmp/rhel8-minimal.ks
+grep -q 'url --url=' /tmp/rhel8-minimal.ks
+grep -q 'rootpw --iscrypted' /tmp/rhel8-minimal.ks
+grep -q '@^minimal-environment' /tmp/rhel8-minimal.ks
+grep -q '%addon com_redhat_kdump --enable' /tmp/rhel8-minimal.ks
+
+Then test a bad include:
+
+{% include "partials/does-not-exist.ks.j2" %}
+
+Expected result:
+
+ERROR: Template ... failed Jinja2 rendering ...
+
+or:
+
+ERROR: Template ... could not be loaded ...
+
+And test a bad variable:
+
+{{ not_a_real_variable }}
+
+Expected result:
+
+ERROR: Template ... failed Jinja2 rendering: 'not_a_real_variable' is undefined
+
+So the next concrete step is: update the Python renderer so Jinja2 uses FileSystemLoader(PXE_TEMPLATE_ROOT), then add the templates/partials files and convert the minimal templates to .ks.j2.
