@@ -1,0 +1,1495 @@
+#!/usr/bin/env python3
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from string import Template
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+
+# =============================================================================
+# Config loading
+# =============================================================================
+
+
+def getenv(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
+
+
+def getenv_bool(name: str, default: bool = False) -> bool:
+    raw = getenv(name, str(default)).lower()
+    return raw in ("1", "true", "yes", "y", "on")
+
+
+def getenv_int(name: str, default: int) -> int:
+    raw = getenv(name, str(default))
+
+    try:
+        return int(raw)
+    except ValueError:
+        fail(f"{name} must be an integer. Got: {raw}")
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"ERROR: {message}")
+
+
+@dataclass(frozen=True)
+class GeneratorConfig:
+    pxe_server: str
+    pxe_port: str
+    iso_root: Path
+    html_root: Path
+    template_root: Path
+    profile_root: Path
+    background_path: str
+    watch_interval: int
+    rootpw_hash: str
+    allow_default_rootpw: bool
+
+    @classmethod
+    def from_env(cls) -> "GeneratorConfig":
+        return cls(
+            pxe_server=getenv("PXE_SERVER"),
+            pxe_port=getenv("PXE_PORT", "18080"),
+            iso_root=Path(getenv("PXE_ISO_ROOT", "/iso")),
+            html_root=Path(getenv("PXE_HTML_ROOT", "/etc/nginx/html")),
+            template_root=Path(getenv("PXE_TEMPLATE_ROOT", "/templates")),
+            profile_root=Path(getenv("PXE_PROFILE_ROOT", "/profiles")),
+            background_path=getenv("PXE_BACKGROUND_PATH", "/ui/background.png"),
+            watch_interval=getenv_int("PXE_WATCH_INTERVAL", 15),
+            rootpw_hash=getenv("ROOTPW_HASH"),
+            allow_default_rootpw=getenv_bool("ALLOW_DEFAULT_ROOTPW", True),
+        )
+
+    def resolved_rootpw_hash(self) -> str:
+        if self.rootpw_hash:
+            return self.rootpw_hash
+
+        if self.allow_default_rootpw:
+            return DEFAULT_ROOTPW_HASH
+
+        fail("ROOTPW_HASH is required unless ALLOW_DEFAULT_ROOTPW=true.")
+        return ""
+
+    def validate(self) -> None:
+        if not self.pxe_server:
+            fail("PXE_SERVER is required.")
+
+        if self.watch_interval < 1:
+            fail("PXE_WATCH_INTERVAL must be 1 or greater.")
+
+
+# Default password is "changeme".
+DEFAULT_ROOTPW_HASH = "$6$REKKqe02R3z8Y64USCA2sFUk/H/4dPEAZ/CqSX2Rauff3tbR00t2apKmPTbXAXUALwgwHWXdoggAKOQQuJ6PWWCavgQi35S8XAIj5P/"
+
+
+# =============================================================================
+# OS definitions
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class OSDefinition:
+    os_id: str
+    major: int
+    title: str
+    iso_dir: str
+    ks_template: str
+    uefi: bool
+    bios: bool
+
+    @property
+    def ks_name(self) -> str:
+        return f"{self.os_id}-minimal.ks"
+
+    @property
+    def uefi_target(self) -> str:
+        return f"{self.os_id}_minimal_uefi"
+
+    @property
+    def bios_target(self) -> str:
+        return f"{self.os_id}_minimal_bios"
+
+
+@dataclass(frozen=True)
+class DetectedISO:
+    definition: OSDefinition
+    iso_path: Path
+
+    @property
+    def os_id(self) -> str:
+        return self.definition.os_id
+
+    @property
+    def major(self) -> int:
+        return self.definition.major
+
+    @property
+    def title(self) -> str:
+        return self.definition.title
+
+    @property
+    def iso_dir(self) -> str:
+        return self.definition.iso_dir
+
+    @property
+    def ks_template(self) -> str:
+        return self.definition.ks_template
+
+    @property
+    def ks_name(self) -> str:
+        return self.definition.ks_name
+
+    @property
+    def http_path(self) -> str:
+        return self.os_id
+
+    @property
+    def uefi(self) -> bool:
+        return self.definition.uefi
+
+    @property
+    def bios(self) -> bool:
+        return self.definition.bios
+
+    @property
+    def uefi_target(self) -> str:
+        return self.definition.uefi_target
+
+    @property
+    def bios_target(self) -> str:
+        return self.definition.bios_target
+
+
+OS_DEFINITIONS: List[OSDefinition] = [
+    OSDefinition(
+        os_id="rhel10",
+        major=10,
+        title="RHEL 10",
+        iso_dir="rhel10iso",
+        ks_template="rhel10-minimal.ks.tmpl",
+        uefi=True,
+        bios=False,
+    ),
+    OSDefinition(
+        os_id="rhel9",
+        major=9,
+        title="RHEL 9",
+        iso_dir="rhel9iso",
+        ks_template="rhel9-minimal.ks.tmpl",
+        uefi=True,
+        bios=False,
+    ),
+    OSDefinition(
+        os_id="rhel8",
+        major=8,
+        title="RHEL 8",
+        iso_dir="rhel8iso",
+        ks_template="rhel8-minimal.ks.tmpl",
+        uefi=True,
+        bios=True,
+    ),
+    OSDefinition(
+        os_id="rhel7",
+        major=7,
+        title="RHEL 7",
+        iso_dir="rhel7iso",
+        ks_template="rhel7-minimal.ks.tmpl",
+        uefi=False,
+        bios=True,
+    ),
+]
+
+
+# =============================================================================
+# Profile definitions
+# =============================================================================
+
+
+SAFE_PROFILE_IDENTIFIER_RE = re.compile(r"^[a-z0-9][a-z0-9_]*$")
+YAML_BOOL_FIELD_RE = re.compile(
+    r"^\s*(implemented|show_in_main_menu|uefi|bios)\s*:\s*([^#\n]*?)(?:\s+#.*)?$"
+)
+RESERVED_MENU_TARGETS = {
+    "main",
+    "rescue",
+    "shell",
+}
+
+
+def validate_safe_identifier(value: str, field: str, source: str) -> None:
+    if not SAFE_PROFILE_IDENTIFIER_RE.match(value):
+        fail(
+            f"Profile file {source} field {field} has invalid value: {value!r}. "
+            "Use lowercase letters, numbers, and underscores only. "
+            "It must start with a lowercase letter or number."
+        )
+
+
+def require_string_field(data: Dict[str, Any], field: str, source: str) -> str:
+    if field not in data:
+        fail(f"Profile file {source} is missing required field: {field}")
+
+    value = data[field]
+
+    if not isinstance(value, str):
+        fail(
+            f"Profile file {source} field {field} must be a string. "
+            f"Got: {type(value).__name__}"
+        )
+
+    value = value.strip()
+
+    if not value:
+        fail(f"Profile file {source} field {field} cannot be empty.")
+
+    if "\n" in value or "\r" in value:
+        fail(f"Profile file {source} field {field} must be a single-line string.")
+
+    return value
+
+
+def optional_string_field(
+    data: Dict[str, Any],
+    field: str,
+    source: str,
+    default: str = "",
+) -> str:
+    if field not in data or data[field] is None:
+        return default
+
+    value = data[field]
+
+    if not isinstance(value, str):
+        fail(
+            f"Profile file {source} field {field} must be a string. "
+            f"Got: {type(value).__name__}"
+        )
+
+    value = value.strip()
+
+    if "\n" in value or "\r" in value:
+        fail(f"Profile file {source} field {field} must be a single-line string.")
+
+    return value
+
+
+def require_bool_field(data: Dict[str, Any], field: str, source: str) -> bool:
+    if field not in data:
+        fail(f"Profile file {source} is missing required field: {field}")
+
+    value = data[field]
+
+    if not isinstance(value, bool):
+        fail(
+            f"Profile file {source} field {field} must be a YAML boolean true/false. "
+            f"Do not quote booleans. Got: {value!r}"
+        )
+
+    return value
+
+
+def optional_bool_field(
+    data: Dict[str, Any],
+    field: str,
+    source: str,
+    default: bool,
+) -> bool:
+    if field not in data:
+        return default
+
+    value = data[field]
+
+    if not isinstance(value, bool):
+        fail(
+            f"Profile file {source} field {field} must be a YAML boolean true/false. "
+            f"Do not quote booleans. Got: {value!r}"
+        )
+
+    return value
+
+
+def optional_string_list_field(
+    data: Dict[str, Any],
+    field: str,
+    source: str,
+) -> Tuple[str, ...]:
+    if field not in data or data[field] is None:
+        return ()
+
+    value = data[field]
+
+    if not isinstance(value, list):
+        fail(f"Profile file {source} field {field} must be a YAML list.")
+
+    parsed: List[str] = []
+
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            fail(
+                f"Profile file {source} field {field}[{index}] must be a string. "
+                f"Got: {type(item).__name__}"
+            )
+
+        item = item.strip()
+
+        if not item:
+            fail(f"Profile file {source} field {field}[{index}] cannot be empty.")
+
+        parsed.append(item)
+
+    return tuple(parsed)
+
+
+def validate_yaml_boolean_literals(raw: str, source: str) -> None:
+    for line_number, line in enumerate(raw.splitlines(), start=1):
+        match = YAML_BOOL_FIELD_RE.match(line)
+
+        if not match:
+            continue
+
+        field = match.group(1)
+        value = match.group(2).strip()
+
+        if not value:
+            fail(
+                f"Profile file {source} field {field} on line {line_number} "
+                "must be literal true or false."
+            )
+
+        if value not in ("true", "false"):
+            fail(
+                f"Profile file {source} field {field} on line {line_number} "
+                f"must be literal true or false. Got: {value!r}. "
+                "Do not quote booleans and do not use yes/no/on/off."
+            )
+
+
+def load_yaml_mapping(raw: str, source: str) -> Dict[str, Any]:
+    if yaml is None:
+        fail(
+            "PyYAML is required when profile YAML files are present. "
+            "Install py3-yaml on Alpine or python3-pyyaml on RHEL."
+        )
+
+    class UniqueKeySafeLoader(yaml.SafeLoader):
+        pass
+
+    def construct_mapping(loader: Any, node: Any, deep: bool = False) -> Dict[Any, Any]:
+        mapping: Dict[Any, Any] = {}
+
+        for key_node, value_node in node.value:
+            key = loader.construct_object(key_node, deep=deep)
+
+            if key in mapping:
+                line_number = key_node.start_mark.line + 1
+                fail(
+                    f"Profile file {source} contains duplicate YAML key {key!r} "
+                    f"on line {line_number}."
+                )
+
+            mapping[key] = loader.construct_object(value_node, deep=deep)
+
+        return mapping
+
+    UniqueKeySafeLoader.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+        construct_mapping,
+    )
+
+    data = yaml.load(raw, Loader=UniqueKeySafeLoader)
+
+    if data is None:
+        fail(f"Profile file {source} is empty.")
+
+    if not isinstance(data, dict):
+        fail(f"Profile file {source} must contain a YAML mapping/object.")
+
+    for key in data:
+        if not isinstance(key, str):
+            fail(
+                f"Profile file {source} contains a non-string YAML key: {key!r}. "
+                "All profile fields must use string keys."
+            )
+
+    return data
+
+
+@dataclass(frozen=True)
+class ProfileDefinition:
+    profile_id: str
+    title: str
+    install_label: str
+    menu_target: str
+    implemented: bool
+    show_in_main_menu: bool = True
+    uefi: bool = True
+    bios: bool = True
+    supported_os: Tuple[str, ...] = ()
+    kickstart_template: str = ""
+    kernel_args: Tuple[str, ...] = ()
+    source: str = "built-in"
+
+    @property
+    def legacy_target(self) -> str:
+        return f"{self.menu_target}_legacy"
+
+    @property
+    def profile_slug(self) -> str:
+        return self.profile_id.replace("_", "-")
+
+    def supports_os(self, item: DetectedISO) -> bool:
+        return not self.supported_os or item.os_id in self.supported_os
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], source: str) -> "ProfileDefinition":
+        profile_id = require_string_field(data, "profile_id", source)
+        title = require_string_field(data, "title", source)
+        install_label = require_string_field(data, "install_label", source)
+        menu_target = require_string_field(data, "menu_target", source)
+
+        validate_safe_identifier(profile_id, "profile_id", source)
+        validate_safe_identifier(menu_target, "menu_target", source)
+
+        implemented = require_bool_field(data, "implemented", source)
+        show_in_main_menu = optional_bool_field(data, "show_in_main_menu", source, True)
+        uefi = optional_bool_field(data, "uefi", source, True)
+        bios = optional_bool_field(data, "bios", source, True)
+
+        supported_os = optional_string_list_field(data, "supported_os", source)
+        kickstart_template = optional_string_field(data, "kickstart_template", source)
+        kernel_args = optional_string_list_field(data, "kernel_args", source)
+
+        return cls(
+            profile_id=profile_id,
+            title=title,
+            install_label=install_label,
+            menu_target=menu_target,
+            implemented=implemented,
+            show_in_main_menu=show_in_main_menu,
+            uefi=uefi,
+            bios=bios,
+            supported_os=supported_os,
+            kickstart_template=kickstart_template,
+            kernel_args=kernel_args,
+            source=source,
+        )
+
+
+BUILTIN_PROFILE_DEFINITIONS: List[ProfileDefinition] = [
+    ProfileDefinition(
+        profile_id="minimal",
+        title="Minimal Installs",
+        install_label="Minimal",
+        menu_target="minimal",
+        implemented=True,
+        supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
+        kickstart_template="{{ os_id }}-minimal.ks.tmpl",
+        kernel_args=("inst.text", "nomodeset"),
+    ),
+
+    # Future profile sets.
+    # These are visible as safe placeholders.
+    # implemented=False prevents real boot targets and kickstarts from being generated.
+    ProfileDefinition(
+        profile_id="security_baseline",
+        title="Security Baseline Installs",
+        install_label="Security Baseline",
+        menu_target="security_baseline",
+        implemented=False,
+        show_in_main_menu=True,
+        supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
+        kickstart_template="{{ os_id }}-security-baseline.ks.j2",
+        kernel_args=("inst.text", "nomodeset"),
+    ),
+    ProfileDefinition(
+        profile_id="security_luks",
+        title="Security + LUKS Installs",
+        install_label="Security + LUKS",
+        menu_target="security_luks",
+        implemented=False,
+        show_in_main_menu=True,
+        supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
+        kickstart_template="{{ os_id }}-security-luks.ks.j2",
+        kernel_args=("inst.text", "nomodeset"),
+    ),
+    ProfileDefinition(
+        profile_id="small_disk",
+        title="Small Disk Installs",
+        install_label="Small Disk",
+        menu_target="small_disk",
+        implemented=False,
+        show_in_main_menu=True,
+        supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
+        kickstart_template="{{ os_id }}-small-disk.ks.j2",
+        kernel_args=("inst.text", "nomodeset"),
+    ),
+    ProfileDefinition(
+        profile_id="developer_workstation",
+        title="Developer Workstation Installs",
+        install_label="Developer Workstation",
+        menu_target="developer_workstation",
+        implemented=False,
+        show_in_main_menu=True,
+        supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
+        kickstart_template="{{ os_id }}-developer-workstation.ks.j2",
+        kernel_args=("inst.text", "nomodeset"),
+    ),
+    ProfileDefinition(
+        profile_id="embedded_edge",
+        title="Embedded / Edge Hardware Installs",
+        install_label="Embedded / Edge",
+        menu_target="embedded_edge",
+        implemented=False,
+        show_in_main_menu=True,
+        supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
+        kickstart_template="{{ os_id }}-embedded-edge.ks.j2",
+        kernel_args=("inst.text", "nomodeset"),
+    ),
+]
+
+
+def profile_definition_files(profile_root: Path) -> List[Path]:
+    if not profile_root.is_dir():
+        return []
+
+    files: List[Path] = []
+    files.extend(sorted(profile_root.glob("*.yml")))
+    files.extend(sorted(profile_root.glob("*.yaml")))
+
+    return files
+
+
+def load_profile_file(path: Path) -> ProfileDefinition:
+    source = str(path)
+    raw = path.read_text(encoding="utf-8")
+
+    validate_yaml_boolean_literals(raw, source)
+    data = load_yaml_mapping(raw, source)
+
+    return ProfileDefinition.from_dict(data, source=source)
+
+
+def validate_profile_definitions(profiles: List[ProfileDefinition]) -> None:
+    if not profiles:
+        fail("At least one PXE profile must be defined.")
+
+    profile_ids = set()
+    known_os_ids = {definition.os_id for definition in OS_DEFINITIONS}
+    visible_profile_count = 0
+
+    target_sources: Dict[str, str] = {
+        target: "reserved iPXE menu target"
+        for target in RESERVED_MENU_TARGETS
+    }
+
+    for profile in profiles:
+        source = profile.source
+
+        if not profile.profile_id:
+            fail(f"Profile from {source} has an empty profile_id.")
+
+        if not profile.title:
+            fail(f"Profile {profile.profile_id} has an empty title.")
+
+        if not profile.install_label:
+            fail(f"Profile {profile.profile_id} has an empty install_label.")
+
+        if not profile.menu_target:
+            fail(f"Profile {profile.profile_id} has an empty menu_target.")
+
+        validate_safe_identifier(profile.profile_id, "profile_id", source)
+        validate_safe_identifier(profile.menu_target, "menu_target", source)
+
+        if not isinstance(profile.implemented, bool):
+            fail(f"Profile {profile.profile_id} field implemented must be a boolean.")
+
+        if not isinstance(profile.show_in_main_menu, bool):
+            fail(f"Profile {profile.profile_id} field show_in_main_menu must be a boolean.")
+
+        if not isinstance(profile.uefi, bool):
+            fail(f"Profile {profile.profile_id} field uefi must be a boolean.")
+
+        if not isinstance(profile.bios, bool):
+            fail(f"Profile {profile.profile_id} field bios must be a boolean.")
+
+        if not profile.uefi and not profile.bios:
+            fail(
+                f"Profile {profile.profile_id} must enable at least one firmware type: "
+                "uefi=true and/or bios=true."
+            )
+
+        if profile.show_in_main_menu:
+            visible_profile_count += 1
+
+        if profile.profile_id in profile_ids:
+            fail(f"Duplicate profile_id found: {profile.profile_id}")
+
+        profile_ids.add(profile.profile_id)
+
+        profile_targets = {
+            "menu_target": profile.menu_target,
+            "legacy_target": profile.legacy_target,
+        }
+
+        for field, target in profile_targets.items():
+            if target in target_sources:
+                fail(
+                    f"Profile {profile.profile_id} {field} value {target!r} conflicts with "
+                    f"{target_sources[target]}."
+                )
+
+            target_sources[target] = f"profile {profile.profile_id} {field}"
+
+        if not isinstance(profile.supported_os, tuple):
+            fail(f"Profile {profile.profile_id} field supported_os must be stored as a tuple.")
+
+        seen_supported_os = set()
+
+        for os_id in profile.supported_os:
+            if not isinstance(os_id, str):
+                fail(f"Profile {profile.profile_id} has a non-string supported_os value.")
+
+            if os_id in seen_supported_os:
+                fail(
+                    f"Profile {profile.profile_id} has duplicate supported_os value: {os_id}"
+                )
+
+            seen_supported_os.add(os_id)
+
+            if os_id not in known_os_ids:
+                fail(
+                    f"Profile {profile.profile_id} references unknown supported_os value: {os_id}"
+                )
+
+        if profile.kickstart_template:
+            template_path = Path(profile.kickstart_template)
+
+            if template_path.is_absolute():
+                fail(
+                    f"Profile {profile.profile_id} kickstart_template must be relative. "
+                    f"Got: {profile.kickstart_template}"
+                )
+
+            if ".." in template_path.parts:
+                fail(
+                    f"Profile {profile.profile_id} kickstart_template must not contain '..'. "
+                    f"Got: {profile.kickstart_template}"
+                )
+
+            if "\n" in profile.kickstart_template or "\r" in profile.kickstart_template:
+                fail(
+                    f"Profile {profile.profile_id} kickstart_template must not contain newlines."
+                )
+
+        if not isinstance(profile.kernel_args, tuple):
+            fail(f"Profile {profile.profile_id} field kernel_args must be stored as a tuple.")
+
+        for index, arg in enumerate(profile.kernel_args):
+            if not isinstance(arg, str):
+                fail(
+                    f"Profile {profile.profile_id} kernel_args[{index}] must be a string."
+                )
+
+            if not arg.strip():
+                fail(
+                    f"Profile {profile.profile_id} kernel_args[{index}] cannot be empty."
+                )
+
+            if "\n" in arg or "\r" in arg:
+                fail(
+                    f"Profile {profile.profile_id} kernel_args[{index}] must not contain newlines."
+                )
+
+    if visible_profile_count == 0:
+        fail("At least one PXE profile must have show_in_main_menu=true.")
+
+    if "minimal" not in profile_ids:
+        fail("The minimal profile must be defined.")
+
+
+def load_profile_definitions(config: GeneratorConfig) -> List[ProfileDefinition]:
+    files = profile_definition_files(config.profile_root)
+
+    if not files:
+        profiles = list(BUILTIN_PROFILE_DEFINITIONS)
+        validate_profile_definitions(profiles)
+        return profiles
+
+    profiles = [load_profile_file(path) for path in files]
+    validate_profile_definitions(profiles)
+
+    return profiles
+
+
+# =============================================================================
+# Common file helpers
+# =============================================================================
+
+
+def atomic_write(path: Path, content: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.chmod(mode)
+    tmp_path.replace(path)
+
+
+def ensure_output_directories(config: GeneratorConfig) -> None:
+    config.html_root.mkdir(parents=True, exist_ok=True)
+    (config.html_root / "ks").mkdir(parents=True, exist_ok=True)
+    (config.html_root / "generated").mkdir(parents=True, exist_ok=True)
+
+
+# =============================================================================
+# ISO discovery
+# =============================================================================
+
+
+def pxeboot_dir(iso_path: Path) -> Path:
+    return iso_path / "images" / "pxeboot"
+
+
+def is_bootable_iso_tree(iso_path: Path) -> bool:
+    boot_dir = pxeboot_dir(iso_path)
+
+    return (
+        iso_path.is_dir()
+        and (boot_dir / "vmlinuz").is_file()
+        and (boot_dir / "initrd.img").is_file()
+    )
+
+
+def discover_isos(config: GeneratorConfig) -> List[DetectedISO]:
+    detected: List[DetectedISO] = []
+
+    for definition in OS_DEFINITIONS:
+        iso_path = config.iso_root / definition.iso_dir
+
+        if is_bootable_iso_tree(iso_path):
+            detected.append(DetectedISO(definition=definition, iso_path=iso_path))
+
+    return detected
+
+
+# =============================================================================
+# Kickstart rendering
+# =============================================================================
+
+
+class KickstartRenderer:
+    def __init__(self, config: GeneratorConfig, rootpw_hash: str) -> None:
+        self.config = config
+        self.rootpw_hash = rootpw_hash
+
+    def find_template(self, template_name: str) -> Optional[Path]:
+        candidates = [
+            self.config.template_root / "ks" / template_name,
+            self.config.template_root / template_name,
+        ]
+
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+
+        return None
+
+    def render_all(self, detected: Iterable[DetectedISO]) -> None:
+        for item in detected:
+            self.render_one(item)
+
+    def render_one(self, item: DetectedISO) -> None:
+        destination = self.config.html_root / "ks" / item.ks_name
+        template_path = self.find_template(item.ks_template)
+
+        if template_path:
+            rendered = self.render_template(template_path)
+        else:
+            rendered = self.default_kickstart(item)
+
+        atomic_write(destination, rendered)
+
+    def render_template(self, template_path: Path) -> str:
+        values = {
+            "PXE_SERVER": self.config.pxe_server,
+            "PXE_PORT": self.config.pxe_port,
+            "ROOTPW_HASH": self.rootpw_hash,
+        }
+
+        raw = template_path.read_text(encoding="utf-8")
+        return Template(raw).safe_substitute(values)
+
+    def default_kickstart(self, item: DetectedISO) -> str:
+        return f"""#version=RHEL{item.major}
+text
+reboot
+
+lang en_US.UTF-8
+keyboard us
+timezone America/Chicago --utc
+
+network --bootproto=dhcp --device=link --activate
+
+rootpw --iscrypted {self.rootpw_hash}
+firstboot --disable
+selinux --enforcing
+firewall --enabled --service=ssh
+services --enabled=sshd
+
+url --url="http://{self.config.pxe_server}:{self.config.pxe_port}/{item.os_id}"
+
+zerombr
+clearpart --all --initlabel
+autopart --type=lvm
+
+%packages
+@^minimal-environment
+%end
+
+%addon com_redhat_kdump --enable
+%end
+"""
+
+
+# =============================================================================
+# boot.ipxe rendering
+# =============================================================================
+
+
+def menu_item(label: str, target: str) -> str:
+    return f"item {target:<28} {label}"
+
+
+class BootMenuRenderer:
+    def __init__(self, config: GeneratorConfig, profiles: List[ProfileDefinition]) -> None:
+        self.config = config
+        self.profiles = profiles
+
+    def visible_profiles(self) -> List[ProfileDefinition]:
+        return [
+            profile
+            for profile in self.profiles
+            if profile.show_in_main_menu
+        ]
+
+    def enabled_profiles(self) -> List[ProfileDefinition]:
+        return [
+            profile
+            for profile in self.profiles
+            if profile.show_in_main_menu and profile.implemented
+        ]
+
+    def render(self, detected: List[DetectedISO]) -> str:
+        lines: List[str] = []
+
+        lines.extend(
+            [
+                "#!ipxe",
+                "",
+                f"set server {self.config.pxe_server}",
+                f"set port {self.config.pxe_port}",
+                "set base http://${server}:${port}",
+                "",
+                f"console --picture ${{base}}{self.config.background_path} --left 360 --right 360 --top 140 --bottom 140 || goto main",
+                "",
+                ":main",
+                "menu AeroLIT PXE Menu",
+            ]
+        )
+
+        for profile in self.visible_profiles():
+            lines.append(menu_item(profile.title, profile.menu_target))
+
+        lines.extend(
+            [
+                menu_item("Utilities / Rescue", "rescue"),
+                menu_item("Drop to iPXE shell", "shell"),
+                "choose target || goto shell",
+                "goto ${target}",
+                "",
+            ]
+        )
+
+        for profile in self.visible_profiles():
+            if profile.implemented:
+                lines.extend(self.render_implemented_profile_menu(profile, detected))
+            else:
+                lines.extend(self.render_unimplemented_profile_menu(profile, detected))
+
+        lines.extend(self.render_boot_targets(detected))
+        lines.extend(self.render_rescue_menu())
+        lines.extend([":shell", "shell", ""])
+
+        return "\n".join(lines)
+
+    def render_implemented_profile_menu(
+        self,
+        profile: ProfileDefinition,
+        detected: List[DetectedISO],
+    ) -> List[str]:
+        lines: List[str] = [
+            f":{profile.menu_target}",
+            f"menu {profile.title}",
+        ]
+
+        if not detected:
+            lines.append(menu_item("No supported RHEL ISO trees detected", "main"))
+        else:
+            for item in detected:
+                if profile.supports_os(item) and item.uefi and profile.uefi:
+                    lines.append(
+                        menu_item(
+                            f"Install {item.title} {profile.install_label} (UEFI)",
+                            self.profile_target(item, profile, "uefi"),
+                        )
+                    )
+
+            if any(
+                profile.supports_os(item) and item.bios and profile.bios
+                for item in detected
+            ):
+                lines.append(menu_item("Legacy / BIOS Options", profile.legacy_target))
+
+        lines.extend(
+            [
+                menu_item("Back to Main Menu", "main"),
+                menu_item("Drop to iPXE shell", "shell"),
+                "choose target || goto main",
+                "goto ${target}",
+                "",
+            ]
+        )
+
+        if any(
+            profile.supports_os(item) and item.bios and profile.bios
+            for item in detected
+        ):
+            lines.extend(self.render_implemented_legacy_menu(profile, detected))
+
+        return lines
+
+    def render_implemented_legacy_menu(
+        self,
+        profile: ProfileDefinition,
+        detected: List[DetectedISO],
+    ) -> List[str]:
+        lines: List[str] = [
+            f":{profile.legacy_target}",
+            f"menu {profile.title} - Legacy / BIOS",
+        ]
+
+        for item in detected:
+            if profile.supports_os(item) and item.bios and profile.bios:
+                lines.append(
+                    menu_item(
+                        f"Install {item.title} {profile.install_label} (BIOS / Legacy)",
+                        self.profile_target(item, profile, "bios"),
+                    )
+                )
+
+        lines.extend(
+            [
+                menu_item(f"Back to {profile.title}", profile.menu_target),
+                menu_item("Back to Main Menu", "main"),
+                menu_item("Drop to iPXE shell", "shell"),
+                f"choose target || goto {profile.menu_target}",
+                "goto ${target}",
+                "",
+            ]
+        )
+
+        return lines
+
+    def render_unimplemented_profile_menu(
+        self,
+        profile: ProfileDefinition,
+        detected: List[DetectedISO],
+    ) -> List[str]:
+        lines: List[str] = [
+            f":{profile.menu_target}",
+            f"menu {profile.title}",
+            menu_item("Profile not implemented yet", "main"),
+        ]
+
+        if not detected:
+            lines.append(menu_item("No supported RHEL ISO trees detected", "main"))
+        else:
+            for item in detected:
+                if profile.supports_os(item) and item.uefi and profile.uefi:
+                    lines.append(
+                        menu_item(
+                            f"{item.title} {profile.install_label} (UEFI) - not implemented",
+                            self.not_implemented_target(item, profile, "uefi"),
+                        )
+                    )
+
+            if any(
+                profile.supports_os(item) and item.bios and profile.bios
+                for item in detected
+            ):
+                lines.append(menu_item("Legacy / BIOS Options", profile.legacy_target))
+
+        lines.extend(
+            [
+                menu_item("Back to Main Menu", "main"),
+                menu_item("Drop to iPXE shell", "shell"),
+                "choose target || goto main",
+                "goto ${target}",
+                "",
+            ]
+        )
+
+        if any(
+            profile.supports_os(item) and item.bios and profile.bios
+            for item in detected
+        ):
+            lines.extend(self.render_unimplemented_legacy_menu(profile, detected))
+
+        for item in detected:
+            if profile.supports_os(item) and item.uefi and profile.uefi:
+                lines.extend(self.render_not_implemented_target_menu(item, profile, "uefi"))
+
+            if profile.supports_os(item) and item.bios and profile.bios:
+                lines.extend(self.render_not_implemented_target_menu(item, profile, "bios"))
+
+        return lines
+
+    def render_unimplemented_legacy_menu(
+        self,
+        profile: ProfileDefinition,
+        detected: List[DetectedISO],
+    ) -> List[str]:
+        lines: List[str] = [
+            f":{profile.legacy_target}",
+            f"menu {profile.title} - Legacy / BIOS",
+        ]
+
+        for item in detected:
+            if profile.supports_os(item) and item.bios and profile.bios:
+                lines.append(
+                    menu_item(
+                        f"{item.title} {profile.install_label} (BIOS / Legacy) - not implemented",
+                        self.not_implemented_target(item, profile, "bios"),
+                    )
+                )
+
+        lines.extend(
+            [
+                menu_item(f"Back to {profile.title}", profile.menu_target),
+                menu_item("Back to Main Menu", "main"),
+                menu_item("Drop to iPXE shell", "shell"),
+                f"choose target || goto {profile.menu_target}",
+                "goto ${target}",
+                "",
+            ]
+        )
+
+        return lines
+
+    def render_not_implemented_target_menu(
+        self,
+        item: DetectedISO,
+        profile: ProfileDefinition,
+        firmware: str,
+    ) -> List[str]:
+        firmware_label = "UEFI" if firmware == "uefi" else "BIOS"
+        back_target = profile.legacy_target if firmware == "bios" else profile.menu_target
+        back_label = (
+            f"Back to {profile.title} Legacy / BIOS"
+            if firmware == "bios"
+            else f"Back to {profile.title}"
+        )
+
+        return [
+            f":{self.not_implemented_target(item, profile, firmware)}",
+            f"menu {profile.title}",
+            menu_item(
+                f"{item.title} {profile.install_label} {firmware_label} is not implemented yet",
+                back_target,
+            ),
+            menu_item(back_label, back_target),
+            menu_item("Back to Main Menu", "main"),
+            menu_item("Drop to iPXE shell", "shell"),
+            f"choose target || goto {back_target}",
+            "goto ${target}",
+            "",
+        ]
+
+    def render_boot_targets(self, detected: List[DetectedISO]) -> List[str]:
+        lines: List[str] = []
+
+        for profile in self.enabled_profiles():
+            for item in detected:
+                if profile.supports_os(item) and item.uefi and profile.uefi:
+                    lines.append(
+                        self.kernel_block(
+                            item,
+                            profile,
+                            self.profile_target(item, profile, "uefi"),
+                        )
+                    )
+
+                if profile.supports_os(item) and item.bios and profile.bios:
+                    lines.append(
+                        self.kernel_block(
+                            item,
+                            profile,
+                            self.profile_target(item, profile, "bios"),
+                        )
+                    )
+
+        return lines
+
+    def render_rescue_menu(self) -> List[str]:
+        return [
+            ":rescue",
+            "menu Utilities / Rescue",
+            menu_item("Back to Main Menu", "main"),
+            menu_item("Drop to iPXE shell", "shell"),
+            "choose target || goto main",
+            "goto ${target}",
+            "",
+        ]
+
+    def profile_target(
+        self,
+        item: DetectedISO,
+        profile: ProfileDefinition,
+        firmware: str,
+    ) -> str:
+        return f"{item.os_id}_{profile.profile_id}_{firmware}"
+
+    def not_implemented_target(
+        self,
+        item: DetectedISO,
+        profile: ProfileDefinition,
+        firmware: str,
+    ) -> str:
+        return f"{self.profile_target(item, profile, firmware)}_not_implemented"
+
+    def profile_kickstart_name(
+        self,
+        item: DetectedISO,
+        profile: ProfileDefinition,
+    ) -> str:
+        if profile.profile_id == "minimal":
+            return item.ks_name
+
+        return f"{item.os_id}-{profile.profile_slug}.ks"
+
+    def kernel_block(
+        self,
+        item: DetectedISO,
+        profile: ProfileDefinition,
+        target: str,
+    ) -> str:
+        kickstart_name = self.profile_kickstart_name(item, profile)
+
+        return f""":{target}
+kernel ${{base}}/{item.http_path}/images/pxeboot/vmlinuz initrd=initrd.img ip=dhcp inst.repo=${{base}}/{item.http_path} inst.stage2=${{base}}/{item.http_path} inst.ks=${{base}}/ks/{kickstart_name} inst.text nomodeset
+initrd --name initrd.img ${{base}}/{item.http_path}/images/pxeboot/initrd.img
+boot
+"""
+
+
+def write_boot_ipxe(
+    config: GeneratorConfig,
+    detected: List[DetectedISO],
+    profiles: List[ProfileDefinition],
+) -> None:
+    renderer = BootMenuRenderer(config, profiles)
+    atomic_write(config.html_root / "boot.ipxe", renderer.render(detected))
+
+
+# =============================================================================
+# Status and index rendering
+# =============================================================================
+
+
+def detected_iso_status(item: DetectedISO) -> Dict[str, object]:
+    return {
+        "os_id": item.os_id,
+        "title": item.title,
+        "iso_dir": item.iso_dir,
+        "iso_path": str(item.iso_path),
+        "http_path": f"/{item.http_path}",
+        "kickstart": f"/ks/{item.ks_name}",
+        "uefi_enabled": item.uefi,
+        "bios_enabled": item.bios,
+    }
+
+
+def profile_status(profile: ProfileDefinition) -> Dict[str, object]:
+    return {
+        "profile_id": profile.profile_id,
+        "profile_slug": profile.profile_slug,
+        "title": profile.title,
+        "install_label": profile.install_label,
+        "menu_target": profile.menu_target,
+        "implemented": profile.implemented,
+        "show_in_main_menu": profile.show_in_main_menu,
+        "uefi_enabled": profile.uefi,
+        "bios_enabled": profile.bios,
+        "supported_os": list(profile.supported_os),
+        "kickstart_template": profile.kickstart_template,
+        "kernel_args": list(profile.kernel_args),
+        "source": profile.source,
+    }
+
+
+def render_status(
+    config: GeneratorConfig,
+    detected: List[DetectedISO],
+    profiles: List[ProfileDefinition],
+) -> None:
+    generated_dir = config.html_root / "generated"
+    generated_dir.mkdir(parents=True, exist_ok=True)
+
+    detected_list = [detected_iso_status(item) for item in detected]
+
+    visible_profiles = [
+        profile.profile_id
+        for profile in profiles
+        if profile.show_in_main_menu
+    ]
+
+    enabled_profiles = [
+        profile.profile_id
+        for profile in profiles
+        if profile.show_in_main_menu and profile.implemented
+    ]
+
+    unimplemented_profiles = [
+        profile.profile_id
+        for profile in profiles
+        if profile.show_in_main_menu and not profile.implemented
+    ]
+
+    status = {
+        "pxe_server": config.pxe_server,
+        "pxe_port": config.pxe_port,
+        "container_iso_root": str(config.iso_root),
+        "html_root": str(config.html_root),
+        "detected_isos": detected_list,
+        "profiles": [
+            profile_status(profile)
+            for profile in profiles
+            if profile.show_in_main_menu
+        ],
+        "visible_profiles": visible_profiles,
+        "enabled_profiles": enabled_profiles,
+        "unimplemented_profiles": unimplemented_profiles,
+        "boot_menu": "/boot.ipxe",
+    }
+
+    atomic_write(
+        generated_dir / "status.json",
+        json.dumps(status, indent=2, sort_keys=True) + "\n",
+    )
+
+    inventory_lines = [
+        f"{item.os_id} {item.iso_dir} {item.iso_path}" for item in detected
+    ]
+
+    if not inventory_lines:
+        inventory_lines.append("No supported RHEL ISO trees detected.")
+
+    atomic_write(generated_dir / "isos.txt", "\n".join(inventory_lines) + "\n")
+
+
+def render_index(
+    config: GeneratorConfig,
+    detected: List[DetectedISO],
+    profiles: List[ProfileDefinition],
+) -> None:
+    lines = [
+        "<html>",
+        "<head><title>AeroLIT PXE Content</title></head>",
+        "<body>",
+        "<h1>AeroLIT PXE Content</h1>",
+        "<h2>Detected ISO Trees</h2>",
+        "<ul>",
+    ]
+
+    if detected:
+        for item in detected:
+            lines.append(f"<li>{item.title}: /{item.http_path}/ from {item.iso_path}</li>")
+    else:
+        lines.append("<li>No supported RHEL ISO trees detected.</li>")
+
+    lines.extend(
+        [
+            "</ul>",
+            "<h2>Profile Sets</h2>",
+            "<ul>",
+        ]
+    )
+
+    for profile in profiles:
+        if not profile.show_in_main_menu:
+            continue
+
+        state = "implemented" if profile.implemented else "placeholder / not implemented"
+        lines.append(f"<li>{profile.title}: {state}</li>")
+
+    lines.extend(
+        [
+            "</ul>",
+            "<h2>Generated Files</h2>",
+            "<ul>",
+            '<li><a href="/boot.ipxe">boot.ipxe</a></li>',
+            '<li><a href="/generated/status.json">generated/status.json</a></li>',
+            '<li><a href="/generated/isos.txt">generated/isos.txt</a></li>',
+            "</ul>",
+            "</body>",
+            "</html>",
+            "",
+        ]
+    )
+
+    atomic_write(config.html_root / "index.html", "\n".join(lines))
+
+
+# =============================================================================
+# Watch-state hashing
+# =============================================================================
+
+
+def watched_paths(config: GeneratorConfig) -> List[Path]:
+    paths: List[Path] = []
+
+    for definition in OS_DEFINITIONS:
+        iso_path = config.iso_root / definition.iso_dir
+        paths.extend(
+            [
+                iso_path,
+                iso_path / "images" / "pxeboot" / "vmlinuz",
+                iso_path / "images" / "pxeboot" / "initrd.img",
+                config.template_root / "ks" / definition.ks_template,
+                config.template_root / definition.ks_template,
+            ]
+        )
+
+    paths.append(config.profile_root)
+
+    for path in profile_definition_files(config.profile_root):
+        paths.append(path)
+
+    paths.append(config.html_root / config.background_path.lstrip("/"))
+
+    return paths
+
+
+def watched_env_values(config: GeneratorConfig) -> List[str]:
+    return [
+        config.pxe_server,
+        config.pxe_port,
+        str(config.iso_root),
+        str(config.html_root),
+        str(config.template_root),
+        str(config.profile_root),
+        config.background_path,
+        config.rootpw_hash,
+        str(config.allow_default_rootpw),
+    ]
+
+
+def watched_state_hash(config: GeneratorConfig) -> str:
+    digest = hashlib.sha256()
+
+    for value in watched_env_values(config):
+        digest.update(value.encode("utf-8"))
+
+    for path in watched_paths(config):
+        digest.update(str(path).encode("utf-8"))
+
+        if path.exists():
+            stat = path.stat()
+            digest.update(str(stat.st_mtime_ns).encode("utf-8"))
+            digest.update(str(stat.st_size).encode("utf-8"))
+            digest.update(b"exists")
+        else:
+            digest.update(b"missing")
+
+    return digest.hexdigest()
+
+
+# =============================================================================
+# Generation workflows
+# =============================================================================
+
+
+def generate_once(config: GeneratorConfig) -> None:
+    config.validate()
+    rootpw_hash = config.resolved_rootpw_hash()
+    profiles = load_profile_definitions(config)
+    detected = discover_isos(config)
+
+    ensure_output_directories(config)
+
+    KickstartRenderer(config, rootpw_hash).render_all(detected)
+    write_boot_ipxe(config, detected, profiles)
+    render_status(config, detected, profiles)
+    render_index(config, detected, profiles)
+
+    detected_names = ", ".join(item.os_id for item in detected) if detected else "none"
+    profile_names = ", ".join(profile.profile_id for profile in profiles)
+
+    print(
+        f"Generated PXE content. Detected ISOs: {detected_names}. Profiles: {profile_names}",
+        flush=True,
+    )
+
+
+def watch_loop(config: GeneratorConfig) -> None:
+    last_hash = ""
+
+    while True:
+        current_hash = watched_state_hash(config)
+
+        if current_hash != last_hash:
+            generate_once(config)
+            last_hash = current_hash
+
+        time.sleep(config.watch_interval)
+
+
+# =============================================================================
+# CLI entrypoint
+# =============================================================================
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate dynamic AeroLIT PXE content.")
+    parser.add_argument("--once", action="store_true", help="Generate once and exit.")
+    parser.add_argument("--watch", action="store_true", help="Watch for changes and regenerate.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    config = GeneratorConfig.from_env()
+
+    if args.once:
+        generate_once(config)
+        return
+
+    # Default to watch mode so older entrypoints that run this script with no args still work.
+    watch_loop(config)
+
+
+if __name__ == "__main__":
+    main()
