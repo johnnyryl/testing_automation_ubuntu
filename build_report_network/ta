@@ -1,0 +1,315 @@
+Yes — Phase 5A should be metadata-only. It should teach the profile loader about Kickstart template settings, but not actually use those settings yet. That keeps this MR safe.
+
+For 5A, expected output:
+
+boot.ipxe            should stay the same
+isos.txt             should stay the same
+rhel8-minimal.ks     should stay the same
+PXE menu behavior    should stay the same
+status.json          may change because it now shows template metadata
+index.html           can stay the same unless you want metadata shown there
+
+1. Replace ProfileDefinition with this
+
+Replace your whole current ProfileDefinition class with this:
+
+@dataclass(frozen=True)
+class ProfileDefinition:
+    profile_id: str
+    title: str
+    install_label: str
+    menu_target: str
+    implemented: bool
+    show_in_main_menu: bool = True
+    uefi: bool = True
+    bios: bool = True
+    supported_os: Tuple[str, ...] = ()
+    kickstart_template: str = ""
+    kernel_args: Tuple[str, ...] = ()
+    source: str = "built-in"
+    @property
+    def legacy_target(self) -> str:
+        return f"{self.menu_target}_legacy"
+    @property
+    def profile_slug(self) -> str:
+        return self.profile_id.replace("_", "-")
+    def supports_os(self, item: DetectedISO) -> bool:
+        return not self.supported_os or item.os_id in self.supported_os
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], source: str) -> "ProfileDefinition":
+        required_fields = [
+            "profile_id",
+            "title",
+            "install_label",
+            "menu_target",
+            "implemented",
+        ]
+        for field in required_fields:
+            if field not in data:
+                fail(f"Profile file {source} is missing required field: {field}")
+        implemented = parse_yaml_bool(data["implemented"], "implemented", source)
+        show_in_main_menu = parse_yaml_bool(
+            data.get("show_in_main_menu", True),
+            "show_in_main_menu",
+            source,
+        )
+        uefi = parse_yaml_bool(data.get("uefi", True), "uefi", source)
+        bios = parse_yaml_bool(data.get("bios", True), "bios", source)
+        supported_os = parse_optional_string_list(
+            data.get("supported_os", []),
+            "supported_os",
+            source,
+        )
+        kernel_args = parse_optional_string_list(
+            data.get("kernel_args", []),
+            "kernel_args",
+            source,
+        )
+        kickstart_template = str(data.get("kickstart_template", "")).strip()
+        return cls(
+            profile_id=str(data["profile_id"]).strip(),
+            title=str(data["title"]).strip(),
+            install_label=str(data["install_label"]).strip(),
+            menu_target=str(data["menu_target"]).strip(),
+            implemented=implemented,
+            show_in_main_menu=show_in_main_menu,
+            uefi=uefi,
+            bios=bios,
+            supported_os=supported_os,
+            kickstart_template=kickstart_template,
+            kernel_args=kernel_args,
+            source=source,
+        )
+
+2. Add these helper functions before ProfileDefinition
+
+Put these right above the @dataclass(frozen=True) line for ProfileDefinition:
+
+def parse_yaml_bool(value: Any, field_name: str, source: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    fail(
+        f"Profile file {source} field {field_name} must be literal true or false. "
+        f"Got: {value!r}. Do not quote booleans and do not use yes/no/on/off."
+    )
+def parse_optional_string_list(
+    value: Any,
+    field_name: str,
+    source: str,
+) -> Tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        fail(f"Profile file {source} field {field_name} must be a YAML list.")
+    parsed: List[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            fail(
+                f"Profile file {source} field {field_name}[{index}] must be a string. "
+                f"Got: {item!r}."
+            )
+        stripped = item.strip()
+        if stripped:
+            parsed.append(stripped)
+    return tuple(parsed)
+
+3. Update built-in profiles
+
+For each built-in profile, add kickstart_template and kernel_args.
+
+Example for minimal:
+
+    ProfileDefinition(
+        profile_id="minimal",
+        title="Minimal Installs",
+        install_label="Minimal",
+        menu_target="minimal",
+        implemented=True,
+        supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
+        kickstart_template="{{ os_id }}-minimal.ks.tmpl",
+        kernel_args=("inst.text", "nomodeset"),
+    ),
+
+For the future profiles, use these:
+
+        kickstart_template="{{ os_id }}-security-baseline.ks.j2",
+        kernel_args=("inst.text", "nomodeset"),
+        kickstart_template="{{ os_id }}-security-luks.ks.j2",
+        kernel_args=("inst.text", "nomodeset"),
+        kickstart_template="{{ os_id }}-small-disk.ks.j2",
+        kernel_args=("inst.text", "nomodeset"),
+        kickstart_template="{{ os_id }}-developer-workstation.ks.j2",
+        kernel_args=("inst.text", "nomodeset"),
+        kickstart_template="{{ os_id }}-embedded-edge.ks.j2",
+        kernel_args=("inst.text", "nomodeset"),
+
+No behavior changes yet — this is just metadata.
+
+4. Update validate_profile_definitions
+
+Inside your existing validate_profile_definitions(), add these checks inside the for profile in profiles: loop, after the supported_os validation:
+
+        if profile.kickstart_template:
+            template_path = Path(profile.kickstart_template)
+            if template_path.is_absolute():
+                fail(
+                    f"Profile {profile.profile_id} kickstart_template must be relative. "
+                    f"Got: {profile.kickstart_template}"
+                )
+            if ".." in template_path.parts:
+                fail(
+                    f"Profile {profile.profile_id} kickstart_template must not contain '..'. "
+                    f"Got: {profile.kickstart_template}"
+                )
+            if "\n" in profile.kickstart_template or "\r" in profile.kickstart_template:
+                fail(
+                    f"Profile {profile.profile_id} kickstart_template must not contain newlines."
+                )
+        for arg in profile.kernel_args:
+            if "\n" in arg or "\r" in arg:
+                fail(
+                    f"Profile {profile.profile_id} kernel_args must not contain newlines."
+                )
+
+Then add this near the end of validate_profile_definitions(), before the minimal check or after it:
+
+    if not any(profile.show_in_main_menu for profile in profiles):
+        fail("At least one PXE profile must have show_in_main_menu=true.")
+
+5. Update profile_status
+
+Replace your current profile_status() with this:
+
+def profile_status(profile: ProfileDefinition) -> Dict[str, object]:
+    return {
+        "profile_id": profile.profile_id,
+        "title": profile.title,
+        "install_label": profile.install_label,
+        "menu_target": profile.menu_target,
+        "implemented": profile.implemented,
+        "show_in_main_menu": profile.show_in_main_menu,
+        "uefi_enabled": profile.uefi,
+        "bios_enabled": profile.bios,
+        "supported_os": list(profile.supported_os),
+        "kickstart_template": profile.kickstart_template,
+        "kernel_args": list(profile.kernel_args),
+        "source": profile.source,
+    }
+
+That gives you an easy way to confirm the YAML files are being read.
+
+6. Update your profile YAML files
+
+Add these fields to each YAML file.
+
+10-developer-workstation.yml
+
+kickstart_template: "{{ os_id }}-developer-workstation.ks.j2"
+kernel_args:
+  - inst.text
+  - nomodeset
+
+20-security-baseline.yml
+
+kickstart_template: "{{ os_id }}-security-baseline.ks.j2"
+kernel_args:
+  - inst.text
+  - nomodeset
+
+30-security-luks.yml
+
+kickstart_template: "{{ os_id }}-security-luks.ks.j2"
+kernel_args:
+  - inst.text
+  - nomodeset
+
+40-embedded-edge.yml
+
+kickstart_template: "{{ os_id }}-embedded-edge.ks.j2"
+kernel_args:
+  - inst.text
+  - nomodeset
+
+50-minimal.yml
+
+kickstart_template: "{{ os_id }}-minimal.ks.tmpl"
+kernel_args:
+  - inst.text
+  - nomodeset
+
+60-small-disk.yml
+
+kickstart_template: "{{ os_id }}-small-disk.ks.j2"
+kernel_args:
+  - inst.text
+  - nomodeset
+
+7. Phase 5A smoke test
+
+After the image/service is rebuilt:
+
+rm -rf /tmp/pxe-phase5a
+mkdir -p /tmp/pxe-phase5a
+curl -fss http://127.0.0.1:18080/boot.ipxe \
+  -o /tmp/pxe-phase5a/boot.ipxe
+curl -fss http://127.0.0.1:18080/generated/isos.txt \
+  -o /tmp/pxe-phase5a/isos.txt
+curl -fss http://127.0.0.1:18080/generated/status.json \
+  -o /tmp/pxe-phase5a/status.json
+curl -fss http://127.0.0.1:18080/index.html \
+  -o /tmp/pxe-phase5a/index.html
+curl -fss http://127.0.0.1:18080/ks/rhel8-minimal.ks \
+  -o /tmp/pxe-phase5a/rhel8-minimal.ks
+curl -fss -o /dev/null http://127.0.0.1:18080/ui/background.png
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/vmlinuz
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/initrd.img
+python3 -m json.tool /tmp/pxe-phase5a/status.json >/dev/null
+
+Compare against 4C:
+
+diff -u /tmp/pxe-phase4c/boot.ipxe /tmp/pxe-phase5a/boot.ipxe
+diff -u /tmp/pxe-phase4c/isos.txt /tmp/pxe-phase5a/isos.txt
+diff -u /tmp/pxe-phase4c/rhel8-minimal.ks /tmp/pxe-phase5a/rhel8-minimal.ks
+
+Those should match.
+
+Then confirm the new metadata is present:
+
+grep -n '"kickstart_template"' /tmp/pxe-phase5a/status.json
+grep -n '"kernel_args"' /tmp/pxe-phase5a/status.json
+grep -n '"source"' /tmp/pxe-phase5a/status.json
+
+8. Bad-profile test for 5A
+
+This confirms the new validation works:
+
+CID=pxe-content
+podman exec -it "$CID" /bin/sh -lc '
+rm -rf /tmp/pxe-bad-profiles /tmp/pxe-bad-output
+mkdir -p /tmp/pxe-bad-profiles
+cat > /tmp/pxe-bad-profiles/10-minimal.yml <<'"'"'EOF'"'"'
+profile_id: minimal
+title: Minimal Installs
+install_label: Minimal
+menu_target: minimal
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+kickstart_template: ../bad.ks.j2
+kernel_args:
+  - inst.text
+EOF
+PXE_SERVER=127.0.0.1 \
+PXE_PROFILE_ROOT=/tmp/pxe-bad-profiles \
+PXE_HTML_ROOT=/tmp/pxe-bad-output \
+python3 /usr/local/bin/generate-pxe-content.py --once
+'
+
+Expected failure:
+
+ERROR: Profile minimal kickstart_template must not contain '..'.
+
+Once normal smoke passes and that bad-profile test fails clearly, 5A is good to merge.
