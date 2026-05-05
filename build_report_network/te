@@ -174,4 +174,202 @@ Expected result:
 
 ERROR: Template ... failed Jinja2 rendering: 'not_a_real_variable' is undefined
 
-So the next concrete step is: update the Python renderer so Jinja2 uses FileSystemLoader(PXE_TEMPLATE_ROOT), then add the templates/partials files and convert the minimal templates to .ks.j2.
+										So the next concrete step is: update the Python renderer so Jinja2 uses FileSystemLoader(PXE_TEMPLATE_ROOT), then add the templates/partials files and convert the minimal templates to .ks.j2.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+You fixed most of the file/layout/profile/Dockerfile side correctly.
+
+The one real thing still missing is exactly the part you were confused about: your Python currently imports jinja2, but it does not yet give Jinja2 a loader, so this will not work reliably:
+
+{% include "partials/network-dhcp.ks.j2" %}
+
+Right now your code uses:
+
+environment = jinja2.Environment(
+    undefined=jinja2.StrictUndefined,
+    autoescape=False,
+    keep_trailing_newline=True,
+)
+
+That can render {{ repo_url }}, but it has no idea where to find included files. You need the loader rooted at PXE_TEMPLATE_ROOT.
+
+Fix 1 — Replace render_jinja2_template_text
+
+Replace your current function with this:
+
+def render_jinja2_template_text(
+    raw: str,
+    values: Dict[str, Any],
+    source: str,
+    template_root: Path,
+) -> str:
+    if jinja2 is None:
+        fail(
+            f"Template {source} requires Jinja2, but the jinja2 Python package is not installed. "
+            "Install py3-jinja2 on Alpine or python3-jinja2 on RHEL/UBI."
+        )
+    environment = jinja2.Environment(
+        loader=jinja2.FileSystemLoader(str(template_root)),
+        undefined=jinja2.StrictUndefined,
+        autoescape=False,
+        keep_trailing_newline=True,
+    )
+    try:
+        return environment.from_string(raw).render(**values)
+    except jinja2.TemplateError as exc:
+        fail(f"Template {source} failed Jinja2 rendering: {exc}")
+
+Fix 2 — Replace render_kickstart_template_text
+
+Replace your current function with this:
+
+def render_kickstart_template_text(
+    raw: str,
+    values: Dict[str, Any],
+    source: str,
+    template_engine: str,
+    template_root: Path,
+) -> str:
+    if template_engine == "jinja2":
+        return render_jinja2_template_text(raw, values, source, template_root)
+    if template_engine == "simple":
+        return render_simple_template_text(raw, values, source)
+    fail(f"Template {source} has unsupported template engine: {template_engine}")
+    return ""
+
+Fix 3 — Update the call inside KickstartRenderer.render_template
+
+Change this:
+
+return render_kickstart_template_text(
+    raw,
+    values,
+    str(resolution.template_path),
+    resolution.template_engine,
+)
+
+to this:
+
+return render_kickstart_template_text(
+    raw,
+    values,
+    str(resolution.template_path),
+    resolution.template_engine,
+    self.config.template_root,
+)
+
+That is the main missing code fix.
+
+One more cleanup I would make
+
+Because you changed profiles to this style:
+
+kickstart_template: "ks/{{ os_id }}-minimal.ks.j2"
+
+your current resolver searches a weird extra path first:
+
+/templates/ks/ks/rhel8-minimal.ks.j2
+/templates/ks/rhel8-minimal.ks.j2
+
+It still works because the second path is right, but I would clean it up now.
+
+Replace your kickstart_template_candidates() function with this:
+
+def kickstart_template_candidates(
+    config: GeneratorConfig,
+    template_name: str,
+) -> Tuple[Path, ...]:
+    template_path = Path(template_name)
+    candidates: List[Path] = []
+    # Explicit subdirectory path, such as:
+    #   ks/rhel8-minimal.ks.j2
+    #   profiles/rhel8-developer-workstation.ks.j2
+    candidates.append(config.template_root / template_path)
+    # Backward-compatible convenience for bare filenames, such as:
+    #   rhel8-minimal.ks.j2
+    # This keeps the old lookup behavior:
+    #   /templates/ks/<filename>
+    #   /templates/<filename>
+    if len(template_path.parts) == 1:
+        candidates.insert(0, config.template_root / "ks" / template_path)
+    deduped: List[Path] = []
+    for candidate in candidates:
+        if candidate not in deduped:
+            deduped.append(candidate)
+    return tuple(deduped)
+
+That makes both of these valid:
+
+kickstart_template: "{{ os_id }}-minimal.ks.j2"
+
+and:
+
+kickstart_template: "ks/{{ os_id }}-minimal.ks.j2"
+
+Your current profile style is okay after this.
+
+Also update OS_DEFINITIONS
+
+Since you deleted the old .ks.tmpl files, update these so the minimal fallback points to the new Jinja templates too.
+
+Change:
+
+ks_template="rhel10-minimal.ks.tmpl",
+
+to:
+
+ks_template="rhel10-minimal.ks.j2",
+
+Do that for RHEL 10, 9, 8, and 7.
+
+So the four should be:
+
+ks_template="rhel10-minimal.ks.j2",
+ks_template="rhel9-minimal.ks.j2",
+ks_template="rhel8-minimal.ks.j2",
+ks_template="rhel7-minimal.ks.j2",
+
+What you already fixed correctly
+
+Your Dockerfile change looks right:
+
+COPY templates/ /templates/
+
+Deleting the old content/ks/*.ks.tmpl files is also right for this phase.
+
+Your profile YAML changes are fine:
+
+kickstart_template: "ks/{{ os_id }}-minimal.ks.j2"
+
+and the future profiles being changed to:
+
+kickstart_template: "ks/{{ os_id }}-developer-workstation.ks.j2"
+
+is fine because they are still implemented: false.
+
+Quick test after those fixes
+
+After rebuilding/running, check that the generated Kickstart does not contain include lines:
+
+curl -fs http://127.0.0.1:18080/ks/rhel8-minimal.ks | grep -E '\{% include|partials/'
+
+It should return nothing.
+
+Then check that the partials rendered into the final Kickstart:
+
+curl -fs http://127.0.0.1:18080/ks/rhel8-minimal.ks | grep -E 'network --bootproto=dhcp|rootpw --iscrypted|url --url=|@^minimal-environment'
+
+You should see all of those.
