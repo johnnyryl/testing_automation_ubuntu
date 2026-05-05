@@ -1,0 +1,110 @@
+I would run one normal smoke test and one bad-template test before merging. Since 5C specifically changed template resolution/failure behavior, I would not skip the negative test.
+
+1. Normal smoke test
+
+Run this from the VM/host where pxe-content is running:
+
+CID=pxe-content
+rm -rf /tmp/pxe-phase5c
+mkdir -p /tmp/pxe-phase5c
+curl -fss http://127.0.0.1:18080/boot.ipxe \
+  -o /tmp/pxe-phase5c/boot.ipxe
+curl -fss http://127.0.0.1:18080/generated/isos.txt \
+  -o /tmp/pxe-phase5c/isos.txt
+curl -fss http://127.0.0.1:18080/generated/status.json \
+  -o /tmp/pxe-phase5c/status.json
+curl -fss http://127.0.0.1:18080/index.html \
+  -o /tmp/pxe-phase5c/index.html
+curl -fss http://127.0.0.1:18080/ks/rhel8-minimal.ks \
+  -o /tmp/pxe-phase5c/rhel8-minimal.ks
+curl -fss -o /dev/null http://127.0.0.1:18080/ui/background.png
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/vmlinuz
+curl -fss -o /dev/null http://127.0.0.1:18080/rhel8/images/pxeboot/initrd.img
+python3 -m json.tool /tmp/pxe-phase5c/status.json >/dev/null
+
+Then check the new 5C fields:
+
+grep -n '"generated_kickstarts"' /tmp/pxe-phase5c/status.json
+grep -n '"template_source"' /tmp/pxe-phase5c/status.json
+grep -n '"template_search_paths"' /tmp/pxe-phase5c/status.json
+grep -n '"template_path"' /tmp/pxe-phase5c/status.json
+
+Expected result: those fields show up in status.json.
+
+Then make sure future placeholder profiles did not generate real boot targets:
+
+if grep -En 'inst\.ks=.*(developer-workstation|security-baseline|security-luks|embedded-edge|small-disk)' /tmp/pxe-phase5c/boot.ipxe; then
+  echo "ERROR: future profile generated a real boot target"
+else
+  echo "OK: future profiles do not generate real boot targets"
+fi
+
+Expected result:
+
+OK: future profiles do not generate real boot targets
+
+2. Bad-template test
+
+This confirms 5C fails clearly when someone marks a non-minimal profile as implemented but the Kickstart template does not exist.
+
+CID=pxe-content
+podman exec -it "$CID" /bin/sh -lc '
+rm -rf /tmp/pxe-bad-profiles /tmp/pxe-bad-output
+mkdir -p /tmp/pxe-bad-profiles
+cat > /tmp/pxe-bad-profiles/10-minimal.yml <<EOF
+profile_id: minimal
+title: Minimal Installs
+install_label: Minimal
+menu_target: minimal
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+kickstart_template: "{{ os_id }}-minimal.ks.tmpl"
+kernel_args:
+  - inst.text
+  - nomodeset
+EOF
+cat > /tmp/pxe-bad-profiles/20-developer-workstation.yml <<EOF
+profile_id: developer_workstation
+title: Developer Workstation Installs
+install_label: Developer Workstation
+menu_target: developer_workstation
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+kickstart_template: missing-developer-template.ks.j2
+kernel_args:
+  - inst.text
+  - nomodeset
+EOF
+set +e
+PXE_SERVER=127.0.0.1 \
+PXE_PROFILE_ROOT=/tmp/pxe-bad-profiles \
+PXE_HTML_ROOT=/tmp/pxe-bad-output \
+python3 /usr/local/bin/generate-pxe-content.py --once > /tmp/pxe-5c-bad.out 2>&1
+rc=$?
+set -e
+cat /tmp/pxe-5c-bad.out
+if [ "$rc" -eq 0 ]; then
+  echo "ERROR: missing non-minimal template unexpectedly passed"
+  exit 1
+fi
+if grep -Eq "developer_workstation|missing-developer-template|Searched|not found" /tmp/pxe-5c-bad.out; then
+  echo "OK: missing non-minimal template failed clearly"
+else
+  echo "ERROR: failed, but not with the expected clear template message"
+  exit 1
+fi
+'
+
+Expected result:
+
+OK: missing non-minimal template failed clearly
+
+If both of those pass, I’d be comfortable merging 5C.
