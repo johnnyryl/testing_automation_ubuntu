@@ -535,7 +535,7 @@ BUILTIN_PROFILE_DEFINITIONS: List[ProfileDefinition] = [
         implemented=False,
         show_in_main_menu=True,
         supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
-        kickstart_template="{{ os_id }}-security-baseline.ks.j2",
+        kickstart_template="ks/{{ os_id }}-security-baseline.ks.j2",
         kernel_args=("inst.text", "nomodeset"),
     ),
     ProfileDefinition(
@@ -546,7 +546,7 @@ BUILTIN_PROFILE_DEFINITIONS: List[ProfileDefinition] = [
         implemented=False,
         show_in_main_menu=True,
         supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
-        kickstart_template="{{ os_id }}-security-luks.ks.j2",
+        kickstart_template="ks/{{ os_id }}-security-luks.ks.j2",
         kernel_args=("inst.text", "nomodeset"),
     ),
     ProfileDefinition(
@@ -557,7 +557,7 @@ BUILTIN_PROFILE_DEFINITIONS: List[ProfileDefinition] = [
         implemented=False,
         show_in_main_menu=True,
         supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
-        kickstart_template="{{ os_id }}-small-disk.ks.j2",
+        kickstart_template="ks/{{ os_id }}-small-disk.ks.j2",
         kernel_args=("inst.text", "nomodeset"),
     ),
     ProfileDefinition(
@@ -568,7 +568,7 @@ BUILTIN_PROFILE_DEFINITIONS: List[ProfileDefinition] = [
         implemented=False,
         show_in_main_menu=True,
         supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
-        kickstart_template="{{ os_id }}-developer-workstation.ks.j2",
+        kickstart_template="ks/{{ os_id }}-developer-workstation.ks.j2",
         kernel_args=("inst.text", "nomodeset"),
     ),
     ProfileDefinition(
@@ -579,7 +579,7 @@ BUILTIN_PROFILE_DEFINITIONS: List[ProfileDefinition] = [
         implemented=False,
         show_in_main_menu=True,
         supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
-        kickstart_template="{{ os_id }}-embedded-edge.ks.j2",
+        kickstart_template="ks/{{ os_id }}-embedded-edge.ks.j2",
         kernel_args=("inst.text", "nomodeset"),
     ),
 ]
