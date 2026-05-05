@@ -1163,6 +1163,8 @@ class KickstartRenderer:
             self.rootpw_hash,
         )
 
+        raw = resolution.template_path.read_text(encoding="utf-8")
+
         return render_kickstart_template_text(
             raw,
             values,
