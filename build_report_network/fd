@@ -520,7 +520,7 @@ BUILTIN_PROFILE_DEFINITIONS: List[ProfileDefinition] = [
         menu_target="minimal",
         implemented=True,
         supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
-        kickstart_template="{{ os_id }}-minimal.ks.tmpl",
+        kickstart_template="ks/{{ os_id }}-minimal.ks.j2",
         kernel_args=("inst.text", "nomodeset"),
     ),
 
