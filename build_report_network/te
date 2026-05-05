@@ -373,3 +373,85 @@ Then check that the partials rendered into the final Kickstart:
 curl -fs http://127.0.0.1:18080/ks/rhel8-minimal.ks | grep -E 'network --bootproto=dhcp|rootpw --iscrypted|url --url=|@^minimal-environment'
 
 You should see all of those.
+
+
+
+Yes — **the Python file looks good now for 5E**. The previous blocker is fixed because `render_template()` now reads the template file into `raw` before calling `render_kickstart_template_text()`. That was the main issue. 
+
+The important 5E pieces are now present:
+
+1. **Jinja2 is imported and optional-failed clearly**
+   You have the `try: import jinja2` block and a clear failure message if a `.j2` template is used without Jinja2 installed. 
+
+2. **Jinja2 uses a `FileSystemLoader` rooted at `PXE_TEMPLATE_ROOT`**
+   This is what allows includes like this to work:
+
+```jinja2
+{% include "partials/network-dhcp.ks.j2" %}
+```
+
+Your loader is rooted at `template_root`, so `/templates/partials/...` and `/templates/ks/...` should resolve correctly. 
+
+3. **Subdirectory templates are supported**
+   Your `kickstart_template_candidates()` now supports explicit paths like:
+
+```yaml
+kickstart_template: "ks/{{ os_id }}-minimal.ks.j2"
+```
+
+or later:
+
+```yaml
+kickstart_template: "profiles/{{ os_id }}-developer-workstation.ks.j2"
+```
+
+That is exactly what we wanted for 5E. 
+
+4. **The old bare filename behavior still works**
+   If someone uses:
+
+```yaml
+kickstart_template: "rhel8-minimal.ks.j2"
+```
+
+it still checks:
+
+```text
+/templates/ks/rhel8-minimal.ks.j2
+/templates/rhel8-minimal.ks.j2
+```
+
+So we did not break the older/simple layout. 
+
+5. **Minimal profiles now point to Jinja2 templates**
+   Your built-in minimal profile now uses:
+
+```python
+kickstart_template="ks/{{ os_id }}-minimal.ks.j2"
+```
+
+That matches the new `/templates/ks/*.ks.j2` structure. 
+
+The only thing I would still run before merging is this:
+
+```bash
+python3 -m py_compile scripts/generate-pxe-content.py
+```
+
+Then after rebuild/redeploy:
+
+```bash
+curl -fs http://127.0.0.1:18080/ks/rhel8-minimal.ks | grep -E '\{% include|partials/'
+```
+
+That should return **nothing**.
+
+Then:
+
+```bash
+curl -fs http://127.0.0.1:18080/ks/rhel8-minimal.ks | grep -E 'network --bootproto=dhcp|rootpw --iscrypted|url --url=|@^minimal-environment'
+```
+
+That should show the rendered Kickstart content.
+
+So my answer is: **yes, the Python side of 5E is good now.** Just make sure the Dockerfile is copying `templates/` into `/templates/`, and that the container image has `py3-jinja2` installed.
