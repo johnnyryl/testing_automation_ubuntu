@@ -1,0 +1,100 @@
+Yes — **you’re good to start testing 6C now.** I don’t see a missing code piece from the 6C changes you pasted. The important pieces are present: `cleanup_stale_kickstarts()`, `render_all()` returning expected Kickstart names, `render_status()` accepting/reporting `stale_kickstarts`, and `generate_once()` calling cleanup before writing status. 
+
+Also, the pasted file passes a basic Python syntax compile check.
+
+Run the tests in this order.
+
+```bash
+CID=pxe-content
+SCRIPT=/usr/local/bin/generate-pxe-content.py
+
+podman exec "$CID" python3 -m py_compile "$SCRIPT"
+podman exec "$CID" python3 "$SCRIPT" --once
+
+curl -fss http://127.0.0.1:18080/generated/status.json -o /tmp/status-6c.json
+python3 -m json.tool /tmp/status-6c.json >/dev/null
+grep -q '"stale_kickstarts"' /tmp/status-6c.json
+```
+
+Then test that **stale generated Kickstarts get deleted**:
+
+```bash
+podman exec "$CID" /bin/sh -lc '
+set -e
+mkdir -p /etc/nginx/html/ks /etc/nginx/html/generated/kickstart-state
+
+echo "# fake stale generated kickstart" > /etc/nginx/html/ks/rhel8-stale-generated.ks
+
+sha="$(python3 - <<PY
+from pathlib import Path
+import hashlib
+p = Path("/etc/nginx/html/ks/rhel8-stale-generated.ks")
+print(hashlib.sha256(p.read_bytes()).hexdigest())
+PY
+)"
+
+cat > /etc/nginx/html/generated/kickstart-state/rhel8-stale-generated.ks.json <<EOF
+{
+  "last_generated_sha256": "$sha"
+}
+EOF
+
+python3 /usr/local/bin/generate-pxe-content.py --once
+
+test ! -f /etc/nginx/html/ks/rhel8-stale-generated.ks
+test ! -f /etc/nginx/html/generated/kickstart-state/rhel8-stale-generated.ks.json
+'
+
+curl -fss http://127.0.0.1:18080/generated/status.json -o /tmp/status-6c-delete.json
+grep -q '"kickstart_name": "rhel8-stale-generated.ks"' /tmp/status-6c-delete.json
+grep -q '"action": "deleted"' /tmp/status-6c-delete.json
+```
+
+Then test that **stale manually edited Kickstarts are preserved**:
+
+```bash
+podman exec "$CID" /bin/sh -lc '
+set -e
+mkdir -p /etc/nginx/html/ks /etc/nginx/html/generated/kickstart-state
+
+echo "# fake stale manual kickstart" > /etc/nginx/html/ks/rhel8-stale-manual.ks
+
+cat > /etc/nginx/html/generated/kickstart-state/rhel8-stale-manual.ks.json <<EOF
+{
+  "last_generated_sha256": "old-generated-sha"
+}
+EOF
+
+python3 /usr/local/bin/generate-pxe-content.py --once
+
+test -f /etc/nginx/html/ks/rhel8-stale-manual.ks
+grep -q "fake stale manual kickstart" /etc/nginx/html/ks/rhel8-stale-manual.ks
+grep -q "\"stale\": true" /etc/nginx/html/generated/kickstart-state/rhel8-stale-manual.ks.json
+grep -q "\"stale_action\": \"preserved\"" /etc/nginx/html/generated/kickstart-state/rhel8-stale-manual.ks.json
+'
+
+curl -fss http://127.0.0.1:18080/generated/status.json -o /tmp/status-6c-preserve.json
+grep -q '"kickstart_name": "rhel8-stale-manual.ks"' /tmp/status-6c-preserve.json
+grep -q '"action": "preserved"' /tmp/status-6c-preserve.json
+```
+
+Then test that **unmanaged Kickstarts are preserved**:
+
+```bash
+podman exec "$CID" /bin/sh -lc '
+set -e
+rm -f /etc/nginx/html/generated/kickstart-state/rhel8-unmanaged.ks.json
+echo "# unmanaged kickstart" > /etc/nginx/html/ks/rhel8-unmanaged.ks
+
+python3 /usr/local/bin/generate-pxe-content.py --once
+
+test -f /etc/nginx/html/ks/rhel8-unmanaged.ks
+grep -q "unmanaged kickstart" /etc/nginx/html/ks/rhel8-unmanaged.ks
+'
+
+curl -fss http://127.0.0.1:18080/generated/status.json -o /tmp/status-6c-unmanaged.json
+grep -q '"kickstart_name": "rhel8-unmanaged.ks"' /tmp/status-6c-unmanaged.json
+grep -q '"unmanaged Kickstart; no generator state file exists"' /tmp/status-6c-unmanaged.json
+```
+
+If all of those pass, I’d call **6C good to merge**.
