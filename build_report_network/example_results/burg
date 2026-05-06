@@ -1,0 +1,22 @@
+set -e
+
+CID=pxe-content
+SCRIPT=/usr/local/bin/generate-pxe-content.py
+
+podman exec "$CID" python3 -m py_compile "$SCRIPT"
+podman exec "$CID" python3 "$SCRIPT" --once
+
+curl -fss http://127.0.0.1:18080/index.html -o /tmp/index-6d.html
+curl -fss http://127.0.0.1:18080/generated/status.json -o /tmp/status-6d.json
+
+grep -q "Generation Policy" /tmp/index-6d.html
+grep -q "Kickstart State" /tmp/index-6d.html
+grep -q "Warnings" /tmp/index-6d.html
+grep -q "Generated Files" /tmp/index-6d.html
+
+python3 -m json.tool /tmp/status-6d.json >/dev/null
+grep -q '"generator"' /tmp/status-6d.json
+grep -q '"active_overrides"' /tmp/status-6d.json
+grep -q '"stale_kickstarts"' /tmp/status-6d.json
+
+echo "6D test passed"
