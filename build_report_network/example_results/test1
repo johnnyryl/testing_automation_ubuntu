@@ -1,3 +1,31 @@
+
+
+
+
+
+
+
+
+
+CID=pxe-content
+SCRIPT=/usr/local/bin/generate-pxe-content.py
+
+podman exec "$CID" grep -n "write_generated_kickstart" "$SCRIPT"
+podman exec "$CID" grep -n "kickstart-state" "$SCRIPT"
+podman exec "$CID" grep -n "preserved-kickstarts" "$SCRIPT"
+podman exec "$CID" find /etc/nginx/html/generated -maxdepth 3 -type f | sort
+
+
+
+
+
+
+
+
+
+
+
+
 Yes — **6B should be the emergency direct-edit preservation step**.
 
 You already finished **6A**, which added:
