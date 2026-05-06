@@ -2927,6 +2927,7 @@ def render_status(
         "override_template_root": str(config.override_template_root),
         "override_profile_root": str(config.override_profile_root),
         "generated_ks_edit_policy": config.generated_ks_edit_policy,
+        "validation_failure_policy": config.validation_failure_policy,
         "detected_isos": detected_list,
         "profiles": [
             profile_status(profile)
