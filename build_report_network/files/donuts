@@ -3146,6 +3146,7 @@ def watched_env_values(config: GeneratorConfig) -> List[str]:
         str(config.override_template_root),
         str(config.override_profile_root),
         config.generated_ks_edit_policy,
+        config.validation_failure_policy,
         config.background_path,
         config.rootpw_hash,
         str(config.allow_default_rootpw),
