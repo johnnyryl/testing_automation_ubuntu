@@ -1,0 +1,492 @@
+Yes — **6B should be the emergency direct-edit preservation step**.
+
+You already finished **6A**, which added:
+
+```text
+/overrides/templates
+/overrides/profiles
+```
+
+So **6B** should add this behavior:
+
+When someone manually edits a generated file like:
+
+```text
+/etc/nginx/html/ks/rhel8-minimal.ks
+```
+
+the generator should **not blindly overwrite it** on the next run. Instead, it should preserve the manual emergency edit and write the newly regenerated version somewhere else for comparison.
+
+Your current file already has the 6A override roots and override template/profile loading, so 6B is mainly adding generated Kickstart state tracking and preserve/overwrite behavior. 
+
+---
+
+## 6B goal
+
+Add this policy:
+
+```bash
+PXE_GENERATED_KS_EDIT_POLICY=preserve
+```
+
+Default should be:
+
+```bash
+preserve
+```
+
+Supported values:
+
+```bash
+preserve
+overwrite
+```
+
+Behavior:
+
+| Situation                                                      | Result                                                  |
+| -------------------------------------------------------------- | ------------------------------------------------------- |
+| Generated `.ks` has not been manually changed                  | overwrite normally                                      |
+| Generated `.ks` was manually changed and policy is `preserve`  | keep manual file, write regenerated candidate elsewhere |
+| Generated `.ks` was manually changed and policy is `overwrite` | overwrite it like normal                                |
+
+---
+
+# Change 1 — Add a config field
+
+In `GeneratorConfig`, add this field after `override_profile_root`:
+
+```python
+    generated_ks_edit_policy: str
+```
+
+So that section should look like:
+
+```python
+    override_root: Path
+    override_template_root: Path
+    override_profile_root: Path
+    generated_ks_edit_policy: str
+    background_path: str
+```
+
+---
+
+# Change 2 — Load the env var
+
+In `GeneratorConfig.from_env()`, add this after `override_profile_root=...`:
+
+```python
+            generated_ks_edit_policy=getenv("PXE_GENERATED_KS_EDIT_POLICY", "preserve").lower(),
+```
+
+So this area should look like:
+
+```python
+            override_profile_root=Path(
+                getenv("PXE_OVERRIDE_PROFILE_ROOT", str(override_root / "profiles"))
+            ),
+            generated_ks_edit_policy=getenv("PXE_GENERATED_KS_EDIT_POLICY", "preserve").lower(),
+            background_path=getenv("PXE_BACKGROUND_PATH", "/ui/background.png"),
+```
+
+---
+
+# Change 3 — Validate the policy
+
+In `GeneratorConfig.validate()`, add this after the watch interval check:
+
+```python
+        if self.generated_ks_edit_policy not in ("preserve", "overwrite"):
+            fail(
+                "PXE_GENERATED_KS_EDIT_POLICY must be one of: "
+                "preserve, overwrite."
+            )
+```
+
+So the full method should be:
+
+```python
+    def validate(self) -> None:
+        if not self.pxe_server:
+            fail("PXE_SERVER is required.")
+
+        if self.watch_interval < 1:
+            fail("PXE_WATCH_INTERVAL must be 1 or greater.")
+
+        if self.generated_ks_edit_policy not in ("preserve", "overwrite"):
+            fail(
+                "PXE_GENERATED_KS_EDIT_POLICY must be one of: "
+                "preserve, overwrite."
+            )
+```
+
+---
+
+# Change 4 — Add helper functions after `atomic_write`
+
+Find this section:
+
+```python
+def atomic_write(path: Path, content: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.chmod(mode)
+    tmp_path.replace(path)
+```
+
+Immediately **after it**, add this whole block:
+
+```python
+def sha256_text(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+
+    with path.open("rb") as file_obj:
+        for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+    return digest.hexdigest()
+
+
+def read_json_mapping(path: Path) -> Dict[str, Any]:
+    if not path.is_file():
+        return {}
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        fail(f"JSON state file {path} is invalid: {exc}")
+
+    if not isinstance(data, dict):
+        fail(f"JSON state file {path} must contain a JSON object.")
+
+    return data
+
+
+def kickstart_state_path(config: GeneratorConfig, destination: Path) -> Path:
+    return config.html_root / "generated" / "kickstart-state" / f"{destination.name}.json"
+
+
+def kickstart_candidate_path(config: GeneratorConfig, destination: Path) -> Path:
+    return (
+        config.html_root
+        / "generated"
+        / "preserved-kickstarts"
+        / f"{destination.name}.candidate"
+    )
+
+
+def write_generated_kickstart(
+    config: GeneratorConfig,
+    destination: Path,
+    content: str,
+) -> None:
+    desired_sha = sha256_text(content)
+    state_path = kickstart_state_path(config, destination)
+    candidate_path = kickstart_candidate_path(config, destination)
+
+    destination_exists = destination.is_file()
+    current_sha = sha256_file(destination) if destination_exists else ""
+    state = read_json_mapping(state_path)
+    previous_generated_sha = str(state.get("last_generated_sha256", ""))
+
+    manual_edit_detected = (
+        destination_exists
+        and bool(previous_generated_sha)
+        and current_sha != previous_generated_sha
+    )
+
+    if manual_edit_detected and config.generated_ks_edit_policy == "preserve":
+        atomic_write(candidate_path, content)
+
+        state_data = {
+            "output_path": str(destination),
+            "state_path": str(state_path),
+            "candidate_path": str(candidate_path),
+            "edit_policy": config.generated_ks_edit_policy,
+            "manual_edit_detected": True,
+            "preserved_manual_edit": True,
+            "current_output_sha256": current_sha,
+            "last_generated_sha256": desired_sha,
+            "previous_generated_sha256": previous_generated_sha,
+            "updated_at_epoch": int(time.time()),
+        }
+
+        atomic_write(
+            state_path,
+            json.dumps(state_data, indent=2, sort_keys=True) + "\n",
+        )
+
+        print(
+            f"Preserved manually edited Kickstart: {destination}. "
+            f"Regenerated candidate written to: {candidate_path}",
+            flush=True,
+        )
+        return
+
+    atomic_write(destination, content)
+
+    if candidate_path.exists():
+        candidate_path.unlink()
+
+    state_data = {
+        "output_path": str(destination),
+        "state_path": str(state_path),
+        "candidate_path": None,
+        "edit_policy": config.generated_ks_edit_policy,
+        "manual_edit_detected": manual_edit_detected,
+        "preserved_manual_edit": False,
+        "current_output_sha256": desired_sha,
+        "last_generated_sha256": desired_sha,
+        "previous_generated_sha256": previous_generated_sha or None,
+        "updated_at_epoch": int(time.time()),
+    }
+
+    atomic_write(
+        state_path,
+        json.dumps(state_data, indent=2, sort_keys=True) + "\n",
+    )
+
+
+def generated_kickstart_state_status(
+    config: GeneratorConfig,
+    kickstart_name: str,
+) -> Dict[str, object]:
+    destination = config.html_root / "ks" / kickstart_name
+    state_path = kickstart_state_path(config, destination)
+
+    if not state_path.is_file():
+        return {
+            "state_exists": False,
+            "state_path": str(state_path),
+        }
+
+    state = read_json_mapping(state_path)
+    state["state_exists"] = True
+    state["state_path"] = str(state_path)
+
+    return state
+```
+
+---
+
+# Change 5 — Use the new writer for generated Kickstarts
+
+Find this in `KickstartRenderer.render_one()`:
+
+```python
+        atomic_write(destination, rendered)
+```
+
+Replace it with:
+
+```python
+        write_generated_kickstart(self.config, destination, rendered)
+```
+
+That is the main functional change.
+
+---
+
+# Change 6 — Add policy to `status.json`
+
+In `render_status()`, find this area:
+
+```python
+        "override_root": str(config.override_root),
+        "override_template_root": str(config.override_template_root),
+        "override_profile_root": str(config.override_profile_root),
+```
+
+Add this under it:
+
+```python
+        "generated_ks_edit_policy": config.generated_ks_edit_policy,
+```
+
+So it becomes:
+
+```python
+        "override_root": str(config.override_root),
+        "override_template_root": str(config.override_template_root),
+        "override_profile_root": str(config.override_profile_root),
+        "generated_ks_edit_policy": config.generated_ks_edit_policy,
+```
+
+---
+
+# Change 7 — Add Kickstart state to each generated Kickstart in status
+
+In `generated_kickstart_status()`, find this block:
+
+```python
+                    "template_context_keys": sorted(values.keys()),
+                    "kernel_args": list(profile.kernel_args),
+```
+
+Change it to:
+
+```python
+                    "template_context_keys": sorted(values.keys()),
+                    "kernel_args": list(profile.kernel_args),
+                    "emergency_edit_state": generated_kickstart_state_status(
+                        config,
+                        kickstart_name,
+                    ),
+```
+
+---
+
+# Change 8 — Add the policy to watched env values
+
+In `watched_env_values()`, find this area:
+
+```python
+        str(config.override_root),
+        str(config.override_template_root),
+        str(config.override_profile_root),
+        config.background_path,
+```
+
+Add the new policy before `background_path`:
+
+```python
+        config.generated_ks_edit_policy,
+```
+
+So it becomes:
+
+```python
+        str(config.override_root),
+        str(config.override_template_root),
+        str(config.override_profile_root),
+        config.generated_ks_edit_policy,
+        config.background_path,
+```
+
+---
+
+# Change 9 — Update the fake config in `render_name_template`
+
+Find the fake `GeneratorConfig(...)` inside `render_name_template()`.
+
+Add this field after `override_profile_root=Path("/overrides/profiles"),`:
+
+```python
+            generated_ks_edit_policy="preserve",
+```
+
+So that area should look like:
+
+```python
+            override_root=Path("/overrides"),
+            override_template_root=Path("/overrides/templates"),
+            override_profile_root=Path("/overrides/profiles"),
+            generated_ks_edit_policy="preserve",
+            background_path="",
+```
+
+---
+
+# Tests to run for 6B
+
+Run these inside the VM/container like you have been.
+
+## 1. Syntax test
+
+```bash
+CID=pxe-content
+SCRIPT=/usr/local/bin/generate-pxe-content.py
+
+podman exec "$CID" python3 -m py_compile "$SCRIPT"
+```
+
+## 2. Baseline generate
+
+```bash
+podman exec "$CID" python3 "$SCRIPT" --once
+
+curl -fss http://127.0.0.1:18080/ks/rhel8-minimal.ks -o /tmp/rhel8-minimal-before.ks
+curl -fss http://127.0.0.1:18080/generated/status.json -o /tmp/status-before.json
+
+python3 -m json.tool /tmp/status-before.json >/dev/null
+grep -q '"generated_ks_edit_policy": "preserve"' /tmp/status-before.json
+```
+
+## 3. Simulate an emergency manual edit
+
+```bash
+podman exec "$CID" /bin/sh -lc '
+set -e
+echo "# PHASE6B_MANUAL_EDIT_STILL_HERE" >> /etc/nginx/html/ks/rhel8-minimal.ks
+grep -q "PHASE6B_MANUAL_EDIT_STILL_HERE" /etc/nginx/html/ks/rhel8-minimal.ks
+'
+```
+
+## 4. Regenerate and confirm the manual edit was preserved
+
+```bash
+podman exec "$CID" python3 "$SCRIPT" --once
+
+curl -fss http://127.0.0.1:18080/ks/rhel8-minimal.ks -o /tmp/rhel8-minimal-preserved.ks
+curl -fss http://127.0.0.1:18080/generated/status.json -o /tmp/status-preserved.json
+
+grep -q "PHASE6B_MANUAL_EDIT_STILL_HERE" /tmp/rhel8-minimal-preserved.ks
+grep -q '"preserved_manual_edit": true' /tmp/status-preserved.json
+grep -q '"manual_edit_detected": true' /tmp/status-preserved.json
+```
+
+## 5. Confirm the regenerated candidate was written
+
+```bash
+podman exec "$CID" test -f /etc/nginx/html/generated/preserved-kickstarts/rhel8-minimal.ks.candidate
+podman exec "$CID" grep -q 'url --url=' /etc/nginx/html/generated/preserved-kickstarts/rhel8-minimal.ks.candidate
+```
+
+## 6. Test overwrite mode
+
+```bash
+podman exec "$CID" /bin/sh -lc '
+set -e
+PXE_GENERATED_KS_EDIT_POLICY=overwrite python3 /usr/local/bin/generate-pxe-content.py --once
+grep -q "PHASE6B_MANUAL_EDIT_STILL_HERE" /etc/nginx/html/ks/rhel8-minimal.ks && {
+  echo "ERROR: overwrite policy did not overwrite manual edit"
+  exit 1
+} || true
+test ! -f /etc/nginx/html/generated/preserved-kickstarts/rhel8-minimal.ks.candidate
+grep -q "\"preserved_manual_edit\": false" /etc/nginx/html/generated/kickstart-state/rhel8-minimal.ks.json
+'
+```
+
+## 7. Return to default preserve mode
+
+```bash
+podman exec "$CID" python3 "$SCRIPT" --once
+
+curl -fss http://127.0.0.1:18080/ks/rhel8-minimal.ks -o /tmp/rhel8-minimal-final.ks
+grep -q 'url --url=' /tmp/rhel8-minimal-final.ks
+```
+
+---
+
+## What proves 6B is good
+
+You can merge 6B when these are true:
+
+```text
+python3 -m py_compile passes
+normal generation still works
+manual edit to /ks/rhel8-minimal.ks survives when policy=preserve
+candidate file is written under /generated/preserved-kickstarts/
+status.json shows preserved_manual_edit=true
+policy=overwrite removes the manual edit
+status.json shows generated_ks_edit_policy
+```
+
+No need to re-image a VM for 6B unless you want extra confidence. This phase is mostly about **not clobbering emergency edits**, not changing the actual boot/install behavior.
