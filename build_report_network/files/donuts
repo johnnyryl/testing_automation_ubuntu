@@ -2735,6 +2735,43 @@ def render_status_text(status: Dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def enforce_validation_failure_policy(
+    config: GeneratorConfig,
+    detected: List[DetectedISO],
+    profiles: List[ProfileDefinition],
+) -> None:
+    validation_results = validate_generated_content(config, detected, profiles)
+    summary = validation_summary(validation_results)
+
+    if config.validation_failure_policy == "warn":
+        return
+
+    if summary["error"] == 0:
+        return
+
+    error_lines = []
+
+    for result in validation_results:
+        if result.get("status") != "error":
+            continue
+
+        location = result.get("http_path") or result.get("path") or ""
+        suffix = f" [{location}]" if location else ""
+
+        error_lines.append(
+            f"- {result.get('check_id', 'unknown')}: "
+            f"{result.get('message', '')}{suffix}"
+        )
+
+    joined_errors = "\n".join(error_lines)
+
+    fail(
+        "Validation failed and PXE_VALIDATION_FAILURE_POLICY=fail.\n"
+        f"Validation errors: {summary['error']}\n"
+        f"{joined_errors}"
+    )
+
+
 # =============================================================================
 # Status and index rendering
 # =============================================================================
