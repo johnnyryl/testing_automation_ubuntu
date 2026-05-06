@@ -1,7 +1,14 @@
 
 
 
+CID=pxe-content
 
+podman cp scripts/generate-pxe-content.py "$CID":/usr/local/bin/generate-pxe-content.py
+podman exec "$CID" chmod +x /usr/local/bin/generate-pxe-content.py
+
+podman exec "$CID" grep -n "write_generated_kickstart" /usr/local/bin/generate-pxe-content.py
+podman exec "$CID" grep -n "kickstart-state" /usr/local/bin/generate-pxe-content.py
+podman exec "$CID" grep -n "preserved-kickstarts" /usr/local/bin/generate-pxe-content.py
 
 
 
