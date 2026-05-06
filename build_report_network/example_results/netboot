@@ -999,7 +999,7 @@ def render_name_template(
             watch_interval=1,
             rootpw_hash="",
             allow_default_rootpw=True,
-        )
+        ),
         item,
         profile,
         "",
