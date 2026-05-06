@@ -59,6 +59,9 @@ class GeneratorConfig:
     html_root: Path
     template_root: Path
     profile_root: Path
+    override_root: Path
+    override_template_root: Path
+    override_profile_root: Path
     background_path: str
     watch_interval: int
     rootpw_hash: str
@@ -66,6 +69,8 @@ class GeneratorConfig:
 
     @classmethod
     def from_env(cls) -> "GeneratorConfig":
+        override_root = Path(getenv("PXE_OVERRIDE_ROOT", "/overrides"))
+
         return cls(
             pxe_server=getenv("PXE_SERVER"),
             pxe_port=getenv("PXE_PORT", "18080"),
@@ -73,6 +78,13 @@ class GeneratorConfig:
             html_root=Path(getenv("PXE_HTML_ROOT", "/etc/nginx/html")),
             template_root=Path(getenv("PXE_TEMPLATE_ROOT", "/templates")),
             profile_root=Path(getenv("PXE_PROFILE_ROOT", "/profiles")),
+            override_root=override_root,
+            override_template_root=Path(
+                getenv("PXE_OVERRIDE_TEMPLATE_ROOT", str(override_root / "templates"))
+            ),
+            override_profile_root=Path(
+                getenv("PXE_OVERRIDE_PROFILE_ROOT", str(override_root / "profiles"))
+            ),
             background_path=getenv("PXE_BACKGROUND_PATH", "/ui/background.png"),
             watch_interval=getenv_int("PXE_WATCH_INTERVAL", 15),
             rootpw_hash=getenv("ROOTPW_HASH"),
@@ -585,7 +597,8 @@ BUILTIN_PROFILE_DEFINITIONS: List[ProfileDefinition] = [
 ]
 
 
-def profile_definition_files(profile_root: Path) -> List[Path]:
+def override_profile_definition_files(config: GeneratorConfig) -> List[Path]:
+    return profile_definition_files(config.override_profile_root)
     if not profile_root.is_dir():
         return []
 
@@ -772,16 +785,32 @@ def validate_profile_definitions(profiles: List[ProfileDefinition]) -> None:
 
 
 def load_profile_definitions(config: GeneratorConfig) -> List[ProfileDefinition]:
-    files = profile_definition_files(config.profile_root)
+    base_files = profile_definition_files(config.profile_root)
 
-    if not files:
-        profiles = list(BUILTIN_PROFILE_DEFINITIONS)
-        validate_profile_definitions(profiles)
-        return profiles
+    if not base_files:
+        base_profiles = list(BUILTIN_PROFILE_DEFINITIONS)
+    else:
+        base_profiles = [load_profile_file(path) for path in base_files]
 
-    profiles = [load_profile_file(path) for path in files]
+    override_files = override_profile_definition_files(config)
+    override_profiles = [load_profile_file(path) for path in override_files]
+
+    by_profile_id: Dict[str, ProfileDefinition] = {}
+    profile_order: List[str] = []
+
+    for profile in base_profiles:
+        by_profile_id[profile.profile_id] = profile
+        profile_order.append(profile.profile_id)
+
+    for profile in override_profiles:
+        if profile.profile_id not in by_profile_id:
+            profile_order.append(profile.profile_id)
+
+        by_profile_id[profile.profile_id] = profile
+
+    profiles = [by_profile_id[profile_id] for profile_id in profile_order]
+
     validate_profile_definitions(profiles)
-
     return profiles
 
 
@@ -903,7 +932,7 @@ def render_jinja2_template_text(
     raw: str,
     values: Dict[str, Any],
     source: str,
-    template_root: Path,
+    template_roots: Tuple[Path, ...],
 ) -> str:
     if jinja2 is None:
         fail(
@@ -912,7 +941,12 @@ def render_jinja2_template_text(
         )
 
     environment = jinja2.Environment(
-        loader=jinja2.FileSystemLoader(str(template_root)),
+        loader=jinja2.ChoiceLoader(
+            [
+                jinja2.FileSystemLoader(str(template_root))
+                for template_root in template_roots
+            ]
+        ),
         undefined=jinja2.StrictUndefined,
         autoescape=False,
         keep_trailing_newline=True,
@@ -929,10 +963,10 @@ def render_kickstart_template_text(
     values: Dict[str, Any],
     source: str,
     template_engine: str,
-    template_root: Path,
+    template_roots: Tuple[Path, ...],
 ) -> str:
     if template_engine == "jinja2":
-        return render_jinja2_template_text(raw, values, source, template_root)
+        return render_jinja2_template_text(raw, values, source, template_roots)
 
     if template_engine == "simple":
         return render_simple_template_text(raw, values, source)
@@ -995,18 +1029,18 @@ def kickstart_template_candidates(
     template_path = Path(template_name)
     candidates: List[Path] = []
 
-    # Explicit subdirectory path, such as:
-    #   ks/rhel8-minimal.ks.j2
-    #   profiles/rhel8-developer-workstation.ks.j2
-    candidates.append(config.template_root / template_path)
+    def add_candidates_for_root(root: Path) -> None:
+        if len(template_path.parts) == 1:
+            candidates.append(root / "ks" / template_path)
+            candidates.append(root / template_path)
+        else:
+            candidates.append(root / template_path)
 
-    # Backward-compatible convenience for bare filenames, such as:
-    #   rhel8-minimal.ks.j2
-    # This keeps the old lookup behavior:
-    #   /templates/ks/<filename>
-    #   /templates/<filename>
-    if len(template_path.parts) == 1:
-        candidates.insert(0, config.template_root / "ks" / template_path)
+    # Override templates win first.
+    add_candidates_for_root(config.override_template_root)
+
+    # Base templates are fallback.
+    add_candidates_for_root(config.template_root)
 
     deduped: List[Path] = []
 
@@ -1170,7 +1204,10 @@ class KickstartRenderer:
             values,
             str(resolution.template_path),
             resolution.template_engine,
-            self.config.template_root,
+            (
+                self.config.override_template_root,
+                self.config.template_root,
+            ),
         )
 
     def default_kickstart(self, item: DetectedISO) -> str:
@@ -1681,6 +1718,11 @@ def render_status(
         "pxe_port": config.pxe_port,
         "container_iso_root": str(config.iso_root),
         "html_root": str(config.html_root),
+        "template_root": str(config.template_root),
+        "profile_root": str(config.profile_root),
+        "override_root": str(config.override_root),
+        "override_template_root": str(config.override_template_root),
+        "override_profile_root": str(config.override_profile_root),
         "detected_isos": detected_list,
         "profiles": [
             profile_status(profile)
@@ -1795,10 +1837,16 @@ def watched_paths(config: GeneratorConfig) -> List[Path]:
         )
 
     paths.extend(watched_template_files(config.template_root))
+    paths.extend(watched_template_files(config.override_template_root))
 
     paths.append(config.profile_root)
 
     for path in profile_definition_files(config.profile_root):
+        paths.append(path)
+
+    paths.append(config.override_profile_root)
+
+    for path in profile_definition_files(config.override_profile_root):
         paths.append(path)
 
     paths.append(config.html_root / config.background_path.lstrip("/"))
@@ -1814,6 +1862,9 @@ def watched_env_values(config: GeneratorConfig) -> List[str]:
         str(config.html_root),
         str(config.template_root),
         str(config.profile_root),
+        str(config.override_root),
+        str(config.override_template_root),
+        str(config.override_profile_root),
         config.background_path,
         config.rootpw_hash,
         str(config.allow_default_rootpw),
