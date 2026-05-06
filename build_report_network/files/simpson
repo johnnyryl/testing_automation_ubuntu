@@ -1,4 +1,101 @@
 
+
+
+CID=pxe-content
+
+podman exec -i "$CID" /bin/sh -s <<'SH'
+set -eu
+
+SCRIPT=/usr/local/bin/generate-pxe-content.py
+
+rm -rf /tmp/pxe-7d
+mkdir -p /tmp/pxe-7d/iso/rhel8iso/images/pxeboot
+mkdir -p /tmp/pxe-7d/overrides/profiles
+mkdir -p /tmp/pxe-7d/overrides/templates/ks
+
+touch /tmp/pxe-7d/iso/rhel8iso/images/pxeboot/vmlinuz
+touch /tmp/pxe-7d/iso/rhel8iso/images/pxeboot/initrd.img
+
+cat > /tmp/pxe-7d/overrides/profiles/10-minimal.yml <<'EOF'
+profile_id: minimal
+title: Minimal Installs
+install_label: Minimal
+menu_target: minimal
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+kickstart_template: ks/rhel8-broken.ks.tmpl
+kernel_args:
+  - inst.text
+  - nomodeset
+EOF
+
+cat > /tmp/pxe-7d/overrides/templates/ks/rhel8-broken.ks.tmpl <<'EOF'
+#version=RHEL8
+text
+reboot
+
+# This is intentionally broken so validation fails:
+{% PHASE7D_BROKEN_UNRESOLVED_JINJA_BLOCK %}
+
+lang en_US.UTF-8
+keyboard us
+timezone America/Chicago --utc
+network --bootproto=dhcp --device=link --activate
+rootpw --iscrypted $ROOTPW_HASH
+url --url="$REPO_URL"
+
+%packages
+@^minimal-environment
+%end
+EOF
+
+set +e
+PXE_SERVER=127.0.0.1 \
+PXE_ISO_ROOT=/tmp/pxe-7d/iso \
+PXE_HTML_ROOT=/tmp/pxe-7d/html \
+PXE_OVERRIDE_ROOT=/tmp/pxe-7d/overrides \
+PXE_VALIDATION_FAILURE_POLICY=fail \
+python3 "$SCRIPT" --once > /tmp/pxe-7d/out.txt 2>&1
+rc=$?
+set -e
+
+cat /tmp/pxe-7d/out.txt
+
+if [ "$rc" -eq 0 ]; then
+  echo "ERROR: fail policy did not fail on broken generated content"
+  exit 1
+fi
+
+test -f /tmp/pxe-7d/html/generated/status.json
+test -f /tmp/pxe-7d/html/generated/status.txt
+
+grep -q "Validation failed" /tmp/pxe-7d/out.txt
+grep -q "unresolved_jinja_block" /tmp/pxe-7d/html/generated/status.json
+grep -q '"validation_failure_policy": "fail"' /tmp/pxe-7d/html/generated/status.json
+
+echo "OK: 7D fail policy works and status files were still written"
+SH
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 CID=pxe-content
 SCRIPT=/usr/local/bin/generate-pxe-content.py
 
