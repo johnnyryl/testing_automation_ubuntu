@@ -1,0 +1,24 @@
+CID=pxe-content
+SCRIPT=/usr/local/bin/generate-pxe-content.py
+
+podman exec "$CID" python3 -m py_compile "$SCRIPT"
+podman exec "$CID" python3 "$SCRIPT" --once
+
+curl -fss http://127.0.0.1:18080/generated/status.json -o /tmp/status-7b.json
+curl -fss http://127.0.0.1:18080/generated/status.txt -o /tmp/status-7b.txt
+
+python3 -m json.tool /tmp/status-7b.json >/dev/null
+
+grep -q '"repo_validation"' /tmp/status-7b.json
+grep -q 'repo_metadata_exists' /tmp/status-7b.json
+grep -q 'Repository Content' /tmp/status-7b.txt
+grep -q 'BaseOS' /tmp/status-7b.txt
+grep -q 'AppStream' /tmp/status-7b.txt
+
+
+
+
+
+
+
+  grep -E 'BaseOS|AppStream|repo_metadata_exists' /tmp/status-7b.txt /tmp/status-7b.json
