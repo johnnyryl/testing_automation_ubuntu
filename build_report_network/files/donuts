@@ -64,6 +64,7 @@ class GeneratorConfig:
     override_template_root: Path
     override_profile_root: Path
     generated_ks_edit_policy: str
+    validation_failure_policy: str
     background_path: str
     watch_interval: int
     rootpw_hash: str
