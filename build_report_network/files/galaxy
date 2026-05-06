@@ -1943,6 +1943,399 @@ def write_boot_ipxe(
 
 
 # =============================================================================
+# Validation and health reporting
+# =============================================================================
+
+
+UNRESOLVED_JINJA_BLOCK_RE = re.compile(r"{%\s*[a-zA-Z_]")
+UNRESOLVED_JINJA_VARIABLE_RE = re.compile(r"{{\s*[^}]+\s*}}")
+UNRESOLVED_SHELL_PLACEHOLDER_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def validation_result(
+    check_id: str,
+    status: str,
+    message: str,
+    path: str = "",
+    http_path: str = "",
+    details: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    result: Dict[str, object] = {
+        "check_id": check_id,
+        "status": status,
+        "message": message,
+    }
+
+    if path:
+        result["path"] = path
+
+    if http_path:
+        result["http_path"] = http_path
+
+    if details:
+        result["details"] = details
+
+    return result
+
+
+def validation_summary(results: List[Dict[str, object]]) -> Dict[str, object]:
+    counts = {
+        "ok": 0,
+        "warning": 0,
+        "error": 0,
+    }
+
+    for result in results:
+        status = str(result.get("status", "error"))
+
+        if status not in counts:
+            status = "error"
+
+        counts[status] += 1
+
+    if counts["error"] > 0:
+        health = "error"
+    elif counts["warning"] > 0:
+        health = "warning"
+    else:
+        health = "ok"
+
+    return {
+        "health": health,
+        "total": len(results),
+        "ok": counts["ok"],
+        "warning": counts["warning"],
+        "error": counts["error"],
+    }
+
+
+def validate_file_exists(
+    results: List[Dict[str, object]],
+    check_id: str,
+    path: Path,
+    message: str,
+    http_path: str = "",
+) -> None:
+    if path.is_file():
+        results.append(
+            validation_result(
+                check_id=check_id,
+                status="ok",
+                message=message,
+                path=str(path),
+                http_path=http_path,
+                details={"size_bytes": path.stat().st_size},
+            )
+        )
+        return
+
+    results.append(
+        validation_result(
+            check_id=check_id,
+            status="error",
+            message=f"{message} is missing.",
+            path=str(path),
+            http_path=http_path,
+        )
+    )
+
+
+def validate_directory_exists(
+    results: List[Dict[str, object]],
+    check_id: str,
+    path: Path,
+    message: str,
+) -> None:
+    if path.is_dir():
+        results.append(
+            validation_result(
+                check_id=check_id,
+                status="ok",
+                message=message,
+                path=str(path),
+            )
+        )
+        return
+
+    results.append(
+        validation_result(
+            check_id=check_id,
+            status="error",
+            message=f"{message} is missing.",
+            path=str(path),
+        )
+    )
+
+
+def validate_kickstart_content(
+    results: List[Dict[str, object]],
+    kickstart_name: str,
+    path: Path,
+) -> None:
+    if not path.is_file():
+        return
+
+    content = path.read_text(encoding="utf-8")
+
+    if not content.strip():
+        results.append(
+            validation_result(
+                check_id=f"kickstart_nonempty:{kickstart_name}",
+                status="error",
+                message=f"Generated Kickstart {kickstart_name} is empty.",
+                path=str(path),
+                http_path=f"/ks/{kickstart_name}",
+            )
+        )
+        return
+
+    results.append(
+        validation_result(
+            check_id=f"kickstart_nonempty:{kickstart_name}",
+            status="ok",
+            message=f"Generated Kickstart {kickstart_name} is not empty.",
+            path=str(path),
+            http_path=f"/ks/{kickstart_name}",
+            details={"size_bytes": path.stat().st_size},
+        )
+    )
+
+    unresolved_checks = [
+        (
+            "unresolved_jinja_block",
+            UNRESOLVED_JINJA_BLOCK_RE,
+            "contains an unresolved Jinja block such as {% ... %}",
+            "error",
+        ),
+        (
+            "unresolved_jinja_variable",
+            UNRESOLVED_JINJA_VARIABLE_RE,
+            "contains an unresolved Jinja variable such as {{ ... }}",
+            "error",
+        ),
+        (
+            "unresolved_shell_placeholder",
+            UNRESOLVED_SHELL_PLACEHOLDER_RE,
+            "contains a possible unresolved shell-style placeholder such as ${VAR}",
+            "warning",
+        ),
+    ]
+
+    for check_name, pattern, message, status in unresolved_checks:
+        if pattern.search(content):
+            results.append(
+                validation_result(
+                    check_id=f"{check_name}:{kickstart_name}",
+                    status=status,
+                    message=f"Generated Kickstart {kickstart_name} {message}.",
+                    path=str(path),
+                    http_path=f"/ks/{kickstart_name}",
+                )
+            )
+        else:
+            results.append(
+                validation_result(
+                    check_id=f"{check_name}:{kickstart_name}",
+                    status="ok",
+                    message=f"Generated Kickstart {kickstart_name} passed check {check_name}.",
+                    path=str(path),
+                    http_path=f"/ks/{kickstart_name}",
+                )
+            )
+
+
+def validate_generated_content(
+    config: GeneratorConfig,
+    detected: List[DetectedISO],
+    profiles: List[ProfileDefinition],
+) -> List[Dict[str, object]]:
+    results: List[Dict[str, object]] = []
+
+    validate_directory_exists(
+        results,
+        "html_root_exists",
+        config.html_root,
+        "HTML root exists",
+    )
+
+    validate_directory_exists(
+        results,
+        "generated_dir_exists",
+        config.html_root / "generated",
+        "Generated metadata directory exists",
+    )
+
+    validate_directory_exists(
+        results,
+        "kickstart_output_dir_exists",
+        config.html_root / "ks",
+        "Kickstart output directory exists",
+    )
+
+    validate_file_exists(
+        results,
+        "boot_ipxe_exists",
+        config.html_root / "boot.ipxe",
+        "boot.ipxe exists",
+        "/boot.ipxe",
+    )
+
+    for item in detected:
+        validate_directory_exists(
+            results,
+            f"iso_tree_exists:{item.os_id}",
+            item.iso_path,
+            f"ISO tree exists for {item.os_id}",
+        )
+
+        validate_file_exists(
+            results,
+            f"pxeboot_vmlinuz_exists:{item.os_id}",
+            item.iso_path / "images" / "pxeboot" / "vmlinuz",
+            f"PXE kernel exists for {item.os_id}",
+            f"/{item.http_path}/images/pxeboot/vmlinuz",
+        )
+
+        validate_file_exists(
+            results,
+            f"pxeboot_initrd_exists:{item.os_id}",
+            item.iso_path / "images" / "pxeboot" / "initrd.img",
+            f"PXE initrd exists for {item.os_id}",
+            f"/{item.http_path}/images/pxeboot/initrd.img",
+        )
+
+    for profile in profiles:
+        if not profile.implemented:
+            continue
+
+        for item in detected:
+            if not profile_has_install_option(item, profile):
+                continue
+
+            kickstart_name = profile_kickstart_name(item, profile)
+            kickstart_path = config.html_root / "ks" / kickstart_name
+
+            validate_file_exists(
+                results,
+                f"kickstart_exists:{kickstart_name}",
+                kickstart_path,
+                f"Generated Kickstart exists for {item.os_id} {profile.profile_id}",
+                f"/ks/{kickstart_name}",
+            )
+
+            validate_kickstart_content(results, kickstart_name, kickstart_path)
+
+    return results
+
+
+def render_status_text(status: Dict[str, object]) -> str:
+    summary = status["validation_summary"]
+    results = status["validation_results"]
+
+    lines = [
+        "AeroLIT PXE Content Status",
+        "==========================",
+        "",
+        f"PXE server: {status['pxe_server']}",
+        f"PXE port: {status['pxe_port']}",
+        f"HTML root: {status['html_root']}",
+        f"ISO root: {status['container_iso_root']}",
+        "",
+        "Validation Summary",
+        "------------------",
+        f"Health: {summary['health']}",
+        f"Total checks: {summary['total']}",
+        f"OK: {summary['ok']}",
+        f"Warnings: {summary['warning']}",
+        f"Errors: {summary['error']}",
+        "",
+        "Detected ISOs",
+        "-------------",
+    ]
+
+    detected_isos = status["detected_isos"]
+
+    if detected_isos:
+        for item in detected_isos:
+            lines.append(
+                f"- {item['os_id']}: {item['title']} from {item['iso_path']}"
+            )
+    else:
+        lines.append("- none")
+
+    lines.extend(
+        [
+            "",
+            "Generated Kickstarts",
+            "--------------------",
+        ]
+    )
+
+    generated_kickstarts = status["generated_kickstarts"]
+
+    if generated_kickstarts:
+        for item in generated_kickstarts:
+            state = item.get("emergency_edit_state", {})
+            source = item.get(
+                "template_source_detail",
+                item.get("template_source", "unknown"),
+            )
+
+            if isinstance(state, dict) and state.get("preserved_manual_edit") is True:
+                source = "preserved-manual-edit"
+
+            lines.append(
+                f"- {item['kickstart']} "
+                f"profile={item['profile_id']} "
+                f"os={item['os_id']} "
+                f"source={source}"
+            )
+    else:
+        lines.append("- none")
+
+    stale_kickstarts = status.get("stale_kickstarts", [])
+
+    lines.extend(
+        [
+            "",
+            "Stale Kickstarts",
+            "----------------",
+        ]
+    )
+
+    if stale_kickstarts:
+        for item in stale_kickstarts:
+            lines.append(
+                f"- {item.get('kickstart', item.get('kickstart_name', 'unknown'))} "
+                f"action={item.get('action', 'unknown')} "
+                f"reason={item.get('reason', 'unknown')}"
+            )
+    else:
+        lines.append("- none")
+
+    lines.extend(
+        [
+            "",
+            "Validation Results",
+            "------------------",
+        ]
+    )
+
+    for result in results:
+        location = result.get("http_path") or result.get("path") or ""
+        suffix = f" [{location}]" if location else ""
+
+        lines.append(
+            f"- [{str(result['status']).upper()}] "
+            f"{result['check_id']}: {result['message']}{suffix}"
+        )
+
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+# =============================================================================
 # Status and index rendering
 # =============================================================================
 
@@ -2059,6 +2452,10 @@ def render_status(
         if profile.show_in_main_menu and not profile.implemented
     ]
 
+    generated_kickstarts = generated_kickstart_status(config, detected, profiles)
+    validation_results = validate_generated_content(config, detected, profiles)
+    summary = validation_summary(validation_results)
+
     status = {
         "generator": {
             "generated_at": utc_timestamp(),
@@ -2094,14 +2491,22 @@ def render_status(
         "visible_profiles": visible_profiles,
         "enabled_profiles": enabled_profiles,
         "unimplemented_profiles": unimplemented_profiles,
-        "generated_kickstarts": generated_kickstart_status(config, detected, profiles),
+        "generated_kickstarts": generated_kickstarts,
         "stale_kickstarts": stale_kickstarts,
+        "validation_summary": summary,
+        "validation_results": validation_results,
         "boot_menu": "/boot.ipxe",
+        "status_text": "/generated/status.txt",
     }
 
     atomic_write(
         generated_dir / "status.json",
         json.dumps(status, indent=2, sort_keys=True) + "\n",
+    )
+
+    atomic_write(
+        generated_dir / "status.txt",
+        render_status_text(status),
     )
 
     inventory_lines = [
@@ -2151,7 +2556,9 @@ def render_index(
         lines.append(f"<li>{profile.title}: {state}</li>")
 
     generated_kickstarts = generated_kickstart_status(config, detected, profiles)
-
+    validation_results = validate_generated_content(config, detected, profiles)
+    summary = validation_summary(validation_results)
+    
     preserved_manual_count = 0
     generated_count = len(generated_kickstarts)
 
@@ -2176,6 +2583,14 @@ def render_index(
     lines.extend(
         [
             "</ul>",
+            "<h2>Health</h2>",
+            "<ul>",
+            f"<li>Health: {summary['health']}</li>",
+            f"<li>Validation checks: {summary['total']}</li>",
+            f"<li>OK: {summary['ok']}</li>",
+            f"<li>Warnings: {summary['warning']}</li>",
+            f"<li>Errors: {summary['error']}</li>",
+            "</ul>",
             "<h2>Generation Policy</h2>",
             "<ul>",
             f"<li>Kickstart edit policy: {config.generated_ks_edit_policy}</li>",
@@ -2199,6 +2614,7 @@ def render_index(
             "<ul>",
             '<li><a href="/boot.ipxe">boot.ipxe</a></li>',
             '<li><a href="/generated/status.json">generated/status.json</a></li>',
+            '<li><a href="/generated/status.txt">generated/status.txt</a></li>',
             '<li><a href="/generated/isos.txt">generated/isos.txt</a></li>',
             "</ul>",
             "</body>",
