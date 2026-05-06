@@ -1251,6 +1251,98 @@ def generated_kickstart_state_status(
     return state
 
 
+def cleanup_stale_kickstarts(
+    config: GeneratorConfig,
+    expected_kickstarts: Iterable[str],
+) -> List[Dict[str, object]]:
+    ks_dir = config.html_root / "ks"
+    expected = set(expected_kickstarts)
+    stale_actions: List[Dict[str, object]] = []
+
+    if not ks_dir.is_dir():
+        return stale_actions
+
+    for destination in sorted(ks_dir.glob("*.ks")):
+        kickstart_name = destination.name
+
+        if kickstart_name in expected:
+            continue
+
+        state_path = kickstart_state_path(config, destination)
+        candidate_path = kickstart_candidate_path(config, destination)
+
+        action: Dict[str, object] = {
+            "kickstart_name": kickstart_name,
+            "kickstart": f"/ks/{kickstart_name}",
+            "output_path": str(destination),
+            "state_path": str(state_path),
+        }
+
+        if not state_path.is_file():
+            action.update(
+                {
+                    "action": "preserved",
+                    "reason": "unmanaged Kickstart; no generator state file exists",
+                    "manual_edit_detected": None,
+                }
+            )
+            stale_actions.append(action)
+            continue
+
+        state = read_json_mapping(state_path)
+        last_generated_sha = str(state.get("last_generated_sha256", ""))
+        current_sha = sha256_file(destination)
+
+        if last_generated_sha and current_sha == last_generated_sha:
+            destination.unlink()
+
+            if candidate_path.exists():
+                candidate_path.unlink()
+
+            state_path.unlink()
+
+            action.update(
+                {
+                    "action": "deleted",
+                    "reason": "stale generated Kickstart matched last generated hash",
+                    "manual_edit_detected": False,
+                    "last_generated_sha256": last_generated_sha,
+                    "current_output_sha256": current_sha,
+                }
+            )
+            stale_actions.append(action)
+            continue
+
+        reason = (
+            "manual edit detected; stale Kickstart preserved"
+            if last_generated_sha
+            else "generator state exists but last_generated_sha256 is missing; stale Kickstart preserved"
+        )
+
+        state["stale"] = True
+        state["stale_action"] = "preserved"
+        state["stale_reason"] = reason
+        state["updated_at_epoch"] = int(time.time())
+
+        atomic_write(
+            state_path,
+            json.dumps(state, indent=2, sort_keys=True) + "\n",
+        )
+
+        action.update(
+            {
+                "action": "preserved",
+                "reason": reason,
+                "manual_edit_detected": bool(last_generated_sha),
+                "last_generated_sha256": last_generated_sha or None,
+                "current_output_sha256": current_sha,
+            }
+        )
+        stale_actions.append(action)
+
+    return stale_actions
+
+
 def ensure_output_directories(config: GeneratorConfig) -> None:
     config.html_root.mkdir(parents=True, exist_ok=True)
     (config.html_root / "ks").mkdir(parents=True, exist_ok=True)
@@ -1302,14 +1394,20 @@ class KickstartRenderer:
         self,
         detected: Iterable[DetectedISO],
         profiles: Iterable[ProfileDefinition],
-    ) -> None:
+    ) -> Tuple[str, ...]:
+        expected_kickstarts: List[str] = []
+
         for profile in profiles:
             if not profile.implemented:
                 continue
 
             for item in detected:
                 if profile_has_install_option(item, profile):
+                    kickstart_name = profile_kickstart_name(item, profile)
+                    expected_kickstarts.append(kickstart_name)
                     self.render_one(item, profile)
+
+        return tuple(sorted(set(expected_kickstarts)))
 
     def render_one(self, item: DetectedISO, profile: ProfileDefinition) -> None:
         destination = self.config.html_root / "ks" / profile_kickstart_name(item, profile)
@@ -1842,6 +1940,7 @@ def render_status(
     config: GeneratorConfig,
     detected: List[DetectedISO],
     profiles: List[ProfileDefinition],
+    stale_kickstarts: List[Dict[str, object]],
 ) -> None:
     generated_dir = config.html_root / "generated"
     generated_dir.mkdir(parents=True, exist_ok=True)
@@ -1887,6 +1986,7 @@ def render_status(
         "enabled_profiles": enabled_profiles,
         "unimplemented_profiles": unimplemented_profiles,
         "generated_kickstarts": generated_kickstart_status(config, detected, profiles),
+        "stale_kickstarts": stale_kickstarts,
         "boot_menu": "/boot.ipxe",
     }
 
@@ -2059,9 +2159,14 @@ def generate_once(config: GeneratorConfig) -> None:
 
     ensure_output_directories(config)
 
-    KickstartRenderer(config, rootpw_hash).render_all(detected, profiles)
+    expected_kickstarts = KickstartRenderer(config, rootpw_hash).render_all(
+        detected,
+        profiles,
+    )
+    stale_kickstarts = cleanup_stale_kickstarts(config, expected_kickstarts)
+
     write_boot_ipxe(config, detected, profiles)
-    render_status(config, detected, profiles)
+    render_status(config, detected, profiles, stale_kickstarts)
     render_index(config, detected, profiles)
 
     detected_names = ", ".join(item.os_id for item in detected) if detected else "none"
