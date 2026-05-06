@@ -1,3 +1,47 @@
+CID=pxe-content
+SCRIPT=/usr/local/bin/generate-pxe-content.py
+
+podman exec "$CID" /bin/sh -lc '
+  set -e
+  rm -rf /overrides/templates/ks
+  mkdir -p /overrides/templates/ks
+
+  python3 /usr/local/bin/generate-pxe-content.py --watch &
+  WATCH_PID=$!
+
+  sleep 2
+
+  cat > /overrides/templates/ks/rhel8-minimal.ks.j2 <<EOF
+# PHASE6E WATCH OVERRIDE WORKED
+#version=RHEL{{ os_major }}
+{% include "partials/install-mode-text.ks.j2" %}
+{% include "partials/language-keyboard.ks.j2" %}
+{% include "partials/timezone.ks.j2" %}
+{% include "partials/network-dhcp.ks.j2" %}
+{% include "partials/root-password.ks.j2" %}
+{% include "partials/repo-url.ks.j2" %}
+{% include "partials/storage-default-lvm.ks.j2" %}
+{% include "partials/packages-minimal.ks.j2" %}
+{% include "partials/services-basic.ks.j2" %}
+{% include "partials/kdump-enabled.ks.j2" %}
+{% include "partials/post-empty.ks.j2" %}
+EOF
+
+  sleep 20
+
+  grep -q "PHASE6E WATCH OVERRIDE WORKED" /etc/nginx/html/ks/rhel8-minimal.ks
+
+  kill "$WATCH_PID"
+
+  echo "OK: watch mode noticed override template change"
+'
+
+
+
+
+
+
+
 set -e
 
 CID=pxe-content
