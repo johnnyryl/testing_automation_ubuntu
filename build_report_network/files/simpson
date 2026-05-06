@@ -1,3 +1,14 @@
+podman exec "$CID" python3 /usr/local/bin/generate-pxe-content.py --once
+
+
+curl -fss http://127.0.0.1:18080/generated/status.json -o /tmp/status.json
+python3 -m json.tool /tmp/status.json >/dev/null
+grep -q '"validation_failure_policy": "warn"' /tmp/status.json
+
+
+
+
+
 
 
 
