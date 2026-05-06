@@ -1,0 +1,2933 @@
+#!/usr/bin/env python3
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import time
+from datetime import datetime, timezone
+from dataclasses import dataclass
+from pathlib import Path
+from string import Template
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+
+try:
+    import jinja2
+except ImportError:
+    jinja2 = None
+
+
+# =============================================================================
+# Config loading
+# =============================================================================
+
+
+def getenv(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
+
+
+def getenv_bool(name: str, default: bool = False) -> bool:
+    raw = getenv(name, str(default)).lower()
+    return raw in ("1", "true", "yes", "y", "on")
+
+
+def getenv_int(name: str, default: int) -> int:
+    raw = getenv(name, str(default))
+
+    try:
+        return int(raw)
+    except ValueError:
+        fail(f"{name} must be an integer. Got: {raw}")
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"ERROR: {message}")
+
+
+@dataclass(frozen=True)
+class GeneratorConfig:
+    pxe_server: str
+    pxe_port: str
+    iso_root: Path
+    html_root: Path
+    template_root: Path
+    profile_root: Path
+    override_root: Path
+    override_template_root: Path
+    override_profile_root: Path
+    generated_ks_edit_policy: str
+    background_path: str
+    watch_interval: int
+    rootpw_hash: str
+    allow_default_rootpw: bool
+
+    @classmethod
+    def from_env(cls) -> "GeneratorConfig":
+        override_root = Path(getenv("PXE_OVERRIDE_ROOT", "/overrides"))
+
+        return cls(
+            pxe_server=getenv("PXE_SERVER"),
+            pxe_port=getenv("PXE_PORT", "18080"),
+            iso_root=Path(getenv("PXE_ISO_ROOT", "/iso")),
+            html_root=Path(getenv("PXE_HTML_ROOT", "/etc/nginx/html")),
+            template_root=Path(getenv("PXE_TEMPLATE_ROOT", "/templates")),
+            profile_root=Path(getenv("PXE_PROFILE_ROOT", "/profiles")),
+            override_root=override_root,
+            override_template_root=Path(
+                getenv("PXE_OVERRIDE_TEMPLATE_ROOT", str(override_root / "templates"))
+            ),
+            override_profile_root=Path(
+                getenv("PXE_OVERRIDE_PROFILE_ROOT", str(override_root / "profiles"))
+            ),
+            generated_ks_edit_policy=getenv("PXE_GENERATED_KS_EDIT_POLICY", "preserve").lower(),
+            background_path=getenv("PXE_BACKGROUND_PATH", "/ui/background.png"),
+            watch_interval=getenv_int("PXE_WATCH_INTERVAL", 15),
+            rootpw_hash=getenv("ROOTPW_HASH"),
+            allow_default_rootpw=getenv_bool("ALLOW_DEFAULT_ROOTPW", True),
+        )
+
+    def resolved_rootpw_hash(self) -> str:
+        if self.rootpw_hash:
+            return self.rootpw_hash
+
+        if self.allow_default_rootpw:
+            return DEFAULT_ROOTPW_HASH
+
+        fail("ROOTPW_HASH is required unless ALLOW_DEFAULT_ROOTPW=true.")
+        return ""
+
+    def validate(self) -> None:
+        if not self.pxe_server:
+            fail("PXE_SERVER is required.")
+
+        if self.watch_interval < 1:
+            fail("PXE_WATCH_INTERVAL must be 1 or greater.")
+
+        if self.generated_ks_edit_policy not in ("preserve", "overwrite"):
+            fail(
+                "PXE_GENERATED_KS_EDIT_POLICY must be one of: "
+                "preserve, overwrite."
+            )
+
+
+# Default password is "changeme".
+DEFAULT_ROOTPW_HASH = "$6$REKKqe02R3z8Y64USCA2sFUk/H/4dPEAZ/CqSX2Rauff3tbR00t2apKmPTbXAXUALwgwHWXdoggAKOQQuJ6PWWCavgQi35S8XAIj5P/"
+
+
+# =============================================================================
+# OS definitions
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class OSDefinition:
+    os_id: str
+    major: int
+    title: str
+    iso_dir: str
+    ks_template: str
+    uefi: bool
+    bios: bool
+
+    @property
+    def ks_name(self) -> str:
+        return f"{self.os_id}-minimal.ks"
+
+    @property
+    def uefi_target(self) -> str:
+        return f"{self.os_id}_minimal_uefi"
+
+    @property
+    def bios_target(self) -> str:
+        return f"{self.os_id}_minimal_bios"
+
+
+@dataclass(frozen=True)
+class DetectedISO:
+    definition: OSDefinition
+    iso_path: Path
+
+    @property
+    def os_id(self) -> str:
+        return self.definition.os_id
+
+    @property
+    def major(self) -> int:
+        return self.definition.major
+
+    @property
+    def title(self) -> str:
+        return self.definition.title
+
+    @property
+    def iso_dir(self) -> str:
+        return self.definition.iso_dir
+
+    @property
+    def ks_template(self) -> str:
+        return self.definition.ks_template
+
+    @property
+    def ks_name(self) -> str:
+        return self.definition.ks_name
+
+    @property
+    def http_path(self) -> str:
+        return self.os_id
+
+    @property
+    def uefi(self) -> bool:
+        return self.definition.uefi
+
+    @property
+    def bios(self) -> bool:
+        return self.definition.bios
+
+    @property
+    def uefi_target(self) -> str:
+        return self.definition.uefi_target
+
+    @property
+    def bios_target(self) -> str:
+        return self.definition.bios_target
+
+
+OS_DEFINITIONS: List[OSDefinition] = [
+    OSDefinition(
+        os_id="rhel10",
+        major=10,
+        title="RHEL 10",
+        iso_dir="rhel10iso",
+        ks_template="rhel10-minimal.ks.j2",
+        uefi=True,
+        bios=False,
+    ),
+    OSDefinition(
+        os_id="rhel9",
+        major=9,
+        title="RHEL 9",
+        iso_dir="rhel9iso",
+        ks_template="rhel9-minimal.ks.j2",
+        uefi=True,
+        bios=False,
+    ),
+    OSDefinition(
+        os_id="rhel8",
+        major=8,
+        title="RHEL 8",
+        iso_dir="rhel8iso",
+        ks_template="rhel8-minimal.ks.j2",
+        uefi=True,
+        bios=True,
+    ),
+    OSDefinition(
+        os_id="rhel7",
+        major=7,
+        title="RHEL 7",
+        iso_dir="rhel7iso",
+        ks_template="rhel7-minimal.ks.j2",
+        uefi=False,
+        bios=True,
+    ),
+]
+
+
+# =============================================================================
+# Profile definitions
+# =============================================================================
+
+
+SAFE_PROFILE_IDENTIFIER_RE = re.compile(r"^[a-z0-9][a-z0-9_]*$")
+YAML_BOOL_FIELD_RE = re.compile(
+    r"^\s*(implemented|show_in_main_menu|uefi|bios)\s*:\s*([^#\n]*?)(?:\s+#.*)?$"
+)
+SIMPLE_JINJA_VARIABLE_RE = re.compile(r"{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}")
+
+RESERVED_MENU_TARGETS = {
+    "main",
+    "rescue",
+    "shell",
+}
+
+DEFAULT_KERNEL_ARGS: Tuple[str, ...] = ("inst.text", "nomodeset")
+
+RESERVED_KERNEL_ARG_PREFIXES: Tuple[str, ...] = (
+    "initrd=",
+    "ip=",
+    "inst.repo=",
+    "inst.stage2=",
+    "inst.ks=",
+)
+
+
+def validate_safe_identifier(value: str, field: str, source: str) -> None:
+    if not SAFE_PROFILE_IDENTIFIER_RE.match(value):
+        fail(
+            f"Profile file {source} field {field} has invalid value: {value!r}. "
+            "Use lowercase letters, numbers, and underscores only. "
+            "It must start with a lowercase letter or number."
+        )
+
+
+def require_string_field(data: Dict[str, Any], field: str, source: str) -> str:
+    if field not in data:
+        fail(f"Profile file {source} is missing required field: {field}")
+
+    value = data[field]
+
+    if not isinstance(value, str):
+        fail(
+            f"Profile file {source} field {field} must be a string. "
+            f"Got: {type(value).__name__}"
+        )
+
+    value = value.strip()
+
+    if not value:
+        fail(f"Profile file {source} field {field} cannot be empty.")
+
+    if "\n" in value or "\r" in value:
+        fail(f"Profile file {source} field {field} must be a single-line string.")
+
+    return value
+
+
+def optional_string_field(
+    data: Dict[str, Any],
+    field: str,
+    source: str,
+    default: str = "",
+) -> str:
+    if field not in data or data[field] is None:
+        return default
+
+    value = data[field]
+
+    if not isinstance(value, str):
+        fail(
+            f"Profile file {source} field {field} must be a string. "
+            f"Got: {type(value).__name__}"
+        )
+
+    value = value.strip()
+
+    if "\n" in value or "\r" in value:
+        fail(f"Profile file {source} field {field} must be a single-line string.")
+
+    return value
+
+
+def require_bool_field(data: Dict[str, Any], field: str, source: str) -> bool:
+    if field not in data:
+        fail(f"Profile file {source} is missing required field: {field}")
+
+    value = data[field]
+
+    if not isinstance(value, bool):
+        fail(
+            f"Profile file {source} field {field} must be a YAML boolean true/false. "
+            f"Do not quote booleans. Got: {value!r}"
+        )
+
+    return value
+
+
+def optional_bool_field(
+    data: Dict[str, Any],
+    field: str,
+    source: str,
+    default: bool,
+) -> bool:
+    if field not in data:
+        return default
+
+    value = data[field]
+
+    if not isinstance(value, bool):
+        fail(
+            f"Profile file {source} field {field} must be a YAML boolean true/false. "
+            f"Do not quote booleans. Got: {value!r}"
+        )
+
+    return value
+
+
+def optional_string_list_field(
+    data: Dict[str, Any],
+    field: str,
+    source: str,
+    default: Tuple[str, ...] = (),
+) -> Tuple[str, ...]:
+    if field not in data or data[field] is None:
+        return default
+
+    value = data[field]
+
+    if not isinstance(value, list):
+        fail(f"Profile file {source} field {field} must be a YAML list.")
+
+    parsed: List[str] = []
+
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            fail(
+                f"Profile file {source} field {field}[{index}] must be a string. "
+                f"Got: {type(item).__name__}"
+            )
+
+        item = item.strip()
+
+        if not item:
+            fail(f"Profile file {source} field {field}[{index}] cannot be empty.")
+
+        parsed.append(item)
+
+    return tuple(parsed)
+
+
+def validate_yaml_boolean_literals(raw: str, source: str) -> None:
+    for line_number, line in enumerate(raw.splitlines(), start=1):
+        match = YAML_BOOL_FIELD_RE.match(line)
+
+        if not match:
+            continue
+
+        field = match.group(1)
+        value = match.group(2).strip()
+
+        if not value:
+            fail(
+                f"Profile file {source} field {field} on line {line_number} "
+                "must be literal true or false."
+            )
+
+        if value not in ("true", "false"):
+            fail(
+                f"Profile file {source} field {field} on line {line_number} "
+                f"must be literal true or false. Got: {value!r}. "
+                "Do not quote booleans and do not use yes/no/on/off."
+            )
+
+
+def load_yaml_mapping(raw: str, source: str) -> Dict[str, Any]:
+    if yaml is None:
+        fail(
+            "PyYAML is required when profile YAML files are present. "
+            "Install py3-yaml on Alpine or python3-pyyaml on RHEL."
+        )
+
+    class UniqueKeySafeLoader(yaml.SafeLoader):
+        pass
+
+    def construct_mapping(loader: Any, node: Any, deep: bool = False) -> Dict[Any, Any]:
+        mapping: Dict[Any, Any] = {}
+
+        for key_node, value_node in node.value:
+            key = loader.construct_object(key_node, deep=deep)
+
+            if key in mapping:
+                line_number = key_node.start_mark.line + 1
+                fail(
+                    f"Profile file {source} contains duplicate YAML key {key!r} "
+                    f"on line {line_number}."
+                )
+
+            mapping[key] = loader.construct_object(value_node, deep=deep)
+
+        return mapping
+
+    UniqueKeySafeLoader.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+        construct_mapping,
+    )
+
+    data = yaml.load(raw, Loader=UniqueKeySafeLoader)
+
+    if data is None:
+        fail(f"Profile file {source} is empty.")
+
+    if not isinstance(data, dict):
+        fail(f"Profile file {source} must contain a YAML mapping/object.")
+
+    for key in data:
+        if not isinstance(key, str):
+            fail(
+                f"Profile file {source} contains a non-string YAML key: {key!r}. "
+                "All profile fields must use string keys."
+            )
+
+    return data
+
+
+@dataclass(frozen=True)
+class ProfileDefinition:
+    profile_id: str
+    title: str
+    install_label: str
+    menu_target: str
+    implemented: bool
+    show_in_main_menu: bool = True
+    uefi: bool = True
+    bios: bool = True
+    supported_os: Tuple[str, ...] = ()
+    kickstart_template: str = ""
+    kernel_args: Tuple[str, ...] = DEFAULT_KERNEL_ARGS
+    source: str = "built-in"
+
+    @property
+    def legacy_target(self) -> str:
+        return f"{self.menu_target}_legacy"
+
+    @property
+    def profile_slug(self) -> str:
+        return self.profile_id.replace("_", "-")
+
+    def supports_os(self, item: DetectedISO) -> bool:
+        return not self.supported_os or item.os_id in self.supported_os
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], source: str) -> "ProfileDefinition":
+        profile_id = require_string_field(data, "profile_id", source)
+        title = require_string_field(data, "title", source)
+        install_label = require_string_field(data, "install_label", source)
+        menu_target = require_string_field(data, "menu_target", source)
+
+        validate_safe_identifier(profile_id, "profile_id", source)
+        validate_safe_identifier(menu_target, "menu_target", source)
+
+        implemented = require_bool_field(data, "implemented", source)
+        show_in_main_menu = optional_bool_field(data, "show_in_main_menu", source, True)
+        uefi = optional_bool_field(data, "uefi", source, True)
+        bios = optional_bool_field(data, "bios", source, True)
+
+        supported_os = optional_string_list_field(data, "supported_os", source)
+        kickstart_template = optional_string_field(data, "kickstart_template", source)
+        kernel_args = optional_string_list_field(
+            data,
+            "kernel_args",
+            source,
+            default=DEFAULT_KERNEL_ARGS,
+        )
+
+        return cls(
+            profile_id=profile_id,
+            title=title,
+            install_label=install_label,
+            menu_target=menu_target,
+            implemented=implemented,
+            show_in_main_menu=show_in_main_menu,
+            uefi=uefi,
+            bios=bios,
+            supported_os=supported_os,
+            kickstart_template=kickstart_template,
+            kernel_args=kernel_args,
+            source=source,
+        )
+
+
+BUILTIN_PROFILE_DEFINITIONS: List[ProfileDefinition] = [
+    ProfileDefinition(
+        profile_id="minimal",
+        title="Minimal Installs",
+        install_label="Minimal",
+        menu_target="minimal",
+        implemented=True,
+        supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
+        kickstart_template="ks/{{ os_id }}-minimal.ks.j2",
+        kernel_args=("inst.text", "nomodeset"),
+    ),
+
+    # Future profile sets.
+    # These are visible as safe placeholders.
+    # implemented=False prevents real boot targets and kickstarts from being generated.
+    ProfileDefinition(
+        profile_id="security_baseline",
+        title="Security Baseline Installs",
+        install_label="Security Baseline",
+        menu_target="security_baseline",
+        implemented=False,
+        show_in_main_menu=True,
+        supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
+        kickstart_template="ks/{{ os_id }}-security-baseline.ks.j2",
+        kernel_args=("inst.text", "nomodeset"),
+    ),
+    ProfileDefinition(
+        profile_id="security_luks",
+        title="Security + LUKS Installs",
+        install_label="Security + LUKS",
+        menu_target="security_luks",
+        implemented=False,
+        show_in_main_menu=True,
+        supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
+        kickstart_template="ks/{{ os_id }}-security-luks.ks.j2",
+        kernel_args=("inst.text", "nomodeset"),
+    ),
+    ProfileDefinition(
+        profile_id="small_disk",
+        title="Small Disk Installs",
+        install_label="Small Disk",
+        menu_target="small_disk",
+        implemented=True,
+        show_in_main_menu=True,
+        supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
+        kickstart_template="ks/{{ os_id }}-small-disk.ks.j2",
+        kernel_args=("inst.text", "nomodeset"),
+    ),
+    ProfileDefinition(
+        profile_id="developer_workstation",
+        title="Developer Workstation Installs",
+        install_label="Developer Workstation",
+        menu_target="developer_workstation",
+        implemented=False,
+        show_in_main_menu=True,
+        supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
+        kickstart_template="ks/{{ os_id }}-developer-workstation.ks.j2",
+        kernel_args=("inst.text", "nomodeset"),
+    ),
+    ProfileDefinition(
+        profile_id="embedded_edge",
+        title="Embedded / Edge Hardware Installs",
+        install_label="Embedded / Edge",
+        menu_target="embedded_edge",
+        implemented=False,
+        show_in_main_menu=True,
+        supported_os=("rhel10", "rhel9", "rhel8", "rhel7"),
+        kickstart_template="ks/{{ os_id }}-embedded-edge.ks.j2",
+        kernel_args=("inst.text", "nomodeset"),
+    ),
+]
+
+
+def profile_definition_files(profile_root: Path) -> List[Path]:
+    if not profile_root.is_dir():
+        return []
+
+    files: List[Path] = []
+    files.extend(sorted(profile_root.glob("*.yml")))
+    files.extend(sorted(profile_root.glob("*.yaml")))
+
+    return files
+
+
+def override_profile_definition_files(config: GeneratorConfig) -> List[Path]:
+    return profile_definition_files(config.override_profile_root)
+
+
+def load_profile_file(path: Path) -> ProfileDefinition:
+    source = str(path)
+    raw = path.read_text(encoding="utf-8")
+
+    validate_yaml_boolean_literals(raw, source)
+    data = load_yaml_mapping(raw, source)
+
+    return ProfileDefinition.from_dict(data, source=source)
+
+
+def validate_relative_template_path(value: str, profile_id: str, field: str) -> None:
+    template_path = Path(value)
+
+    if not value:
+        fail(f"Profile {profile_id} {field} cannot be empty.")
+
+    if template_path.is_absolute():
+        fail(
+            f"Profile {profile_id} {field} must be relative. "
+            f"Got: {value}"
+        )
+
+    if ".." in template_path.parts:
+        fail(
+            f"Profile {profile_id} {field} must not contain '..'. "
+            f"Got: {value}"
+        )
+
+    if "\n" in value or "\r" in value:
+        fail(f"Profile {profile_id} {field} must not contain newlines.")
+
+
+def validate_kernel_arg(profile_id: str, index: int, arg: str) -> None:
+    if not isinstance(arg, str):
+        fail(f"Profile {profile_id} kernel_args[{index}] must be a string.")
+
+    if not arg.strip():
+        fail(f"Profile {profile_id} kernel_args[{index}] cannot be empty.")
+
+    if "\n" in arg or "\r" in arg:
+        fail(f"Profile {profile_id} kernel_args[{index}] must not contain newlines.")
+
+    if any(character.isspace() for character in arg):
+        fail(
+            f"Profile {profile_id} kernel_args[{index}] must be one kernel argument "
+            f"with no whitespace. Got: {arg!r}"
+        )
+
+    for prefix in RESERVED_KERNEL_ARG_PREFIXES:
+        if arg.startswith(prefix):
+            fail(
+                f"Profile {profile_id} kernel_args[{index}] must not set generated "
+                f"kernel argument {prefix!r}. Got: {arg!r}"
+            )
+
+
+def validate_profile_definitions(profiles: List[ProfileDefinition]) -> None:
+    if not profiles:
+        fail("At least one PXE profile must be defined.")
+
+    profile_ids = set()
+    known_os_ids = {definition.os_id for definition in OS_DEFINITIONS}
+    visible_profile_count = 0
+
+    target_sources: Dict[str, str] = {
+        target: "reserved iPXE menu target"
+        for target in RESERVED_MENU_TARGETS
+    }
+
+    for profile in profiles:
+        source = profile.source
+
+        if not profile.profile_id:
+            fail(f"Profile from {source} has an empty profile_id.")
+
+        if not profile.title:
+            fail(f"Profile {profile.profile_id} has an empty title.")
+
+        if not profile.install_label:
+            fail(f"Profile {profile.profile_id} has an empty install_label.")
+
+        if not profile.menu_target:
+            fail(f"Profile {profile.profile_id} has an empty menu_target.")
+
+        validate_safe_identifier(profile.profile_id, "profile_id", source)
+        validate_safe_identifier(profile.menu_target, "menu_target", source)
+
+        if not isinstance(profile.implemented, bool):
+            fail(f"Profile {profile.profile_id} field implemented must be a boolean.")
+
+        if not isinstance(profile.show_in_main_menu, bool):
+            fail(f"Profile {profile.profile_id} field show_in_main_menu must be a boolean.")
+
+        if not isinstance(profile.uefi, bool):
+            fail(f"Profile {profile.profile_id} field uefi must be a boolean.")
+
+        if not isinstance(profile.bios, bool):
+            fail(f"Profile {profile.profile_id} field bios must be a boolean.")
+
+        if not profile.uefi and not profile.bios:
+            fail(
+                f"Profile {profile.profile_id} must enable at least one firmware type: "
+                "uefi=true and/or bios=true."
+            )
+
+        if profile.show_in_main_menu:
+            visible_profile_count += 1
+
+        if profile.profile_id in profile_ids:
+            fail(f"Duplicate profile_id found: {profile.profile_id}")
+
+        profile_ids.add(profile.profile_id)
+
+        profile_targets = {
+            "menu_target": profile.menu_target,
+            "legacy_target": profile.legacy_target,
+        }
+
+        for field, target in profile_targets.items():
+            if target in target_sources:
+                fail(
+                    f"Profile {profile.profile_id} {field} value {target!r} conflicts with "
+                    f"{target_sources[target]}."
+                )
+
+            target_sources[target] = f"profile {profile.profile_id} {field}"
+
+        if not isinstance(profile.supported_os, tuple):
+            fail(f"Profile {profile.profile_id} field supported_os must be stored as a tuple.")
+
+        seen_supported_os = set()
+
+        for os_id in profile.supported_os:
+            if not isinstance(os_id, str):
+                fail(f"Profile {profile.profile_id} has a non-string supported_os value.")
+
+            if os_id in seen_supported_os:
+                fail(
+                    f"Profile {profile.profile_id} has duplicate supported_os value: {os_id}"
+                )
+
+            seen_supported_os.add(os_id)
+
+            if os_id not in known_os_ids:
+                fail(
+                    f"Profile {profile.profile_id} references unknown supported_os value: {os_id}"
+                )
+
+        if profile.kickstart_template:
+            validate_relative_template_path(
+                profile.kickstart_template,
+                profile.profile_id,
+                "kickstart_template",
+            )
+
+        if profile.implemented and profile.profile_id != "minimal" and not profile.kickstart_template:
+            fail(
+                f"Profile {profile.profile_id} is implemented, so it must define "
+                "kickstart_template. Only the minimal profile may use the built-in "
+                "default Kickstart fallback."
+            )
+
+        if not isinstance(profile.kernel_args, tuple):
+            fail(f"Profile {profile.profile_id} field kernel_args must be stored as a tuple.")
+
+        for index, arg in enumerate(profile.kernel_args):
+            validate_kernel_arg(profile.profile_id, index, arg)
+
+    if visible_profile_count == 0:
+        fail("At least one PXE profile must have show_in_main_menu=true.")
+
+    if "minimal" not in profile_ids:
+        fail("The minimal profile must be defined.")
+
+
+def load_profile_definitions(config: GeneratorConfig) -> List[ProfileDefinition]:
+    base_files = profile_definition_files(config.profile_root)
+
+    if not base_files:
+        base_profiles = list(BUILTIN_PROFILE_DEFINITIONS)
+    else:
+        base_profiles = [load_profile_file(path) for path in base_files]
+
+    override_files = override_profile_definition_files(config)
+    override_profiles = [load_profile_file(path) for path in override_files]
+
+    by_profile_id: Dict[str, ProfileDefinition] = {}
+    profile_order: List[str] = []
+
+    for profile in base_profiles:
+        by_profile_id[profile.profile_id] = profile
+        profile_order.append(profile.profile_id)
+
+    for profile in override_profiles:
+        if profile.profile_id not in by_profile_id:
+            profile_order.append(profile.profile_id)
+
+        by_profile_id[profile.profile_id] = profile
+
+    profiles = [by_profile_id[profile_id] for profile_id in profile_order]
+
+    validate_profile_definitions(profiles)
+    return profiles
+
+
+# =============================================================================
+# Profile/template helpers
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class KickstartTemplateResolution:
+    template_name: str
+    candidates: Tuple[Path, ...]
+    template_path: Optional[Path]
+    template_source: str
+    template_engine: str
+
+
+def profile_kickstart_name(item: DetectedISO, profile: ProfileDefinition) -> str:
+    if profile.profile_id == "minimal":
+        return item.ks_name
+
+    return f"{item.os_id}-{profile.profile_slug}.ks"
+
+
+def profile_has_install_option(item: DetectedISO, profile: ProfileDefinition) -> bool:
+    return (
+        profile.supports_os(item)
+        and (
+            (item.uefi and profile.uefi)
+            or (item.bios and profile.bios)
+        )
+    )
+
+
+def template_engine_for_path(template_path: Path) -> str:
+    if template_path.name.endswith(".j2"):
+        return "jinja2"
+
+    return "simple"
+
+
+def profile_template_values(
+    config: GeneratorConfig,
+    item: DetectedISO,
+    profile: ProfileDefinition,
+    rootpw_hash: str,
+) -> Dict[str, Any]:
+    base_url = f"http://{config.pxe_server}:{config.pxe_port}"
+    repo_url = f"{base_url}/{item.http_path}"
+    kickstart_name = profile_kickstart_name(item, profile)
+    kickstart_path = f"/ks/{kickstart_name}"
+    kickstart_url = f"{base_url}{kickstart_path}"
+    kernel_args = list(profile.kernel_args)
+    kernel_args_string = " ".join(profile.kernel_args).strip()
+
+    return {
+        "PXE_SERVER": config.pxe_server,
+        "PXE_PORT": config.pxe_port,
+        "ROOTPW_HASH": rootpw_hash,
+        "BASE_URL": base_url,
+        "REPO_URL": repo_url,
+        "KICKSTART_NAME": kickstart_name,
+        "KICKSTART_PATH": kickstart_path,
+        "KICKSTART_URL": kickstart_url,
+        "HTTP_PATH": item.http_path,
+        "OS_ID": item.os_id,
+        "OS_MAJOR": str(item.major),
+        "OS_TITLE": item.title,
+        "ISO_DIR": item.iso_dir,
+        "ISO_HTTP_PATH": item.http_path,
+        "PROFILE_ID": profile.profile_id,
+        "PROFILE_SLUG": profile.profile_slug,
+        "PROFILE_TITLE": profile.title,
+        "INSTALL_LABEL": profile.install_label,
+        "KERNEL_ARGS": kernel_args_string,
+        "pxe_server": config.pxe_server,
+        "pxe_port": config.pxe_port,
+        "rootpw_hash": rootpw_hash,
+        "base_url": base_url,
+        "repo_url": repo_url,
+        "kickstart_name": kickstart_name,
+        "kickstart_path": kickstart_path,
+        "kickstart_url": kickstart_url,
+        "http_path": item.http_path,
+        "os_id": item.os_id,
+        "os_major": item.major,
+        "os_title": item.title,
+        "iso_dir": item.iso_dir,
+        "iso_http_path": item.http_path,
+        "profile_id": profile.profile_id,
+        "profile_slug": profile.profile_slug,
+        "profile_title": profile.title,
+        "install_label": profile.install_label,
+        "kernel_args": kernel_args,
+        "kernel_args_string": kernel_args_string,
+    }
+
+
+def render_simple_template_text(raw: str, values: Dict[str, Any], source: str) -> str:
+    string_values = {key: str(value) for key, value in values.items()}
+
+    try:
+        rendered = Template(raw).safe_substitute(string_values)
+    except ValueError as exc:
+        fail(f"Template {source} contains an invalid $ placeholder: {exc}")
+
+    def replace_jinja_variable(match: re.Match[str]) -> str:
+        key = match.group(1)
+
+        if key not in string_values:
+            fail(f"Template {source} references unknown variable: {key}")
+
+        return string_values[key]
+
+    return SIMPLE_JINJA_VARIABLE_RE.sub(replace_jinja_variable, rendered)
+
+
+def render_jinja2_template_text(
+    raw: str,
+    values: Dict[str, Any],
+    source: str,
+    template_roots: Tuple[Path, ...],
+) -> str:
+    if jinja2 is None:
+        fail(
+            f"Template {source} requires Jinja2, but the jinja2 Python package is not installed. "
+            "Install py3-jinja2 on Alpine or python3-jinja2 on RHEL/UBI."
+        )
+
+    environment = jinja2.Environment(
+        loader=jinja2.ChoiceLoader(
+            [
+                jinja2.FileSystemLoader(str(template_root))
+                for template_root in template_roots
+            ]
+        ),
+        undefined=jinja2.StrictUndefined,
+        autoescape=False,
+        keep_trailing_newline=True,
+    )
+
+    try:
+        return environment.from_string(raw).render(**values)
+    except jinja2.TemplateError as exc:
+        fail(f"Template {source} failed Jinja2 rendering: {exc}")
+
+
+def render_kickstart_template_text(
+    raw: str,
+    values: Dict[str, Any],
+    source: str,
+    template_engine: str,
+    template_roots: Tuple[Path, ...],
+) -> str:
+    if template_engine == "jinja2":
+        return render_jinja2_template_text(raw, values, source, template_roots)
+
+    if template_engine == "simple":
+        return render_simple_template_text(raw, values, source)
+
+    fail(f"Template {source} has unsupported template engine: {template_engine}")
+    return ""
+
+
+def render_name_template(
+    raw: str,
+    item: DetectedISO,
+    profile: ProfileDefinition,
+    field: str,
+) -> str:
+    values = profile_template_values(
+        GeneratorConfig(
+            pxe_server="",
+            pxe_port="",
+            iso_root=Path("/"),
+            html_root=Path("/"),
+            template_root=Path("/"),
+            profile_root=Path("/"),
+            override_root=Path("/overrides"),
+            override_template_root=Path("/overrides/templates"),
+            override_profile_root=Path("/overrides/profiles"),
+            generated_ks_edit_policy="preserve",
+            background_path="",
+            watch_interval=1,
+            rootpw_hash="",
+            allow_default_rootpw=True,
+        ),
+        item,
+        profile,
+        "",
+    )
+
+    rendered = render_simple_template_text(raw, values, f"profile {profile.profile_id} {field}")
+    rendered = rendered.strip()
+
+    validate_relative_template_path(rendered, profile.profile_id, field)
+
+    return rendered
+
+
+def profile_kickstart_template_name(item: DetectedISO, profile: ProfileDefinition) -> str:
+    raw_template = profile.kickstart_template
+
+    if not raw_template:
+        if profile.profile_id == "minimal":
+            raw_template = item.ks_template
+        else:
+            fail(
+                f"Profile {profile.profile_id} must define kickstart_template. "
+                "Only the minimal profile may use the built-in default Kickstart fallback."
+            )
+
+    return render_name_template(raw_template, item, profile, "kickstart_template")
+
+
+def kickstart_template_candidates(
+    config: GeneratorConfig,
+    template_name: str,
+) -> Tuple[Path, ...]:
+    template_path = Path(template_name)
+    candidates: List[Path] = []
+
+    def add_candidates_for_root(root: Path) -> None:
+        if len(template_path.parts) == 1:
+            candidates.append(root / "ks" / template_path)
+            candidates.append(root / template_path)
+        else:
+            candidates.append(root / template_path)
+
+    # Override templates win first.
+    add_candidates_for_root(config.override_template_root)
+
+    # Base templates are fallback.
+    add_candidates_for_root(config.template_root)
+
+    deduped: List[Path] = []
+
+    for candidate in candidates:
+        if candidate not in deduped:
+            deduped.append(candidate)
+
+    return tuple(deduped)
+
+
+def resolve_kickstart_template(
+    config: GeneratorConfig,
+    item: DetectedISO,
+    profile: ProfileDefinition,
+) -> KickstartTemplateResolution:
+    template_name = profile_kickstart_template_name(item, profile)
+    candidates = kickstart_template_candidates(config, template_name)
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return KickstartTemplateResolution(
+                template_name=template_name,
+                candidates=candidates,
+                template_path=candidate,
+                template_source="file",
+                template_engine=template_engine_for_path(candidate),
+            )
+
+    if profile.profile_id == "minimal":
+        return KickstartTemplateResolution(
+            template_name=template_name,
+            candidates=candidates,
+            template_path=None,
+            template_source="built-in-default",
+            template_engine="built-in-default",
+        )
+
+    searched_paths = "\n".join(f"- {candidate}" for candidate in candidates)
+
+    fail(
+        f"Profile {profile.profile_id} is implemented, but kickstart template "
+        f"{template_name!r} was not found.\n"
+        "Searched:\n"
+        f"{searched_paths}"
+    )
+
+
+# =============================================================================
+# Common file helpers
+# =============================================================================
+
+
+def atomic_write(path: Path, content: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.chmod(mode)
+    tmp_path.replace(path)
+
+
+def sha256_text(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+
+    with path.open("rb") as file_obj:
+        for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+    return digest.hexdigest()
+
+
+def read_json_mapping(path: Path) -> Dict[str, Any]:
+    if not path.is_file():
+        return {}
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        fail(f"JSON state file {path} is invalid: {exc}")
+
+    if not isinstance(data, dict):
+        fail(f"JSON state file {path} must contain a JSON object.")
+
+    return data
+
+
+def utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def relative_to_root(path: Optional[Path], root: Path) -> Optional[str]:
+    if path is None:
+        return None
+
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def active_override_files(config: GeneratorConfig) -> Dict[str, List[str]]:
+    profile_overrides = [
+        str(path)
+        for path in override_profile_definition_files(config)
+    ]
+
+    template_overrides: List[str] = []
+
+    if config.override_template_root.is_dir():
+        for pattern in ("**/*.ks.tmpl", "**/*.ks.j2"):
+            template_overrides.extend(
+                str(path)
+                for path in sorted(config.override_template_root.glob(pattern))
+                if path.is_file()
+            )
+
+    return {
+        "profiles": profile_overrides,
+        "templates": sorted(set(template_overrides)),
+    }
+
+
+def template_source_label(config: GeneratorConfig, template_path: Optional[Path]) -> str:
+    if template_path is None:
+        return "built-in-default"
+
+    try:
+        template_path.relative_to(config.override_template_root)
+        return "override"
+    except ValueError:
+        return "base"
+
+
+def managed_kickstart_header(
+    config: GeneratorConfig,
+    item: DetectedISO,
+    profile: ProfileDefinition,
+    resolution: KickstartTemplateResolution,
+    destination: Path,
+) -> str:
+    template_path = (
+        str(resolution.template_path)
+        if resolution.template_path is not None
+        else "built-in-default"
+    )
+
+    return f"""# ---------------------------------------------------------------------------
+# Managed by AeroLIT PXE Content Generator
+# Profile: {profile.profile_id}
+# Profile title: {profile.title}
+# OS: {item.os_id}
+# OS title: {item.title}
+# Template: {resolution.template_name}
+# Template path: {template_path}
+# Template source: {template_source_label(config, resolution.template_path)}
+# Generated output: /ks/{destination.name}
+# Direct edit policy: {config.generated_ks_edit_policy}
+#
+# Manual edits to this generated file may be preserved depending on policy.
+# Preferred customization path:
+#   {config.override_profile_root}
+#   {config.override_template_root}
+# ---------------------------------------------------------------------------
+
+"""
+
+
+def kickstart_state_path(config: GeneratorConfig, destination: Path) -> Path:
+    return config.html_root / "generated" / "kickstart-state" / f"{destination.name}.json"
+
+
+def kickstart_candidate_path(config: GeneratorConfig, destination: Path) -> Path:
+    return (
+        config.html_root
+        / "generated"
+        / "preserved-kickstarts"
+        / f"{destination.name}.candidate"
+    )
+
+
+def write_generated_kickstart(
+    config: GeneratorConfig,
+    destination: Path,
+    content: str,
+) -> None:
+    desired_sha = sha256_text(content)
+    state_path = kickstart_state_path(config, destination)
+    candidate_path = kickstart_candidate_path(config, destination)
+
+    destination_exists = destination.is_file()
+    current_sha = sha256_file(destination) if destination_exists else ""
+    state = read_json_mapping(state_path)
+    previous_generated_sha = str(state.get("last_generated_sha256", ""))
+
+    manual_edit_detected = (
+        destination_exists
+        and bool(previous_generated_sha)
+        and current_sha != previous_generated_sha
+    )
+
+    if manual_edit_detected and config.generated_ks_edit_policy == "preserve":
+        atomic_write(candidate_path, content)
+
+        state_data = {
+            "output_path": str(destination),
+            "state_path": str(state_path),
+            "candidate_path": str(candidate_path),
+            "edit_policy": config.generated_ks_edit_policy,
+            "manual_edit_detected": True,
+            "preserved_manual_edit": True,
+            "current_output_sha256": current_sha,
+            "last_generated_sha256": desired_sha,
+            "previous_generated_sha256": previous_generated_sha,
+            "updated_at_epoch": int(time.time()),
+        }
+
+        atomic_write(
+            state_path,
+            json.dumps(state_data, indent=2, sort_keys=True) + "\n",
+        )
+
+        print(
+            f"Preserved manually edited Kickstart: {destination}. "
+            f"Regenerated candidate written to: {candidate_path}",
+            flush=True,
+        )
+        return
+
+    atomic_write(destination, content)
+
+    if candidate_path.exists():
+        candidate_path.unlink()
+
+    state_data = {
+        "output_path": str(destination),
+        "state_path": str(state_path),
+        "candidate_path": None,
+        "edit_policy": config.generated_ks_edit_policy,
+        "manual_edit_detected": manual_edit_detected,
+        "preserved_manual_edit": False,
+        "current_output_sha256": desired_sha,
+        "last_generated_sha256": desired_sha,
+        "previous_generated_sha256": previous_generated_sha or None,
+        "updated_at_epoch": int(time.time()),
+    }
+
+    atomic_write(
+        state_path,
+        json.dumps(state_data, indent=2, sort_keys=True) + "\n",
+    )
+
+
+def generated_kickstart_state_status(
+    config: GeneratorConfig,
+    kickstart_name: str,
+) -> Dict[str, object]:
+    destination = config.html_root / "ks" / kickstart_name
+    state_path = kickstart_state_path(config, destination)
+
+    if not state_path.is_file():
+        return {
+            "state_exists": False,
+            "state_path": str(state_path),
+        }
+
+    state = read_json_mapping(state_path)
+    state["state_exists"] = True
+    state["state_path"] = str(state_path)
+
+    return state
+
+
+def cleanup_stale_kickstarts(
+    config: GeneratorConfig,
+    expected_kickstarts: Iterable[str],
+) -> List[Dict[str, object]]:
+    ks_dir = config.html_root / "ks"
+    expected = set(expected_kickstarts)
+    stale_actions: List[Dict[str, object]] = []
+
+    if not ks_dir.is_dir():
+        return stale_actions
+
+    for destination in sorted(ks_dir.glob("*.ks")):
+        kickstart_name = destination.name
+
+        if kickstart_name in expected:
+            continue
+
+        state_path = kickstart_state_path(config, destination)
+        candidate_path = kickstart_candidate_path(config, destination)
+
+        action: Dict[str, object] = {
+            "kickstart_name": kickstart_name,
+            "kickstart": f"/ks/{kickstart_name}",
+            "output_path": str(destination),
+            "state_path": str(state_path),
+        }
+
+        if not state_path.is_file():
+            action.update(
+                {
+                    "action": "preserved",
+                    "reason": "unmanaged Kickstart; no generator state file exists",
+                    "manual_edit_detected": None,
+                }
+            )
+            stale_actions.append(action)
+            continue
+
+        state = read_json_mapping(state_path)
+        last_generated_sha = str(state.get("last_generated_sha256", ""))
+        current_sha = sha256_file(destination)
+
+        if last_generated_sha and current_sha == last_generated_sha:
+            destination.unlink()
+
+            if candidate_path.exists():
+                candidate_path.unlink()
+
+            state_path.unlink()
+
+            action.update(
+                {
+                    "action": "deleted",
+                    "reason": "stale generated Kickstart matched last generated hash",
+                    "manual_edit_detected": False,
+                    "last_generated_sha256": last_generated_sha,
+                    "current_output_sha256": current_sha,
+                }
+            )
+            stale_actions.append(action)
+            continue
+
+        reason = (
+            "manual edit detected; stale Kickstart preserved"
+            if last_generated_sha
+            else "generator state exists but last_generated_sha256 is missing; stale Kickstart preserved"
+        )
+
+        state["stale"] = True
+        state["stale_action"] = "preserved"
+        state["stale_reason"] = reason
+        state["updated_at_epoch"] = int(time.time())
+
+        atomic_write(
+            state_path,
+            json.dumps(state, indent=2, sort_keys=True) + "\n",
+        )
+
+        action.update(
+            {
+                "action": "preserved",
+                "reason": reason,
+                "manual_edit_detected": bool(last_generated_sha),
+                "last_generated_sha256": last_generated_sha or None,
+                "current_output_sha256": current_sha,
+            }
+        )
+        stale_actions.append(action)
+
+    return stale_actions
+
+
+def ensure_output_directories(config: GeneratorConfig) -> None:
+    config.html_root.mkdir(parents=True, exist_ok=True)
+    (config.html_root / "ks").mkdir(parents=True, exist_ok=True)
+    (config.html_root / "generated").mkdir(parents=True, exist_ok=True)
+
+
+# =============================================================================
+# ISO discovery
+# =============================================================================
+
+
+def pxeboot_dir(iso_path: Path) -> Path:
+    return iso_path / "images" / "pxeboot"
+
+
+def is_bootable_iso_tree(iso_path: Path) -> bool:
+    boot_dir = pxeboot_dir(iso_path)
+
+    return (
+        iso_path.is_dir()
+        and (boot_dir / "vmlinuz").is_file()
+        and (boot_dir / "initrd.img").is_file()
+    )
+
+
+def discover_isos(config: GeneratorConfig) -> List[DetectedISO]:
+    detected: List[DetectedISO] = []
+
+    for definition in OS_DEFINITIONS:
+        iso_path = config.iso_root / definition.iso_dir
+
+        if is_bootable_iso_tree(iso_path):
+            detected.append(DetectedISO(definition=definition, iso_path=iso_path))
+
+    return detected
+
+
+# =============================================================================
+# Kickstart rendering
+# =============================================================================
+
+
+class KickstartRenderer:
+    def __init__(self, config: GeneratorConfig, rootpw_hash: str) -> None:
+        self.config = config
+        self.rootpw_hash = rootpw_hash
+
+    def render_all(
+        self,
+        detected: Iterable[DetectedISO],
+        profiles: Iterable[ProfileDefinition],
+    ) -> Tuple[str, ...]:
+        expected_kickstarts: List[str] = []
+
+        for profile in profiles:
+            if not profile.implemented:
+                continue
+
+            for item in detected:
+                if profile_has_install_option(item, profile):
+                    kickstart_name = profile_kickstart_name(item, profile)
+                    expected_kickstarts.append(kickstart_name)
+                    self.render_one(item, profile)
+
+        return tuple(sorted(set(expected_kickstarts)))
+
+    def render_one(self, item: DetectedISO, profile: ProfileDefinition) -> None:
+        destination = self.config.html_root / "ks" / profile_kickstart_name(item, profile)
+        resolution = resolve_kickstart_template(self.config, item, profile)
+
+        if resolution.template_path is not None:
+            rendered = self.render_template(resolution, item, profile)
+        elif resolution.template_source == "built-in-default" and profile.profile_id == "minimal":
+            rendered = self.default_kickstart(item)
+        else:
+            fail(
+                f"Profile {profile.profile_id} has unresolved Kickstart template "
+                f"{resolution.template_name!r}."
+            )
+
+        rendered = (
+            managed_kickstart_header(
+                self.config,
+                item,
+                profile,
+                resolution,
+                destination,
+            )
+            + rendered
+        )
+
+        write_generated_kickstart(self.config, destination, rendered)
+
+    def render_template(
+        self,
+        resolution: KickstartTemplateResolution,
+        item: DetectedISO,
+        profile: ProfileDefinition,
+    ) -> str:
+        if resolution.template_path is None:
+            fail(
+                f"Profile {profile.profile_id} has no template path for "
+                f"{resolution.template_name!r}."
+            )
+
+        values = profile_template_values(
+            self.config,
+            item,
+            profile,
+            self.rootpw_hash,
+        )
+
+        raw = resolution.template_path.read_text(encoding="utf-8")
+
+        return render_kickstart_template_text(
+            raw,
+            values,
+            str(resolution.template_path),
+            resolution.template_engine,
+            (
+                self.config.override_template_root,
+                self.config.template_root,
+            ),
+        )
+
+    def default_kickstart(self, item: DetectedISO) -> str:
+        return f"""#version=RHEL{item.major}
+text
+reboot
+
+lang en_US.UTF-8
+keyboard us
+timezone America/Chicago --utc
+
+network --bootproto=dhcp --device=link --activate
+
+rootpw --iscrypted {self.rootpw_hash}
+firstboot --disable
+selinux --enforcing
+firewall --enabled --service=ssh
+services --enabled=sshd
+
+url --url="http://{self.config.pxe_server}:{self.config.pxe_port}/{item.os_id}"
+
+zerombr
+clearpart --all --initlabel
+autopart --type=lvm
+
+%packages
+@^minimal-environment
+%end
+
+%addon com_redhat_kdump --enable
+%end
+"""
+
+
+# =============================================================================
+# boot.ipxe rendering
+# =============================================================================
+
+
+def menu_item(label: str, target: str) -> str:
+    return f"item {target:<28} {label}"
+
+
+class BootMenuRenderer:
+    def __init__(self, config: GeneratorConfig, profiles: List[ProfileDefinition]) -> None:
+        self.config = config
+        self.profiles = profiles
+
+    def visible_profiles(self) -> List[ProfileDefinition]:
+        return [
+            profile
+            for profile in self.profiles
+            if profile.show_in_main_menu
+        ]
+
+    def enabled_profiles(self) -> List[ProfileDefinition]:
+        return [
+            profile
+            for profile in self.profiles
+            if profile.show_in_main_menu and profile.implemented
+        ]
+
+    def render(self, detected: List[DetectedISO]) -> str:
+        lines: List[str] = []
+
+        lines.extend(
+            [
+                "#!ipxe",
+                "",
+                f"set server {self.config.pxe_server}",
+                f"set port {self.config.pxe_port}",
+                "set base http://${server}:${port}",
+                "",
+                f"console --picture ${{base}}{self.config.background_path} --left 360 --right 360 --top 140 --bottom 140 || goto main",
+                "",
+                ":main",
+                "menu AeroLIT PXE Menu",
+            ]
+        )
+
+        for profile in self.visible_profiles():
+            lines.append(menu_item(profile.title, profile.menu_target))
+
+        lines.extend(
+            [
+                menu_item("Utilities / Rescue", "rescue"),
+                menu_item("Drop to iPXE shell", "shell"),
+                "choose target || goto shell",
+                "goto ${target}",
+                "",
+            ]
+        )
+
+        for profile in self.visible_profiles():
+            if profile.implemented:
+                lines.extend(self.render_implemented_profile_menu(profile, detected))
+            else:
+                lines.extend(self.render_unimplemented_profile_menu(profile, detected))
+
+        lines.extend(self.render_boot_targets(detected))
+        lines.extend(self.render_rescue_menu())
+        lines.extend([":shell", "shell", ""])
+
+        return "\n".join(lines)
+
+    def render_implemented_profile_menu(
+        self,
+        profile: ProfileDefinition,
+        detected: List[DetectedISO],
+    ) -> List[str]:
+        lines: List[str] = [
+            f":{profile.menu_target}",
+            f"menu {profile.title}",
+        ]
+
+        if not detected:
+            lines.append(menu_item("No supported RHEL ISO trees detected", "main"))
+        else:
+            for item in detected:
+                if profile.supports_os(item) and item.uefi and profile.uefi:
+                    lines.append(
+                        menu_item(
+                            f"Install {item.title} {profile.install_label} (UEFI)",
+                            self.profile_target(item, profile, "uefi"),
+                        )
+                    )
+
+            if any(
+                profile.supports_os(item) and item.bios and profile.bios
+                for item in detected
+            ):
+                lines.append(menu_item("Legacy / BIOS Options", profile.legacy_target))
+
+        lines.extend(
+            [
+                menu_item("Back to Main Menu", "main"),
+                menu_item("Drop to iPXE shell", "shell"),
+                "choose target || goto main",
+                "goto ${target}",
+                "",
+            ]
+        )
+
+        if any(
+            profile.supports_os(item) and item.bios and profile.bios
+            for item in detected
+        ):
+            lines.extend(self.render_implemented_legacy_menu(profile, detected))
+
+        return lines
+
+    def render_implemented_legacy_menu(
+        self,
+        profile: ProfileDefinition,
+        detected: List[DetectedISO],
+    ) -> List[str]:
+        lines: List[str] = [
+            f":{profile.legacy_target}",
+            f"menu {profile.title} - Legacy / BIOS",
+        ]
+
+        for item in detected:
+            if profile.supports_os(item) and item.bios and profile.bios:
+                lines.append(
+                    menu_item(
+                        f"Install {item.title} {profile.install_label} (BIOS / Legacy)",
+                        self.profile_target(item, profile, "bios"),
+                    )
+                )
+
+        lines.extend(
+            [
+                menu_item(f"Back to {profile.title}", profile.menu_target),
+                menu_item("Back to Main Menu", "main"),
+                menu_item("Drop to iPXE shell", "shell"),
+                f"choose target || goto {profile.menu_target}",
+                "goto ${target}",
+                "",
+            ]
+        )
+
+        return lines
+
+    def render_unimplemented_profile_menu(
+        self,
+        profile: ProfileDefinition,
+        detected: List[DetectedISO],
+    ) -> List[str]:
+        lines: List[str] = [
+            f":{profile.menu_target}",
+            f"menu {profile.title}",
+            menu_item("Profile not implemented yet", "main"),
+        ]
+
+        if not detected:
+            lines.append(menu_item("No supported RHEL ISO trees detected", "main"))
+        else:
+            for item in detected:
+                if profile.supports_os(item) and item.uefi and profile.uefi:
+                    lines.append(
+                        menu_item(
+                            f"{item.title} {profile.install_label} (UEFI) - not implemented",
+                            self.not_implemented_target(item, profile, "uefi"),
+                        )
+                    )
+
+            if any(
+                profile.supports_os(item) and item.bios and profile.bios
+                for item in detected
+            ):
+                lines.append(menu_item("Legacy / BIOS Options", profile.legacy_target))
+
+        lines.extend(
+            [
+                menu_item("Back to Main Menu", "main"),
+                menu_item("Drop to iPXE shell", "shell"),
+                "choose target || goto main",
+                "goto ${target}",
+                "",
+            ]
+        )
+
+        if any(
+            profile.supports_os(item) and item.bios and profile.bios
+            for item in detected
+        ):
+            lines.extend(self.render_unimplemented_legacy_menu(profile, detected))
+
+        for item in detected:
+            if profile.supports_os(item) and item.uefi and profile.uefi:
+                lines.extend(self.render_not_implemented_target_menu(item, profile, "uefi"))
+
+            if profile.supports_os(item) and item.bios and profile.bios:
+                lines.extend(self.render_not_implemented_target_menu(item, profile, "bios"))
+
+        return lines
+
+    def render_unimplemented_legacy_menu(
+        self,
+        profile: ProfileDefinition,
+        detected: List[DetectedISO],
+    ) -> List[str]:
+        lines: List[str] = [
+            f":{profile.legacy_target}",
+            f"menu {profile.title} - Legacy / BIOS",
+        ]
+
+        for item in detected:
+            if profile.supports_os(item) and item.bios and profile.bios:
+                lines.append(
+                    menu_item(
+                        f"{item.title} {profile.install_label} (BIOS / Legacy) - not implemented",
+                        self.not_implemented_target(item, profile, "bios"),
+                    )
+                )
+
+        lines.extend(
+            [
+                menu_item(f"Back to {profile.title}", profile.menu_target),
+                menu_item("Back to Main Menu", "main"),
+                menu_item("Drop to iPXE shell", "shell"),
+                f"choose target || goto {profile.menu_target}",
+                "goto ${target}",
+                "",
+            ]
+        )
+
+        return lines
+
+    def render_not_implemented_target_menu(
+        self,
+        item: DetectedISO,
+        profile: ProfileDefinition,
+        firmware: str,
+    ) -> List[str]:
+        firmware_label = "UEFI" if firmware == "uefi" else "BIOS"
+        back_target = profile.legacy_target if firmware == "bios" else profile.menu_target
+        back_label = (
+            f"Back to {profile.title} Legacy / BIOS"
+            if firmware == "bios"
+            else f"Back to {profile.title}"
+        )
+
+        return [
+            f":{self.not_implemented_target(item, profile, firmware)}",
+            f"menu {profile.title}",
+            menu_item(
+                f"{item.title} {profile.install_label} {firmware_label} is not implemented yet",
+                back_target,
+            ),
+            menu_item(back_label, back_target),
+            menu_item("Back to Main Menu", "main"),
+            menu_item("Drop to iPXE shell", "shell"),
+            f"choose target || goto {back_target}",
+            "goto ${target}",
+            "",
+        ]
+
+    def render_boot_targets(self, detected: List[DetectedISO]) -> List[str]:
+        lines: List[str] = []
+
+        for profile in self.enabled_profiles():
+            for item in detected:
+                if profile.supports_os(item) and item.uefi and profile.uefi:
+                    lines.append(
+                        self.kernel_block(
+                            item,
+                            profile,
+                            self.profile_target(item, profile, "uefi"),
+                        )
+                    )
+
+                if profile.supports_os(item) and item.bios and profile.bios:
+                    lines.append(
+                        self.kernel_block(
+                            item,
+                            profile,
+                            self.profile_target(item, profile, "bios"),
+                        )
+                    )
+
+        return lines
+
+    def render_rescue_menu(self) -> List[str]:
+        return [
+            ":rescue",
+            "menu Utilities / Rescue",
+            menu_item("Back to Main Menu", "main"),
+            menu_item("Drop to iPXE shell", "shell"),
+            "choose target || goto main",
+            "goto ${target}",
+            "",
+        ]
+
+    def profile_target(
+        self,
+        item: DetectedISO,
+        profile: ProfileDefinition,
+        firmware: str,
+    ) -> str:
+        return f"{item.os_id}_{profile.profile_id}_{firmware}"
+
+    def not_implemented_target(
+        self,
+        item: DetectedISO,
+        profile: ProfileDefinition,
+        firmware: str,
+    ) -> str:
+        return f"{self.profile_target(item, profile, firmware)}_not_implemented"
+
+    def profile_kickstart_name(
+        self,
+        item: DetectedISO,
+        profile: ProfileDefinition,
+    ) -> str:
+        return profile_kickstart_name(item, profile)
+
+    def kernel_block(
+        self,
+        item: DetectedISO,
+        profile: ProfileDefinition,
+        target: str,
+    ) -> str:
+        kickstart_name = self.profile_kickstart_name(item, profile)
+        extra_kernel_args = " ".join(profile.kernel_args).strip()
+
+        kernel_line = (
+            f"kernel ${{base}}/{item.http_path}/images/pxeboot/vmlinuz "
+            f"initrd=initrd.img "
+            f"ip=dhcp "
+            f"inst.repo=${{base}}/{item.http_path} "
+            f"inst.stage2=${{base}}/{item.http_path} "
+            f"inst.ks=${{base}}/ks/{kickstart_name}"
+        )
+
+        if extra_kernel_args:
+            kernel_line = f"{kernel_line} {extra_kernel_args}"
+
+        return f""":{target}
+{kernel_line}
+initrd --name initrd.img ${{base}}/{item.http_path}/images/pxeboot/initrd.img
+boot
+"""
+
+
+def write_boot_ipxe(
+    config: GeneratorConfig,
+    detected: List[DetectedISO],
+    profiles: List[ProfileDefinition],
+) -> None:
+    renderer = BootMenuRenderer(config, profiles)
+    atomic_write(config.html_root / "boot.ipxe", renderer.render(detected))
+
+
+# =============================================================================
+# Validation and health reporting
+# =============================================================================
+
+
+UNRESOLVED_JINJA_BLOCK_RE = re.compile(r"{%\s*[a-zA-Z_]")
+UNRESOLVED_JINJA_VARIABLE_RE = re.compile(r"{{\s*[^}]+\s*}}")
+UNRESOLVED_SHELL_PLACEHOLDER_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def validation_result(
+    check_id: str,
+    status: str,
+    message: str,
+    path: str = "",
+    http_path: str = "",
+    details: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    result: Dict[str, object] = {
+        "check_id": check_id,
+        "status": status,
+        "message": message,
+    }
+
+    if path:
+        result["path"] = path
+
+    if http_path:
+        result["http_path"] = http_path
+
+    if details:
+        result["details"] = details
+
+    return result
+
+
+def validation_summary(results: List[Dict[str, object]]) -> Dict[str, object]:
+    counts = {
+        "ok": 0,
+        "warning": 0,
+        "error": 0,
+    }
+
+    for result in results:
+        status = str(result.get("status", "error"))
+
+        if status not in counts:
+            status = "error"
+
+        counts[status] += 1
+
+    if counts["error"] > 0:
+        health = "error"
+    elif counts["warning"] > 0:
+        health = "warning"
+    else:
+        health = "ok"
+
+    return {
+        "health": health,
+        "total": len(results),
+        "ok": counts["ok"],
+        "warning": counts["warning"],
+        "error": counts["error"],
+    }
+
+
+def validate_file_exists(
+    results: List[Dict[str, object]],
+    check_id: str,
+    path: Path,
+    message: str,
+    http_path: str = "",
+) -> None:
+    if path.is_file():
+        results.append(
+            validation_result(
+                check_id=check_id,
+                status="ok",
+                message=message,
+                path=str(path),
+                http_path=http_path,
+                details={"size_bytes": path.stat().st_size},
+            )
+        )
+        return
+
+    results.append(
+        validation_result(
+            check_id=check_id,
+            status="error",
+            message=f"{message} is missing.",
+            path=str(path),
+            http_path=http_path,
+        )
+    )
+
+
+def validate_directory_exists(
+    results: List[Dict[str, object]],
+    check_id: str,
+    path: Path,
+    message: str,
+) -> None:
+    if path.is_dir():
+        results.append(
+            validation_result(
+                check_id=check_id,
+                status="ok",
+                message=message,
+                path=str(path),
+            )
+        )
+        return
+
+    results.append(
+        validation_result(
+            check_id=check_id,
+            status="error",
+            message=f"{message} is missing.",
+            path=str(path),
+        )
+    )
+
+
+def iso_repository_validation_status(item: DetectedISO) -> Dict[str, object]:
+    required_repos: List[Dict[str, object]] = []
+
+    def add_repo(name: str, metadata_path: Path, http_path: str) -> None:
+        exists = metadata_path.is_file()
+
+        required_repos.append(
+            {
+                "name": name,
+                "path": str(metadata_path),
+                "http_path": http_path,
+                "exists": exists,
+                "status": "ok" if exists else "warning",
+            }
+        )
+
+    if item.major >= 8:
+        layout = "baseos-appstream"
+
+        add_repo(
+            "BaseOS",
+            item.iso_path / "BaseOS" / "repodata" / "repomd.xml",
+            f"/{item.http_path}/BaseOS/repodata/repomd.xml",
+        )
+        add_repo(
+            "AppStream",
+            item.iso_path / "AppStream" / "repodata" / "repomd.xml",
+            f"/{item.http_path}/AppStream/repodata/repomd.xml",
+        )
+    else:
+        layout = "single-repo"
+
+        add_repo(
+            "RHEL 7 repository",
+            item.iso_path / "repodata" / "repomd.xml",
+            f"/{item.http_path}/repodata/repomd.xml",
+        )
+
+    missing = [
+        repo
+        for repo in required_repos
+        if repo["exists"] is not True
+    ]
+
+    return {
+        "layout": layout,
+        "health": "warning" if missing else "ok",
+        "required_repos": required_repos,
+        "missing_repos": missing,
+    }
+
+
+def validate_iso_repository_content(
+    results: List[Dict[str, object]],
+    item: DetectedISO,
+) -> None:
+    repo_status = iso_repository_validation_status(item)
+    required_repos = repo_status["required_repos"]
+
+    if not isinstance(required_repos, list):
+        return
+
+    for repo in required_repos:
+        name = str(repo["name"])
+        path = Path(str(repo["path"]))
+        http_path = str(repo["http_path"])
+        exists = repo["exists"] is True
+
+        check_name = name.lower().replace(" ", "_")
+
+        if exists:
+            results.append(
+                validation_result(
+                    check_id=f"repo_metadata_exists:{item.os_id}:{check_name}",
+                    status="ok",
+                    message=f"Repository metadata found for {item.os_id} {name}.",
+                    path=str(path),
+                    http_path=http_path,
+                    details={"size_bytes": path.stat().st_size},
+                )
+            )
+        else:
+            results.append(
+                validation_result(
+                    check_id=f"repo_metadata_exists:{item.os_id}:{check_name}",
+                    status="warning",
+                    message=(
+                        f"Repository metadata is missing for {item.os_id} {name}. "
+                        "The ISO tree has PXE boot files, but installs may fail if repo content is incomplete."
+                    ),
+                    path=str(path),
+                    http_path=http_path,
+                    details={
+                        "expected_layout": repo_status["layout"],
+                    },
+                )
+            )
+
+
+def validate_kickstart_content(
+    results: List[Dict[str, object]],
+    kickstart_name: str,
+    path: Path,
+) -> None:
+    if not path.is_file():
+        return
+
+    content = path.read_text(encoding="utf-8")
+
+    if not content.strip():
+        results.append(
+            validation_result(
+                check_id=f"kickstart_nonempty:{kickstart_name}",
+                status="error",
+                message=f"Generated Kickstart {kickstart_name} is empty.",
+                path=str(path),
+                http_path=f"/ks/{kickstart_name}",
+            )
+        )
+        return
+
+    results.append(
+        validation_result(
+            check_id=f"kickstart_nonempty:{kickstart_name}",
+            status="ok",
+            message=f"Generated Kickstart {kickstart_name} is not empty.",
+            path=str(path),
+            http_path=f"/ks/{kickstart_name}",
+            details={"size_bytes": path.stat().st_size},
+        )
+    )
+
+    unresolved_checks = [
+        (
+            "unresolved_jinja_block",
+            UNRESOLVED_JINJA_BLOCK_RE,
+            "contains an unresolved Jinja block such as {% ... %}",
+            "error",
+        ),
+        (
+            "unresolved_jinja_variable",
+            UNRESOLVED_JINJA_VARIABLE_RE,
+            "contains an unresolved Jinja variable such as {{ ... }}",
+            "error",
+        ),
+        (
+            "unresolved_shell_placeholder",
+            UNRESOLVED_SHELL_PLACEHOLDER_RE,
+            "contains a possible unresolved shell-style placeholder such as ${VAR}",
+            "warning",
+        ),
+    ]
+
+    for check_name, pattern, message, status in unresolved_checks:
+        if pattern.search(content):
+            results.append(
+                validation_result(
+                    check_id=f"{check_name}:{kickstart_name}",
+                    status=status,
+                    message=f"Generated Kickstart {kickstart_name} {message}.",
+                    path=str(path),
+                    http_path=f"/ks/{kickstart_name}",
+                )
+            )
+        else:
+            results.append(
+                validation_result(
+                    check_id=f"{check_name}:{kickstart_name}",
+                    status="ok",
+                    message=f"Generated Kickstart {kickstart_name} passed check {check_name}.",
+                    path=str(path),
+                    http_path=f"/ks/{kickstart_name}",
+                )
+            )
+
+
+def validate_generated_content(
+    config: GeneratorConfig,
+    detected: List[DetectedISO],
+    profiles: List[ProfileDefinition],
+) -> List[Dict[str, object]]:
+    results: List[Dict[str, object]] = []
+
+    validate_directory_exists(
+        results,
+        "html_root_exists",
+        config.html_root,
+        "HTML root exists",
+    )
+
+    validate_directory_exists(
+        results,
+        "generated_dir_exists",
+        config.html_root / "generated",
+        "Generated metadata directory exists",
+    )
+
+    validate_directory_exists(
+        results,
+        "kickstart_output_dir_exists",
+        config.html_root / "ks",
+        "Kickstart output directory exists",
+    )
+
+    validate_file_exists(
+        results,
+        "boot_ipxe_exists",
+        config.html_root / "boot.ipxe",
+        "boot.ipxe exists",
+        "/boot.ipxe",
+    )
+
+    for item in detected:
+        validate_directory_exists(
+            results,
+            f"iso_tree_exists:{item.os_id}",
+            item.iso_path,
+            f"ISO tree exists for {item.os_id}",
+        )
+
+        validate_file_exists(
+            results,
+            f"pxeboot_vmlinuz_exists:{item.os_id}",
+            item.iso_path / "images" / "pxeboot" / "vmlinuz",
+            f"PXE kernel exists for {item.os_id}",
+            f"/{item.http_path}/images/pxeboot/vmlinuz",
+        )
+
+        validate_file_exists(
+            results,
+            f"pxeboot_initrd_exists:{item.os_id}",
+            item.iso_path / "images" / "pxeboot" / "initrd.img",
+            f"PXE initrd exists for {item.os_id}",
+            f"/{item.http_path}/images/pxeboot/initrd.img",
+        )
+
+        validate_iso_repository_content(results, item)
+
+    for profile in profiles:
+        if not profile.implemented:
+            continue
+
+        for item in detected:
+            if not profile_has_install_option(item, profile):
+                continue
+
+            kickstart_name = profile_kickstart_name(item, profile)
+            kickstart_path = config.html_root / "ks" / kickstart_name
+
+            validate_file_exists(
+                results,
+                f"kickstart_exists:{kickstart_name}",
+                kickstart_path,
+                f"Generated Kickstart exists for {item.os_id} {profile.profile_id}",
+                f"/ks/{kickstart_name}",
+            )
+
+            validate_kickstart_content(results, kickstart_name, kickstart_path)
+
+    return results
+
+
+def render_status_text(status: Dict[str, object]) -> str:
+    summary = status["validation_summary"]
+    results = status["validation_results"]
+
+    lines = [
+        "AeroLIT PXE Content Status",
+        "==========================",
+        "",
+        f"PXE server: {status['pxe_server']}",
+        f"PXE port: {status['pxe_port']}",
+        f"HTML root: {status['html_root']}",
+        f"ISO root: {status['container_iso_root']}",
+        "",
+        "Validation Summary",
+        "------------------",
+        f"Health: {summary['health']}",
+        f"Total checks: {summary['total']}",
+        f"OK: {summary['ok']}",
+        f"Warnings: {summary['warning']}",
+        f"Errors: {summary['error']}",
+        "",
+        "Detected ISOs",
+        "-------------",
+    ]
+
+    detected_isos = status["detected_isos"]
+
+    if detected_isos:
+        for item in detected_isos:
+            lines.append(
+                f"- {item['os_id']}: {item['title']} from {item['iso_path']}"
+            )
+    else:
+        lines.append("- none")
+
+    lines.extend(
+        [
+            "",
+            "Repository Content",
+            "------------------",
+        ]
+    )
+
+    if detected_isos:
+        for item in detected_isos:
+            repo_validation = item.get("repo_validation", {})
+
+            if not isinstance(repo_validation, dict):
+                continue
+
+            required_repos = repo_validation.get("required_repos", [])
+
+            if not isinstance(required_repos, list):
+                continue
+
+            for repo in required_repos:
+                if not isinstance(repo, dict):
+                    continue
+
+                repo_status = str(repo.get("status", "warning")).upper()
+                repo_name = repo.get("name", "unknown")
+                repo_path = repo.get("path", "")
+
+                lines.append(
+                    f"- [{repo_status}] {item['os_id']} {repo_name}: {repo_path}"
+                )
+    else:
+        lines.append("- none")
+
+    lines.extend(
+        [
+            "",
+            "Generated Kickstarts",
+            "--------------------",
+        ]
+    )
+
+    generated_kickstarts = status["generated_kickstarts"]
+
+    if generated_kickstarts:
+        for item in generated_kickstarts:
+            state = item.get("emergency_edit_state", {})
+            source = item.get(
+                "template_source_detail",
+                item.get("template_source", "unknown"),
+            )
+
+            if isinstance(state, dict) and state.get("preserved_manual_edit") is True:
+                source = "preserved-manual-edit"
+
+            lines.append(
+                f"- {item['kickstart']} "
+                f"profile={item['profile_id']} "
+                f"os={item['os_id']} "
+                f"source={source}"
+            )
+    else:
+        lines.append("- none")
+
+    stale_kickstarts = status.get("stale_kickstarts", [])
+
+    lines.extend(
+        [
+            "",
+            "Stale Kickstarts",
+            "----------------",
+        ]
+    )
+
+    if stale_kickstarts:
+        for item in stale_kickstarts:
+            lines.append(
+                f"- {item.get('kickstart', item.get('kickstart_name', 'unknown'))} "
+                f"action={item.get('action', 'unknown')} "
+                f"reason={item.get('reason', 'unknown')}"
+            )
+    else:
+        lines.append("- none")
+
+    lines.extend(
+        [
+            "",
+            "Validation Results",
+            "------------------",
+        ]
+    )
+
+    for result in results:
+        location = result.get("http_path") or result.get("path") or ""
+        suffix = f" [{location}]" if location else ""
+
+        lines.append(
+            f"- [{str(result['status']).upper()}] "
+            f"{result['check_id']}: {result['message']}{suffix}"
+        )
+
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+# =============================================================================
+# Status and index rendering
+# =============================================================================
+
+
+def detected_iso_status(item: DetectedISO) -> Dict[str, object]:
+    return {
+        "os_id": item.os_id,
+        "title": item.title,
+        "iso_dir": item.iso_dir,
+        "iso_path": str(item.iso_path),
+        "http_path": f"/{item.http_path}",
+        "uefi_enabled": item.uefi,
+        "bios_enabled": item.bios,
+        "repo_validation": iso_repository_validation_status(item),
+    }
+
+
+def profile_status(profile: ProfileDefinition) -> Dict[str, object]:
+    return {
+        "profile_id": profile.profile_id,
+        "profile_slug": profile.profile_slug,
+        "title": profile.title,
+        "install_label": profile.install_label,
+        "menu_target": profile.menu_target,
+        "implemented": profile.implemented,
+        "show_in_main_menu": profile.show_in_main_menu,
+        "uefi_enabled": profile.uefi,
+        "bios_enabled": profile.bios,
+        "supported_os": list(profile.supported_os),
+        "kickstart_template": profile.kickstart_template,
+        "kernel_args": list(profile.kernel_args),
+        "source": profile.source,
+    }
+
+
+def generated_kickstart_status(
+    config: GeneratorConfig,
+    detected: List[DetectedISO],
+    profiles: List[ProfileDefinition],
+) -> List[Dict[str, object]]:
+    generated: List[Dict[str, object]] = []
+    safe_rootpw_placeholder = "__hidden__"
+
+    for profile in profiles:
+        if not profile.implemented:
+            continue
+
+        for item in detected:
+            if not profile_has_install_option(item, profile):
+                continue
+
+            resolution = resolve_kickstart_template(config, item, profile)
+            values = profile_template_values(config, item, profile, safe_rootpw_placeholder)
+            kickstart_name = profile_kickstart_name(item, profile)
+
+            generated.append(
+                {
+                    "profile_id": profile.profile_id,
+                    "os_id": item.os_id,
+                    "kickstart_name": kickstart_name,
+                    "kickstart": f"/ks/{kickstart_name}",
+                    "kickstart_url": values["kickstart_url"],
+                    "repo_url": values["repo_url"],
+                    "base_url": values["base_url"],
+                    "kickstart_template": resolution.template_name,
+                    "template_path": (
+                        str(resolution.template_path)
+                        if resolution.template_path is not None
+                        else None
+                    ),
+                    "template_source": resolution.template_source,
+                    "template_source_detail": template_source_label(config, resolution.template_path),
+                    "template_engine": resolution.template_engine,
+                    "template_search_paths": [
+                        str(candidate) for candidate in resolution.candidates
+                    ],
+                    "template_context_keys": sorted(values.keys()),
+                    "kernel_args": list(profile.kernel_args),
+                    "emergency_edit_state": generated_kickstart_state_status(
+                        config,
+                        kickstart_name,
+                    ),
+                }
+            )
+
+    return generated
+
+
+def render_status(
+    config: GeneratorConfig,
+    detected: List[DetectedISO],
+    profiles: List[ProfileDefinition],
+    stale_kickstarts: List[Dict[str, object]],
+) -> None:
+    generated_dir = config.html_root / "generated"
+    generated_dir.mkdir(parents=True, exist_ok=True)
+
+    detected_list = [detected_iso_status(item) for item in detected]
+
+    visible_profiles = [
+        profile.profile_id
+        for profile in profiles
+        if profile.show_in_main_menu
+    ]
+
+    enabled_profiles = [
+        profile.profile_id
+        for profile in profiles
+        if profile.show_in_main_menu and profile.implemented
+    ]
+
+    unimplemented_profiles = [
+        profile.profile_id
+        for profile in profiles
+        if profile.show_in_main_menu and not profile.implemented
+    ]
+
+    generated_kickstarts = generated_kickstart_status(config, detected, profiles)
+    validation_results = validate_generated_content(config, detected, profiles)
+    summary = validation_summary(validation_results)
+
+    status = {
+        "generator": {
+            "generated_at": utc_timestamp(),
+            "generated_ks_edit_policy": config.generated_ks_edit_policy,
+            "template_root": str(config.template_root),
+            "profile_root": str(config.profile_root),
+            "override_root": str(config.override_root),
+            "override_template_root": str(config.override_template_root),
+            "override_profile_root": str(config.override_profile_root),
+            "kickstart_output_root": str(config.html_root / "ks"),
+            "preferred_customization_paths": [
+                str(config.override_profile_root),
+                str(config.override_template_root),
+            ],
+        },
+        "active_overrides": active_override_files(config),
+        "pxe_server": config.pxe_server,
+        "pxe_port": config.pxe_port,
+        "container_iso_root": str(config.iso_root),
+        "html_root": str(config.html_root),
+        "template_root": str(config.template_root),
+        "profile_root": str(config.profile_root),
+        "override_root": str(config.override_root),
+        "override_template_root": str(config.override_template_root),
+        "override_profile_root": str(config.override_profile_root),
+        "generated_ks_edit_policy": config.generated_ks_edit_policy,
+        "detected_isos": detected_list,
+        "profiles": [
+            profile_status(profile)
+            for profile in profiles
+            if profile.show_in_main_menu
+        ],
+        "visible_profiles": visible_profiles,
+        "enabled_profiles": enabled_profiles,
+        "unimplemented_profiles": unimplemented_profiles,
+        "generated_kickstarts": generated_kickstarts,
+        "stale_kickstarts": stale_kickstarts,
+        "validation_summary": summary,
+        "validation_results": validation_results,
+        "boot_menu": "/boot.ipxe",
+        "status_text": "/generated/status.txt",
+    }
+
+    atomic_write(
+        generated_dir / "status.json",
+        json.dumps(status, indent=2, sort_keys=True) + "\n",
+    )
+
+    atomic_write(
+        generated_dir / "status.txt",
+        render_status_text(status),
+    )
+
+    inventory_lines = [
+        f"{item.os_id} {item.iso_dir} {item.iso_path}" for item in detected
+    ]
+
+    if not inventory_lines:
+        inventory_lines.append("No supported RHEL ISO trees detected.")
+
+    atomic_write(generated_dir / "isos.txt", "\n".join(inventory_lines) + "\n")
+
+
+def render_index(
+    config: GeneratorConfig,
+    detected: List[DetectedISO],
+    profiles: List[ProfileDefinition],
+    stale_kickstarts: List[Dict[str, object]],
+) -> None:
+    lines = [
+        "<html>",
+        "<head><title>AeroLIT PXE Content</title></head>",
+        "<body>",
+        "<h1>AeroLIT PXE Content</h1>",
+        "<h2>Detected ISO Trees</h2>",
+        "<ul>",
+    ]
+
+    if detected:
+        for item in detected:
+            lines.append(f"<li>{item.title}: /{item.http_path}/ from {item.iso_path}</li>")
+    else:
+        lines.append("<li>No supported RHEL ISO trees detected.</li>")
+
+    lines.extend(
+        [
+            "</ul>",
+            "<h2>Profile Sets</h2>",
+            "<ul>",
+        ]
+    )
+
+    for profile in profiles:
+        if not profile.show_in_main_menu:
+            continue
+
+        state = "implemented" if profile.implemented else "placeholder / not implemented"
+        lines.append(f"<li>{profile.title}: {state}</li>")
+
+    generated_kickstarts = generated_kickstart_status(config, detected, profiles)
+    validation_results = validate_generated_content(config, detected, profiles)
+    summary = validation_summary(validation_results)
+    
+    preserved_manual_count = 0
+    generated_count = len(generated_kickstarts)
+
+    for entry in generated_kickstarts:
+        state = entry.get("emergency_edit_state", {})
+
+        if isinstance(state, dict) and state.get("preserved_manual_edit") is True:
+            preserved_manual_count += 1
+
+    deleted_stale_count = sum(
+        1
+        for item in stale_kickstarts
+        if item.get("action") == "deleted"
+    )
+
+    preserved_stale_count = sum(
+        1
+        for item in stale_kickstarts
+        if item.get("action") == "preserved"
+    )
+
+    lines.extend(
+        [
+            "</ul>",
+            "<h2>Health</h2>",
+            "<ul>",
+            f"<li>Health: {summary['health']}</li>",
+            f"<li>Validation checks: {summary['total']}</li>",
+            f"<li>OK: {summary['ok']}</li>",
+            f"<li>Warnings: {summary['warning']}</li>",
+            f"<li>Errors: {summary['error']}</li>",
+            "</ul>",
+            "<h2>Generation Policy</h2>",
+            "<ul>",
+            f"<li>Kickstart edit policy: {config.generated_ks_edit_policy}</li>",
+            f"<li>Profile overrides: {config.override_profile_root}</li>",
+            f"<li>Template overrides: {config.override_template_root}</li>",
+            f"<li>Generated Kickstarts: {config.html_root / 'ks'}</li>",
+            "</ul>",
+            "<h2>Kickstart State</h2>",
+            "<ul>",
+            f"<li>Generated Kickstarts: {generated_count}</li>",
+            f"<li>Preserved manual Kickstarts: {preserved_manual_count}</li>",
+            f"<li>Deleted stale generated Kickstarts: {deleted_stale_count}</li>",
+            f"<li>Preserved stale or unmanaged Kickstarts: {preserved_stale_count}</li>",
+            "</ul>",
+            "<h2>Warnings</h2>",
+            "<ul>",
+            "<li>Direct edits under /ks may be preserved or overwritten depending on policy.</li>",
+            "<li>Use /overrides/profiles and /overrides/templates for repeatable customizations.</li>",
+            "</ul>",
+            "<h2>Generated Files</h2>",
+            "<ul>",
+            '<li><a href="/boot.ipxe">boot.ipxe</a></li>',
+            '<li><a href="/generated/status.json">generated/status.json</a></li>',
+            '<li><a href="/generated/status.txt">generated/status.txt</a></li>',
+            '<li><a href="/generated/isos.txt">generated/isos.txt</a></li>',
+            "</ul>",
+            "</body>",
+            "</html>",
+            "",
+        ]
+    )
+
+    atomic_write(config.html_root / "index.html", "\n".join(lines))
+
+
+# =============================================================================
+# Watch-state hashing
+# =============================================================================
+
+
+def watched_template_files(template_root: Path) -> List[Path]:
+    paths: List[Path] = []
+
+    paths.append(template_root)
+    paths.append(template_root / "ks")
+
+    for pattern in ("**/*.ks.tmpl", "**/*.ks.j2"):
+        paths.extend(sorted(template_root.glob(pattern)))
+
+    return paths
+
+
+def watched_paths(config: GeneratorConfig) -> List[Path]:
+    paths: List[Path] = []
+
+    for definition in OS_DEFINITIONS:
+        iso_path = config.iso_root / definition.iso_dir
+        paths.extend(
+            [
+                iso_path,
+                iso_path / "images" / "pxeboot" / "vmlinuz",
+                iso_path / "images" / "pxeboot" / "initrd.img",
+                config.template_root / "ks" / definition.ks_template,
+                config.template_root / definition.ks_template,
+            ]
+        )
+
+        if definition.major >= 8:
+            paths.extend(
+                [
+                    iso_path / "BaseOS" / "repodata" / "repomd.xml",
+                    iso_path / "AppStream" / "repodata" / "repomd.xml",
+                ]
+            )
+        else:
+            paths.append(iso_path / "repodata" / "repomd.xml")
+
+    paths.extend(watched_template_files(config.template_root))
+    paths.extend(watched_template_files(config.override_template_root))
+
+    paths.append(config.profile_root)
+
+    for path in profile_definition_files(config.profile_root):
+        paths.append(path)
+
+    paths.append(config.override_profile_root)
+
+    for path in profile_definition_files(config.override_profile_root):
+        paths.append(path)
+
+    paths.append(config.html_root / config.background_path.lstrip("/"))
+
+    return paths
+
+
+def watched_env_values(config: GeneratorConfig) -> List[str]:
+    return [
+        config.pxe_server,
+        config.pxe_port,
+        str(config.iso_root),
+        str(config.html_root),
+        str(config.template_root),
+        str(config.profile_root),
+        str(config.override_root),
+        str(config.override_template_root),
+        str(config.override_profile_root),
+        config.generated_ks_edit_policy,
+        config.background_path,
+        config.rootpw_hash,
+        str(config.allow_default_rootpw),
+    ]
+
+
+def watched_state_hash(config: GeneratorConfig) -> str:
+    digest = hashlib.sha256()
+
+    for value in watched_env_values(config):
+        digest.update(value.encode("utf-8"))
+
+    for path in watched_paths(config):
+        digest.update(str(path).encode("utf-8"))
+
+        if path.exists():
+            stat = path.stat()
+            digest.update(str(stat.st_mtime_ns).encode("utf-8"))
+            digest.update(str(stat.st_size).encode("utf-8"))
+            digest.update(b"exists")
+        else:
+            digest.update(b"missing")
+
+    return digest.hexdigest()
+
+
+# =============================================================================
+# Generation workflows
+# =============================================================================
+
+
+def generate_once(config: GeneratorConfig) -> None:
+    config.validate()
+    rootpw_hash = config.resolved_rootpw_hash()
+    profiles = load_profile_definitions(config)
+    detected = discover_isos(config)
+
+    ensure_output_directories(config)
+
+    expected_kickstarts = KickstartRenderer(config, rootpw_hash).render_all(
+        detected,
+        profiles,
+    )
+    stale_kickstarts = cleanup_stale_kickstarts(config, expected_kickstarts)
+
+    write_boot_ipxe(config, detected, profiles)
+    render_status(config, detected, profiles, stale_kickstarts)
+    render_index(config, detected, profiles, stale_kickstarts)
+
+    detected_names = ", ".join(item.os_id for item in detected) if detected else "none"
+    profile_names = ", ".join(profile.profile_id for profile in profiles)
+
+    print(
+        f"Generated PXE content. Detected ISOs: {detected_names}. Profiles: {profile_names}",
+        flush=True,
+    )
+
+
+def watch_loop(config: GeneratorConfig) -> None:
+    last_hash = ""
+
+    while True:
+        current_hash = watched_state_hash(config)
+
+        if current_hash != last_hash:
+            generate_once(config)
+            last_hash = current_hash
+
+        time.sleep(config.watch_interval)
+
+
+# =============================================================================
+# CLI entrypoint
+# =============================================================================
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate dynamic AeroLIT PXE content.")
+    parser.add_argument("--once", action="store_true", help="Generate once and exit.")
+    parser.add_argument("--watch", action="store_true", help="Watch for changes and regenerate.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    config = GeneratorConfig.from_env()
+
+    if args.once:
+        generate_once(config)
+        return
+
+    # Default to watch mode so older entrypoints that run this script with no args still work.
+    watch_loop(config)
+
+
+if __name__ == "__main__":
+    main()
