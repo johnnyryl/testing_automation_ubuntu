@@ -1,0 +1,15 @@
+CID=pxe-content
+SCRIPT=/usr/local/bin/generate-pxe-content.py
+
+podman exec "$CID" python3 -m py_compile "$SCRIPT"
+podman exec "$CID" python3 "$SCRIPT" --once
+
+curl -fss http://127.0.0.1:18080/generated/status.json -o /tmp/status-7a.json
+curl -fss http://127.0.0.1:18080/generated/status.txt -o /tmp/status-7a.txt
+curl -fss http://127.0.0.1:18080/index.html -o /tmp/index-7a.html
+
+python3 -m json.tool /tmp/status-7a.json >/dev/null
+grep -q '"validation_summary"' /tmp/status-7a.json
+grep -q '"validation_results"' /tmp/status-7a.json
+grep -q 'AeroLIT PXE Content Status' /tmp/status-7a.txt
+grep -q '/generated/status.txt' /tmp/index-7a.html
