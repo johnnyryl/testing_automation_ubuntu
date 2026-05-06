@@ -597,8 +597,7 @@ BUILTIN_PROFILE_DEFINITIONS: List[ProfileDefinition] = [
 ]
 
 
-def override_profile_definition_files(config: GeneratorConfig) -> List[Path]:
-    return profile_definition_files(config.override_profile_root)
+def profile_definition_files(profile_root: Path) -> List[Path]:
     if not profile_root.is_dir():
         return []
 
@@ -607,6 +606,10 @@ def override_profile_definition_files(config: GeneratorConfig) -> List[Path]:
     files.extend(sorted(profile_root.glob("*.yaml")))
 
     return files
+
+
+def override_profile_definition_files(config: GeneratorConfig) -> List[Path]:
+    return profile_definition_files(config.override_profile_root)
 
 
 def load_profile_file(path: Path) -> ProfileDefinition:
@@ -989,11 +992,14 @@ def render_name_template(
             html_root=Path("/"),
             template_root=Path("/"),
             profile_root=Path("/"),
+            override_root=Path("/overrides"),
+            override_template_root=Path("/overrides/templates"),
+            override_profile_root=Path("/overrides/profiles"),
             background_path="",
             watch_interval=1,
             rootpw_hash="",
             allow_default_rootpw=True,
-        ),
+        )
         item,
         profile,
         "",
