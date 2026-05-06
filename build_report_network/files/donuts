@@ -89,6 +89,7 @@ class GeneratorConfig:
                 getenv("PXE_OVERRIDE_PROFILE_ROOT", str(override_root / "profiles"))
             ),
             generated_ks_edit_policy=getenv("PXE_GENERATED_KS_EDIT_POLICY", "preserve").lower(),
+            validation_failure_policy=getenv("PXE_VALIDATION_FAILURE_POLICY", "warn").lower(),
             background_path=getenv("PXE_BACKGROUND_PATH", "/ui/background.png"),
             watch_interval=getenv_int("PXE_WATCH_INTERVAL", 15),
             rootpw_hash=getenv("ROOTPW_HASH"),
