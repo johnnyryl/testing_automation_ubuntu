@@ -1,0 +1,232 @@
+You **do not need to change the Python file for 6E** unless the test exposes a bug.
+
+Your current Python file already has the Phase 6 behavior: override roots, profile overrides, template overrides, generated Kickstart edit policy, preserved manual edits, stale Kickstart cleanup, and status/index reporting. So **6E is mostly repository cleanup: add example files and a repeatable regression test script**. 
+
+## Where 6E goes
+
+Put the new files at the **repo root**, beside your `Dockerfile`, `README.md`, `content/`, `templates/`, etc.
+
+The new structure should look like this:
+
+```text
+pxe-content/
+├── content/
+├── templates/
+├── scripts/
+├── examples/
+│   └── overrides/
+│       ├── profiles/
+│       │   └── 10-minimal-override.example.yml
+│       └── templates/
+│           └── ks/
+│               └── rhel8-minimal.example.ks.j2
+├── tests/
+│   └── test-phase6.sh
+├── Dockerfile
+└── README.md
+```
+
+Do **not** put these under `/overrides`. Do **not** put the example template directly in `templates/ks`. The whole point is that they are examples only, not active files.
+
+---
+
+## Step 1 — Add the example override profile
+
+From the repo root:
+
+```bash
+mkdir -p examples/overrides/profiles
+```
+
+Create:
+
+```bash
+vi examples/overrides/profiles/10-minimal-override.example.yml
+```
+
+Put this in it:
+
+```yaml
+profile_id: minimal
+title: Minimal Installs Override Example
+install_label: Minimal
+menu_target: minimal
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel10
+  - rhel9
+  - rhel8
+  - rhel7
+kickstart_template: ks/{{ os_id }}-minimal.ks.j2
+kernel_args:
+  - inst.text
+  - nomodeset
+```
+
+This file is just a copy/paste example for users.
+
+---
+
+## Step 2 — Add the example override template
+
+From the repo root:
+
+```bash
+mkdir -p examples/overrides/templates/ks
+```
+
+Create:
+
+```bash
+vi examples/overrides/templates/ks/rhel8-minimal.example.ks.j2
+```
+
+Put this in it:
+
+```jinja
+#version=RHEL{{ os_major }}
+# Example override template.
+# To use this, copy it to:
+# /overrides/templates/ks/rhel8-minimal.ks.j2
+
+{% include "partials/install-mode-text.ks.j2" %}
+{% include "partials/language-keyboard.ks.j2" %}
+{% include "partials/timezone.ks.j2" %}
+{% include "partials/network-dhcp.ks.j2" %}
+{% include "partials/root-password.ks.j2" %}
+{% include "partials/repo-url.ks.j2" %}
+{% include "partials/storage-default-lvm.ks.j2" %}
+{% include "partials/packages-minimal.ks.j2" %}
+{% include "partials/services-basic.ks.j2" %}
+{% include "partials/kdump-enabled.ks.j2" %}
+{% include "partials/post-empty.ks.j2" %}
+```
+
+Important: the file name is `rhel8-minimal.example.ks.j2`, **not** `rhel8-minimal.ks.j2`. That prevents it from being mistaken for an active template.
+
+---
+
+## Step 3 — Add the regression test script
+
+From the repo root:
+
+```bash
+mkdir -p tests
+```
+
+Create:
+
+```bash
+vi tests/test-phase6.sh
+```
+
+Put this in it:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+CID="${CID:-pxe-content}"
+SCRIPT="${SCRIPT:-/usr/local/bin/generate-pxe-content.py}"
+BASE_URL="${BASE_URL:-http://127.0.0.1:18080}"
+
+echo "== Phase 6 regression test =="
+
+echo "-- Python syntax check"
+podman exec "$CID" python3 -m py_compile "$SCRIPT"
+
+echo "-- Generate once"
+podman exec "$CID" python3 "$SCRIPT" --once
+
+echo "-- Fetch generated files"
+curl -fss "$BASE_URL/boot.ipxe" -o /tmp/boot.ipxe
+curl -fss "$BASE_URL/index.html" -o /tmp/index.html
+curl -fss "$BASE_URL/generated/status.json" -o /tmp/status.json
+curl -fss "$BASE_URL/ks/rhel8-minimal.ks" -o /tmp/rhel8-minimal.ks
+
+echo "-- Validate status JSON"
+python3 -m json.tool /tmp/status.json >/dev/null
+
+echo "-- Confirm Jinja includes rendered away"
+if grep -Eq '\{% include|partials/' /tmp/rhel8-minimal.ks; then
+  echo "ERROR: Jinja include remained in generated kickstart"
+  exit 1
+fi
+
+echo "-- Confirm core Kickstart content exists"
+grep -q 'url --url=' /tmp/rhel8-minimal.ks
+grep -q 'rootpw --iscrypted' /tmp/rhel8-minimal.ks
+grep -q '@^minimal-environment' /tmp/rhel8-minimal.ks
+
+echo "-- Confirm Phase 6 status/index visibility"
+grep -q '"generator"' /tmp/status.json
+grep -q '"active_overrides"' /tmp/status.json
+grep -q '"stale_kickstarts"' /tmp/status.json
+grep -q 'Generation Policy' /tmp/index.html
+grep -q 'Kickstart State' /tmp/index.html
+grep -q 'Warnings' /tmp/index.html
+grep -q 'Generated Files' /tmp/index.html
+
+echo "-- Confirm root password hash is not leaked into status/index"
+if grep -E '\$6\$|REKKqe02' /tmp/status.json /tmp/index.html; then
+  echo "ERROR: root password hash leaked into status/index"
+  exit 1
+fi
+
+echo "-- Confirm future placeholders do not generate real boot targets"
+if grep -Eq 'inst\.ks=.*(developer-workstation|security-baseline|security-luks|embedded-edge)' /tmp/boot.ipxe; then
+  echo "ERROR: future placeholder profile generated a real boot target"
+  exit 1
+fi
+
+echo "PASS: Phase 6 regression test passed"
+```
+
+Then make it executable:
+
+```bash
+chmod +x tests/test-phase6.sh
+```
+
+---
+
+## Step 4 — Run the test
+
+After your image/container is rebuilt with the current Python file, run this from the repo root:
+
+```bash
+CID=pxe-content ./tests/test-phase6.sh
+```
+
+You want:
+
+```text
+PASS: Phase 6 regression test passed
+```
+
+If your container name is different, change `CID`:
+
+```bash
+CID=my-container-name ./tests/test-phase6.sh
+```
+
+If your port is different:
+
+```bash
+CID=pxe-content BASE_URL=http://127.0.0.1:18080 ./tests/test-phase6.sh
+```
+
+## Bottom line
+
+For 6E, you are adding:
+
+```text
+examples/overrides/profiles/10-minimal-override.example.yml
+examples/overrides/templates/ks/rhel8-minimal.example.ks.j2
+tests/test-phase6.sh
+```
+
+You are **not** editing the Python file unless the test fails.
