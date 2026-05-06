@@ -3041,6 +3041,7 @@ def render_index(
             "<h2>Generation Policy</h2>",
             "<ul>",
             f"<li>Kickstart edit policy: {config.generated_ks_edit_policy}</li>",
+            f"<li>Validation failure policy: {config.validation_failure_policy}</li>",
             f"<li>Profile overrides: {config.override_profile_root}</li>",
             f"<li>Template overrides: {config.override_template_root}</li>",
             f"<li>Generated Kickstarts: {config.html_root / 'ks'}</li>",
