@@ -119,7 +119,6 @@ class GeneratorConfig:
                 "preserve, overwrite."
             )
 
-
         if self.validation_failure_policy not in ("warn", "fail"):
             fail(
                 "PXE_VALIDATION_FAILURE_POLICY must be one of: "
