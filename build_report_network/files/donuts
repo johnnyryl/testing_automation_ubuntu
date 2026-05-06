@@ -120,6 +120,13 @@ class GeneratorConfig:
             )
 
 
+        if self.validation_failure_policy not in ("warn", "fail"):
+            fail(
+                "PXE_VALIDATION_FAILURE_POLICY must be one of: "
+                "warn, fail."
+            )
+
+
 # Default password is "changeme".
 DEFAULT_ROOTPW_HASH = "$6$REKKqe02R3z8Y64USCA2sFUk/H/4dPEAZ/CqSX2Rauff3tbR00t2apKmPTbXAXUALwgwHWXdoggAKOQQuJ6PWWCavgQi35S8XAIj5P/"
 
