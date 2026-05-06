@@ -1,0 +1,603 @@
+Yes — let’s make **6A** very mechanical.
+
+Phase **6A** is only this:
+
+> Add `/overrides/profiles` and `/overrides/templates` so site/user overrides can win over the built-in/base files.
+
+No emergency edit behavior yet. No generated kickstart preservation yet. That comes later.
+
+---
+
+# 6A edit checklist
+
+## Edit 1 — Replace `GeneratorConfig`
+
+Find this section:
+
+```python
+@dataclass(frozen=True)
+class GeneratorConfig:
+```
+
+Replace the **whole `GeneratorConfig` class** with this:
+
+```python
+@dataclass(frozen=True)
+class GeneratorConfig:
+    pxe_server: str
+    pxe_port: str
+    iso_root: Path
+    html_root: Path
+    template_root: Path
+    profile_root: Path
+    override_root: Path
+    override_template_root: Path
+    override_profile_root: Path
+    background_path: str
+    watch_interval: int
+    rootpw_hash: str
+    allow_default_rootpw: bool
+
+    @classmethod
+    def from_env(cls) -> "GeneratorConfig":
+        override_root = Path(getenv("PXE_OVERRIDE_ROOT", "/overrides"))
+
+        return cls(
+            pxe_server=getenv("PXE_SERVER"),
+            pxe_port=getenv("PXE_PORT", "18080"),
+            iso_root=Path(getenv("PXE_ISO_ROOT", "/iso")),
+            html_root=Path(getenv("PXE_HTML_ROOT", "/etc/nginx/html")),
+            template_root=Path(getenv("PXE_TEMPLATE_ROOT", "/templates")),
+            profile_root=Path(getenv("PXE_PROFILE_ROOT", "/profiles")),
+            override_root=override_root,
+            override_template_root=Path(
+                getenv("PXE_OVERRIDE_TEMPLATE_ROOT", str(override_root / "templates"))
+            ),
+            override_profile_root=Path(
+                getenv("PXE_OVERRIDE_PROFILE_ROOT", str(override_root / "profiles"))
+            ),
+            background_path=getenv("PXE_BACKGROUND_PATH", "/ui/background.png"),
+            watch_interval=getenv_int("PXE_WATCH_INTERVAL", 15),
+            rootpw_hash=getenv("ROOTPW_HASH"),
+            allow_default_rootpw=getenv_bool("ALLOW_DEFAULT_ROOTPW", True),
+        )
+
+    def resolved_rootpw_hash(self) -> str:
+        if self.rootpw_hash:
+            return self.rootpw_hash
+
+        if self.allow_default_rootpw:
+            return DEFAULT_ROOTPW_HASH
+
+        fail("ROOTPW_HASH is required unless ALLOW_DEFAULT_ROOTPW=true.")
+        return ""
+
+    def validate(self) -> None:
+        if not self.pxe_server:
+            fail("PXE_SERVER is required.")
+
+        if self.watch_interval < 1:
+            fail("PXE_WATCH_INTERVAL must be 1 or greater.")
+```
+
+---
+
+## Edit 2 — Add override profile file discovery
+
+Find this function:
+
+```python
+def profile_definition_files(profile_root: Path) -> List[Path]:
+```
+
+Leave that function alone.
+
+Directly **under it**, add this new function:
+
+```python
+def override_profile_definition_files(config: GeneratorConfig) -> List[Path]:
+    return profile_definition_files(config.override_profile_root)
+```
+
+---
+
+## Edit 3 — Replace `load_profile_definitions`
+
+Find this function:
+
+```python
+def load_profile_definitions(config: GeneratorConfig) -> List[ProfileDefinition]:
+```
+
+Replace the **whole function** with this:
+
+```python
+def load_profile_definitions(config: GeneratorConfig) -> List[ProfileDefinition]:
+    base_files = profile_definition_files(config.profile_root)
+
+    if not base_files:
+        base_profiles = list(BUILTIN_PROFILE_DEFINITIONS)
+    else:
+        base_profiles = [load_profile_file(path) for path in base_files]
+
+    override_files = override_profile_definition_files(config)
+    override_profiles = [load_profile_file(path) for path in override_files]
+
+    by_profile_id: Dict[str, ProfileDefinition] = {}
+    profile_order: List[str] = []
+
+    for profile in base_profiles:
+        by_profile_id[profile.profile_id] = profile
+        profile_order.append(profile.profile_id)
+
+    for profile in override_profiles:
+        if profile.profile_id not in by_profile_id:
+            profile_order.append(profile.profile_id)
+
+        by_profile_id[profile.profile_id] = profile
+
+    profiles = [by_profile_id[profile_id] for profile_id in profile_order]
+
+    validate_profile_definitions(profiles)
+    return profiles
+```
+
+This means:
+
+* built-in/base profile loads first
+* override profile with same `profile_id` replaces it
+* new override-only profiles get appended
+
+---
+
+## Edit 4 — Replace `kickstart_template_candidates`
+
+Find this function:
+
+```python
+def kickstart_template_candidates(
+    config: GeneratorConfig,
+    template_name: str,
+) -> Tuple[Path, ...]:
+```
+
+Replace the **whole function** with this:
+
+```python
+def kickstart_template_candidates(
+    config: GeneratorConfig,
+    template_name: str,
+) -> Tuple[Path, ...]:
+    template_path = Path(template_name)
+    candidates: List[Path] = []
+
+    def add_candidates_for_root(root: Path) -> None:
+        if len(template_path.parts) == 1:
+            candidates.append(root / "ks" / template_path)
+            candidates.append(root / template_path)
+        else:
+            candidates.append(root / template_path)
+
+    # Override templates win first.
+    add_candidates_for_root(config.override_template_root)
+
+    # Base templates are fallback.
+    add_candidates_for_root(config.template_root)
+
+    deduped: List[Path] = []
+
+    for candidate in candidates:
+        if candidate not in deduped:
+            deduped.append(candidate)
+
+    return tuple(deduped)
+```
+
+This makes the lookup order:
+
+```text
+/overrides/templates/ks/<template>
+/overrides/templates/<template>
+/templates/ks/<template>
+/templates/<template>
+```
+
+For explicit paths like `ks/rhel8-minimal.ks.j2`, it checks:
+
+```text
+/overrides/templates/ks/rhel8-minimal.ks.j2
+/templates/ks/rhel8-minimal.ks.j2
+```
+
+---
+
+## Edit 5 — Replace `render_jinja2_template_text`
+
+Find this function:
+
+```python
+def render_jinja2_template_text(
+```
+
+Replace the **whole function** with this:
+
+```python
+def render_jinja2_template_text(
+    raw: str,
+    values: Dict[str, Any],
+    source: str,
+    template_roots: Tuple[Path, ...],
+) -> str:
+    if jinja2 is None:
+        fail(
+            f"Template {source} requires Jinja2, but the jinja2 Python package is not installed. "
+            "Install py3-jinja2 on Alpine or python3-jinja2 on RHEL/UBI."
+        )
+
+    environment = jinja2.Environment(
+        loader=jinja2.ChoiceLoader(
+            [
+                jinja2.FileSystemLoader(str(template_root))
+                for template_root in template_roots
+            ]
+        ),
+        undefined=jinja2.StrictUndefined,
+        autoescape=False,
+        keep_trailing_newline=True,
+    )
+
+    try:
+        return environment.from_string(raw).render(**values)
+    except jinja2.TemplateError as exc:
+        fail(f"Template {source} failed Jinja2 rendering: {exc}")
+```
+
+This is the part that makes Jinja includes work from both places:
+
+```text
+/overrides/templates
+/templates
+```
+
+Override partials win over base partials.
+
+---
+
+## Edit 6 — Replace `render_kickstart_template_text`
+
+Find this function:
+
+```python
+def render_kickstart_template_text(
+```
+
+Replace the **whole function** with this:
+
+```python
+def render_kickstart_template_text(
+    raw: str,
+    values: Dict[str, Any],
+    source: str,
+    template_engine: str,
+    template_roots: Tuple[Path, ...],
+) -> str:
+    if template_engine == "jinja2":
+        return render_jinja2_template_text(raw, values, source, template_roots)
+
+    if template_engine == "simple":
+        return render_simple_template_text(raw, values, source)
+
+    fail(f"Template {source} has unsupported template engine: {template_engine}")
+    return ""
+```
+
+---
+
+## Edit 7 — Update `KickstartRenderer.render_template`
+
+Find this section inside `KickstartRenderer.render_template()`:
+
+```python
+return render_kickstart_template_text(
+    raw,
+    values,
+    str(resolution.template_path),
+    resolution.template_engine,
+    self.config.template_root,
+)
+```
+
+Replace only that call with this:
+
+```python
+return render_kickstart_template_text(
+    raw,
+    values,
+    str(resolution.template_path),
+    resolution.template_engine,
+    (
+        self.config.override_template_root,
+        self.config.template_root,
+    ),
+)
+```
+
+---
+
+## Edit 8 — Update `render_status`
+
+Find the `status = {` block inside `render_status()`.
+
+You currently have this kind of section:
+
+```python
+status = {
+    "pxe_server": config.pxe_server,
+    "pxe_port": config.pxe_port,
+    "container_iso_root": str(config.iso_root),
+    "html_root": str(config.html_root),
+```
+
+Add these lines under `html_root`:
+
+```python
+        "template_root": str(config.template_root),
+        "profile_root": str(config.profile_root),
+        "override_root": str(config.override_root),
+        "override_template_root": str(config.override_template_root),
+        "override_profile_root": str(config.override_profile_root),
+```
+
+So that section becomes:
+
+```python
+status = {
+    "pxe_server": config.pxe_server,
+    "pxe_port": config.pxe_port,
+    "container_iso_root": str(config.iso_root),
+    "html_root": str(config.html_root),
+    "template_root": str(config.template_root),
+    "profile_root": str(config.profile_root),
+    "override_root": str(config.override_root),
+    "override_template_root": str(config.override_template_root),
+    "override_profile_root": str(config.override_profile_root),
+```
+
+This does not change boot behavior. It just makes `status.json` more useful.
+
+---
+
+## Edit 9 — Update `watched_env_values`
+
+Find this function:
+
+```python
+def watched_env_values(config: GeneratorConfig) -> List[str]:
+```
+
+Replace the **whole function** with this:
+
+```python
+def watched_env_values(config: GeneratorConfig) -> List[str]:
+    return [
+        config.pxe_server,
+        config.pxe_port,
+        str(config.iso_root),
+        str(config.html_root),
+        str(config.template_root),
+        str(config.profile_root),
+        str(config.override_root),
+        str(config.override_template_root),
+        str(config.override_profile_root),
+        config.background_path,
+        config.rootpw_hash,
+        str(config.allow_default_rootpw),
+    ]
+```
+
+---
+
+## Edit 10 — Update `watched_paths`
+
+Find this part inside `watched_paths()`:
+
+```python
+    paths.extend(watched_template_files(config.template_root))
+
+    paths.append(config.profile_root)
+
+    for path in profile_definition_files(config.profile_root):
+        paths.append(path)
+
+    paths.append(config.html_root / config.background_path.lstrip("/"))
+```
+
+Replace that section with this:
+
+```python
+    paths.extend(watched_template_files(config.template_root))
+    paths.extend(watched_template_files(config.override_template_root))
+
+    paths.append(config.profile_root)
+
+    for path in profile_definition_files(config.profile_root):
+        paths.append(path)
+
+    paths.append(config.override_profile_root)
+
+    for path in profile_definition_files(config.override_profile_root):
+        paths.append(path)
+
+    paths.append(config.html_root / config.background_path.lstrip("/"))
+```
+
+That makes watch mode notice override changes.
+
+---
+
+# 6A tests to run before merge
+
+Use your actual container name if it is not `pxe-content`.
+
+```bash
+CID=pxe-content
+SCRIPT=/usr/local/bin/generate-pxe-content.py
+```
+
+## Test 1 — syntax check
+
+```bash
+podman exec "$CID" python3 -m py_compile "$SCRIPT"
+```
+
+Expected: **no output**.
+
+---
+
+## Test 2 — normal generation still works
+
+```bash
+podman exec "$CID" python3 "$SCRIPT" --once
+curl -fsS http://127.0.0.1:18080/generated/status.json | python3 -m json.tool >/dev/null
+```
+
+Expected: **no output**.
+
+---
+
+## Test 3 — override template wins
+
+This test creates a temporary override template for RHEL 8 minimal and proves the generated kickstart came from `/overrides/templates`.
+
+```bash
+podman exec "$CID" /bin/sh -lc '
+set -e
+
+mkdir -p /overrides/templates/ks
+mkdir -p /overrides/templates/partials
+
+cat > /overrides/templates/partials/phase6a-marker.ks.j2 <<EOF
+# PHASE6A_OVERRIDE_INCLUDE_WORKED
+EOF
+
+cat > /overrides/templates/ks/rhel8-minimal.ks.j2 <<EOF
+#version=RHEL{{ os_major }}
+# PHASE6A_OVERRIDE_TEMPLATE_WORKED
+{% include "partials/phase6a-marker.ks.j2" %}
+text
+reboot
+lang en_US.UTF-8
+keyboard us
+timezone America/Chicago --utc
+network --bootproto=dhcp --device=link --activate
+rootpw --iscrypted {{ ROOTPW_HASH }}
+url --url="{{ repo_url }}"
+zerombr
+clearpart --all --initlabel
+autopart --type=lvm
+%packages
+@^minimal-environment
+%end
+EOF
+
+python3 /usr/local/bin/generate-pxe-content.py --once
+'
+```
+
+Now verify:
+
+```bash
+curl -fsS http://127.0.0.1:18080/ks/rhel8-minimal.ks | grep -q 'PHASE6A_OVERRIDE_TEMPLATE_WORKED'
+curl -fsS http://127.0.0.1:18080/ks/rhel8-minimal.ks | grep -q 'PHASE6A_OVERRIDE_INCLUDE_WORKED'
+curl -fsS http://127.0.0.1:18080/generated/status.json | grep -q '/overrides/templates/ks/rhel8-minimal.ks.j2'
+```
+
+Expected: **no output**.
+
+---
+
+## Test 4 — override profile wins
+
+This overrides the minimal menu title temporarily.
+
+```bash
+podman exec "$CID" /bin/sh -lc '
+set -e
+
+mkdir -p /overrides/profiles
+
+cat > /overrides/profiles/10-minimal-override.yml <<EOF
+profile_id: minimal
+title: Minimal Installs Override Test
+install_label: Minimal
+menu_target: minimal
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel10
+  - rhel9
+  - rhel8
+  - rhel7
+kickstart_template: ks/{{ os_id }}-minimal.ks.j2
+kernel_args:
+  - inst.text
+  - nomodeset
+EOF
+
+python3 /usr/local/bin/generate-pxe-content.py --once
+'
+```
+
+Now verify:
+
+```bash
+curl -fsS http://127.0.0.1:18080/boot.ipxe | grep -q 'Minimal Installs Override Test'
+curl -fsS http://127.0.0.1:18080/generated/status.json | grep -q '/overrides/profiles/10-minimal-override.yml'
+```
+
+Expected: **no output**.
+
+---
+
+## Test 5 — cleanup temporary override test files
+
+Run this so you do not accidentally leave the test override active:
+
+```bash
+podman exec "$CID" /bin/sh -lc '
+set -e
+rm -f /overrides/templates/ks/rhel8-minimal.ks.j2
+rm -f /overrides/templates/partials/phase6a-marker.ks.j2
+rm -f /overrides/profiles/10-minimal-override.yml
+python3 /usr/local/bin/generate-pxe-content.py --once
+'
+```
+
+Then verify the override test text is gone:
+
+```bash
+curl -fsS http://127.0.0.1:18080/boot.ipxe | grep -q 'Minimal Installs Override Test' && echo "ERROR: profile override still active" && exit 1 || true
+curl -fsS http://127.0.0.1:18080/ks/rhel8-minimal.ks | grep -q 'PHASE6A_OVERRIDE_TEMPLATE_WORKED' && echo "ERROR: template override still active" && exit 1 || true
+```
+
+Expected output: probably nothing, or just your shell returning successfully.
+
+---
+
+# Merge criteria for 6A
+
+Merge it when these are true:
+
+```text
+python compile passes
+normal --once generation passes
+/overrides/templates/... can override a base template
+override template can include override/base partials
+/overrides/profiles/... can override a base profile
+status.json shows override roots and override template/profile source paths
+temporary test overrides are cleaned up before merge
+```
+
+That is all 6A needs.
