@@ -2904,6 +2904,7 @@ def render_status(
         "generator": {
             "generated_at": utc_timestamp(),
             "generated_ks_edit_policy": config.generated_ks_edit_policy,
+            "validation_failure_policy": config.validation_failure_policy,
             "template_root": str(config.template_root),
             "profile_root": str(config.profile_root),
             "override_root": str(config.override_root),
