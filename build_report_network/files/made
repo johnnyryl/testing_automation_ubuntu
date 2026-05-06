@@ -1952,6 +1952,20 @@ UNRESOLVED_JINJA_VARIABLE_RE = re.compile(r"{{\s*[^}]+\s*}}")
 UNRESOLVED_SHELL_PLACEHOLDER_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
 
 
+BOOT_ARTIFACT_CHECK_PREFIXES: Tuple[str, ...] = (
+    "boot_ipxe_",
+    "boot_target_",
+    "boot_kernel_",
+    "boot_initrd_",
+    "boot_kickstart_",
+    "unimplemented_profile_has_no_real_ks_reference:",
+)
+
+
+def is_boot_artifact_validation_result(result: Dict[str, object]) -> bool:
+    return str(result.get("check_id", "")).startswith(BOOT_ARTIFACT_CHECK_PREFIXES)
+
+
 def validation_result(
     check_id: str,
     status: str,
@@ -2243,6 +2257,195 @@ def validate_kickstart_content(
             )
 
 
+def validate_boot_ipxe_content(
+    results: List[Dict[str, object]],
+    config: GeneratorConfig,
+    detected: List[DetectedISO],
+    profiles: List[ProfileDefinition],
+) -> None:
+    boot_path = config.html_root / "boot.ipxe"
+    http_path = "/boot.ipxe"
+
+    if not boot_path.is_file():
+        return
+
+    content = boot_path.read_text(encoding="utf-8")
+    padded_content = f"\n{content}\n"
+
+    def add_check(
+        check_id: str,
+        condition: bool,
+        ok_message: str,
+        fail_message: str,
+        fail_status: str = "error",
+        details: Optional[Dict[str, object]] = None,
+    ) -> None:
+        results.append(
+            validation_result(
+                check_id=check_id,
+                status="ok" if condition else fail_status,
+                message=ok_message if condition else fail_message,
+                path=str(boot_path),
+                http_path=http_path,
+                details=details,
+            )
+        )
+
+    add_check(
+        "boot_ipxe_nonempty",
+        bool(content.strip()),
+        "boot.ipxe is not empty.",
+        "boot.ipxe is empty.",
+        details={"size_bytes": boot_path.stat().st_size},
+    )
+
+    if not content.strip():
+        return
+
+    add_check(
+        "boot_ipxe_has_shebang",
+        content.startswith("#!ipxe"),
+        "boot.ipxe starts with #!ipxe.",
+        "boot.ipxe does not start with #!ipxe.",
+    )
+
+    add_check(
+        "boot_ipxe_has_main_menu",
+        "\n:main\n" in padded_content,
+        "boot.ipxe contains the main menu target.",
+        "boot.ipxe is missing the :main target.",
+    )
+
+    add_check(
+        "boot_ipxe_has_choose_target",
+        "choose target" in content,
+        "boot.ipxe contains a choose target statement.",
+        "boot.ipxe is missing a choose target statement.",
+    )
+
+    add_check(
+        "boot_ipxe_has_shell_target",
+        "\n:shell\n" in padded_content,
+        "boot.ipxe contains the shell target.",
+        "boot.ipxe is missing the :shell target.",
+    )
+
+    add_check(
+        "boot_ipxe_no_unresolved_jinja_block",
+        UNRESOLVED_JINJA_BLOCK_RE.search(content) is None,
+        "boot.ipxe has no unresolved Jinja blocks.",
+        "boot.ipxe contains an unresolved Jinja block such as {% ... %}.",
+    )
+
+    add_check(
+        "boot_ipxe_no_unresolved_jinja_variable",
+        UNRESOLVED_JINJA_VARIABLE_RE.search(content) is None,
+        "boot.ipxe has no unresolved Jinja variables.",
+        "boot.ipxe contains an unresolved Jinja variable such as {{ ... }}.",
+    )
+
+    def validate_real_boot_target(
+        item: DetectedISO,
+        profile: ProfileDefinition,
+        firmware: str,
+    ) -> None:
+        target = f"{item.os_id}_{profile.profile_id}_{firmware}"
+        kickstart_name = profile_kickstart_name(item, profile)
+
+        details = {
+            "os_id": item.os_id,
+            "profile_id": profile.profile_id,
+            "firmware": firmware,
+            "target": target,
+            "kickstart_name": kickstart_name,
+        }
+
+        add_check(
+            f"boot_target_exists:{item.os_id}:{profile.profile_id}:{firmware}",
+            f"\n:{target}\n" in padded_content,
+            f"boot.ipxe contains target {target}.",
+            f"boot.ipxe is missing target {target}.",
+            details=details,
+        )
+
+        add_check(
+            f"boot_kernel_reference_exists:{item.os_id}:{profile.profile_id}:{firmware}",
+            f"/{item.http_path}/images/pxeboot/vmlinuz" in content,
+            (
+                f"boot.ipxe references the PXE kernel for "
+                f"{item.os_id} {profile.profile_id} {firmware}."
+            ),
+            (
+                f"boot.ipxe does not reference the PXE kernel for "
+                f"{item.os_id} {profile.profile_id} {firmware}."
+            ),
+            details=details,
+        )
+
+        add_check(
+            f"boot_initrd_reference_exists:{item.os_id}:{profile.profile_id}:{firmware}",
+            f"/{item.http_path}/images/pxeboot/initrd.img" in content,
+            (
+                f"boot.ipxe references the PXE initrd for "
+                f"{item.os_id} {profile.profile_id} {firmware}."
+            ),
+            (
+                f"boot.ipxe does not reference the PXE initrd for "
+                f"{item.os_id} {profile.profile_id} {firmware}."
+            ),
+            details=details,
+        )
+
+        add_check(
+            f"boot_kickstart_reference_exists:{item.os_id}:{profile.profile_id}:{firmware}",
+            f"/ks/{kickstart_name}" in content,
+            (
+                f"boot.ipxe references Kickstart {kickstart_name} for "
+                f"{item.os_id} {profile.profile_id} {firmware}."
+            ),
+            (
+                f"boot.ipxe does not reference Kickstart {kickstart_name} for "
+                f"{item.os_id} {profile.profile_id} {firmware}."
+            ),
+            details=details,
+        )
+
+    for profile in profiles:
+        for item in detected:
+            if not profile_has_install_option(item, profile):
+                continue
+
+            if profile.implemented:
+                if item.uefi and profile.uefi:
+                    validate_real_boot_target(item, profile, "uefi")
+
+                if item.bios and profile.bios:
+                    validate_real_boot_target(item, profile, "bios")
+
+                continue
+
+            kickstart_name = profile_kickstart_name(item, profile)
+            real_ks_reference = f"/ks/{kickstart_name}"
+
+            add_check(
+                f"unimplemented_profile_has_no_real_ks_reference:{item.os_id}:{profile.profile_id}",
+                real_ks_reference not in content,
+                (
+                    f"Unimplemented profile {profile.profile_id} for {item.os_id} "
+                    "does not reference a real Kickstart."
+                ),
+                (
+                    f"Unimplemented profile {profile.profile_id} for {item.os_id} "
+                    f"references real Kickstart {kickstart_name}."
+                ),
+                details={
+                    "os_id": item.os_id,
+                    "profile_id": profile.profile_id,
+                    "kickstart_name": kickstart_name,
+                },
+            )
+
+
 def validate_generated_content(
     config: GeneratorConfig,
     detected: List[DetectedISO],
@@ -2277,6 +2480,13 @@ def validate_generated_content(
         config.html_root / "boot.ipxe",
         "boot.ipxe exists",
         "/boot.ipxe",
+    )
+
+    validate_boot_ipxe_content(
+        results,
+        config,
+        detected,
+        profiles,
     )
 
     for item in detected:
@@ -2360,6 +2570,51 @@ def render_status_text(status: Dict[str, object]) -> str:
         for item in detected_isos:
             lines.append(
                 f"- {item['os_id']}: {item['title']} from {item['iso_path']}"
+            )
+    else:
+        lines.append("- none")
+
+    boot_artifact_validation = status.get("boot_artifact_validation", [])
+
+    lines.extend(
+        [
+            "",
+            "Boot Artifact Validation",
+            "------------------------",
+        ]
+    )
+
+    if isinstance(boot_artifact_validation, list) and boot_artifact_validation:
+        boot_summary = validation_summary(
+            [
+                result
+                for result in boot_artifact_validation
+                if isinstance(result, dict)
+            ]
+        )
+
+        lines.extend(
+            [
+                f"Health: {boot_summary['health']}",
+                f"Total checks: {boot_summary['total']}",
+                f"OK: {boot_summary['ok']}",
+                f"Warnings: {boot_summary['warning']}",
+                f"Errors: {boot_summary['error']}",
+                "",
+            ]
+        )
+
+        for result in boot_artifact_validation:
+            if not isinstance(result, dict):
+                continue
+
+            location = result.get("http_path") or result.get("path") or ""
+            suffix = f" [{location}]" if location else ""
+
+            lines.append(
+                f"- [{str(result.get('status', 'error')).upper()}] "
+                f"{result.get('check_id', 'unknown')}: "
+                f"{result.get('message', '')}{suffix}"
             )
     else:
         lines.append("- none")
@@ -2592,6 +2847,12 @@ def render_status(
     validation_results = validate_generated_content(config, detected, profiles)
     summary = validation_summary(validation_results)
 
+    boot_artifact_validation = [
+        result
+        for result in validation_results
+        if is_boot_artifact_validation_result(result)
+    ]
+
     status = {
         "generator": {
             "generated_at": utc_timestamp(),
@@ -2630,6 +2891,7 @@ def render_status(
         "generated_kickstarts": generated_kickstarts,
         "stale_kickstarts": stale_kickstarts,
         "validation_summary": summary,
+        "boot_artifact_validation": boot_artifact_validation,
         "validation_results": validation_results,
         "boot_menu": "/boot.ipxe",
         "status_text": "/generated/status.txt",
