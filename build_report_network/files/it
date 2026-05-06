@@ -1,0 +1,27 @@
+CID=pxe-content
+SCRIPT=/usr/local/bin/generate-pxe-content.py
+
+podman exec "$CID" python3 -m py_compile "$SCRIPT"
+podman exec "$CID" python3 "$SCRIPT" --once
+
+curl -fss http://127.0.0.1:18080/generated/status.json -o /tmp/status-7c.json
+curl -fss http://127.0.0.1:18080/generated/status.txt -o /tmp/status-7c.txt
+
+python3 -m json.tool /tmp/status-7c.json >/dev/null
+
+grep -q '"boot_artifact_validation"' /tmp/status-7c.json
+grep -q 'boot_ipxe_has_main_menu' /tmp/status-7c.json
+grep -q 'boot_ipxe_has_shell_target' /tmp/status-7c.json
+grep -q 'boot_ipxe_no_unresolved_jinja_variable' /tmp/status-7c.json
+grep -q 'boot_target_exists:rhel8:minimal:uefi' /tmp/status-7c.json
+grep -q 'boot_kickstart_reference_exists:rhel8:minimal:uefi' /tmp/status-7c.json
+grep -q 'Boot Artifact Validation' /tmp/status-7c.txt
+
+if grep -E '\$6\$|REKKqe02' /tmp/status-7c.json /tmp/status-7c.txt; then
+  echo "ERROR: root password hash leaked into status output"
+  exit 1
+else
+  echo "OK: no root password hash leaked into status output"
+fi
+
+echo "7C test passed"
