@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from string import Template
@@ -1146,6 +1147,87 @@ def read_json_mapping(path: Path) -> Dict[str, Any]:
     return data
 
 
+def utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def relative_to_root(path: Optional[Path], root: Path) -> Optional[str]:
+    if path is None:
+        return None
+
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def active_override_files(config: GeneratorConfig) -> Dict[str, List[str]]:
+    profile_overrides = [
+        str(path)
+        for path in override_profile_definition_files(config)
+    ]
+
+    template_overrides: List[str] = []
+
+    if config.override_template_root.is_dir():
+        for pattern in ("**/*.ks.tmpl", "**/*.ks.j2"):
+            template_overrides.extend(
+                str(path)
+                for path in sorted(config.override_template_root.glob(pattern))
+                if path.is_file()
+            )
+
+    return {
+        "profiles": profile_overrides,
+        "templates": sorted(set(template_overrides)),
+    }
+
+
+def template_source_label(config: GeneratorConfig, template_path: Optional[Path]) -> str:
+    if template_path is None:
+        return "built-in-default"
+
+    try:
+        template_path.relative_to(config.override_template_root)
+        return "override"
+    except ValueError:
+        return "base"
+
+
+def managed_kickstart_header(
+    config: GeneratorConfig,
+    item: DetectedISO,
+    profile: ProfileDefinition,
+    resolution: KickstartTemplateResolution,
+    destination: Path,
+) -> str:
+    template_path = (
+        str(resolution.template_path)
+        if resolution.template_path is not None
+        else "built-in-default"
+    )
+
+    return f"""# ---------------------------------------------------------------------------
+# Managed by AeroLIT PXE Content Generator
+# Profile: {profile.profile_id}
+# Profile title: {profile.title}
+# OS: {item.os_id}
+# OS title: {item.title}
+# Template: {resolution.template_name}
+# Template path: {template_path}
+# Template source: {template_source_label(config, resolution.template_path)}
+# Generated output: /ks/{destination.name}
+# Direct edit policy: {config.generated_ks_edit_policy}
+#
+# Manual edits to this generated file may be preserved depending on policy.
+# Preferred customization path:
+#   {config.override_profile_root}
+#   {config.override_template_root}
+# ---------------------------------------------------------------------------
+
+"""
+
+
 def kickstart_state_path(config: GeneratorConfig, destination: Path) -> Path:
     return config.html_root / "generated" / "kickstart-state" / f"{destination.name}.json"
 
@@ -1422,6 +1504,17 @@ class KickstartRenderer:
                 f"Profile {profile.profile_id} has unresolved Kickstart template "
                 f"{resolution.template_name!r}."
             )
+
+        rendered = (
+            managed_kickstart_header(
+                self.config,
+                item,
+                profile,
+                resolution,
+                destination,
+            )
+            + rendered
+        )
 
         write_generated_kickstart(self.config, destination, rendered)
 
@@ -1920,6 +2013,7 @@ def generated_kickstart_status(
                         else None
                     ),
                     "template_source": resolution.template_source,
+                    "template_source_detail": template_source_label(config, resolution.template_path),
                     "template_engine": resolution.template_engine,
                     "template_search_paths": [
                         str(candidate) for candidate in resolution.candidates
@@ -1966,6 +2060,21 @@ def render_status(
     ]
 
     status = {
+        "generator": {
+            "generated_at": utc_timestamp(),
+            "generated_ks_edit_policy": config.generated_ks_edit_policy,
+            "template_root": str(config.template_root),
+            "profile_root": str(config.profile_root),
+            "override_root": str(config.override_root),
+            "override_template_root": str(config.override_template_root),
+            "override_profile_root": str(config.override_profile_root),
+            "kickstart_output_root": str(config.html_root / "ks"),
+            "preferred_customization_paths": [
+                str(config.override_profile_root),
+                str(config.override_template_root),
+            ],
+        },
+        "active_overrides": active_override_files(config),
         "pxe_server": config.pxe_server,
         "pxe_port": config.pxe_port,
         "container_iso_root": str(config.iso_root),
@@ -2009,6 +2118,7 @@ def render_index(
     config: GeneratorConfig,
     detected: List[DetectedISO],
     profiles: List[ProfileDefinition],
+    stale_kickstarts: List[Dict[str, object]],
 ) -> None:
     lines = [
         "<html>",
@@ -2040,8 +2150,50 @@ def render_index(
         state = "implemented" if profile.implemented else "placeholder / not implemented"
         lines.append(f"<li>{profile.title}: {state}</li>")
 
+    generated_kickstarts = generated_kickstart_status(config, detected, profiles)
+
+    preserved_manual_count = 0
+    generated_count = len(generated_kickstarts)
+
+    for entry in generated_kickstarts:
+        state = entry.get("emergency_edit_state", {})
+
+        if isinstance(state, dict) and state.get("preserved_manual_edit") is True:
+            preserved_manual_count += 1
+
+    deleted_stale_count = sum(
+        1
+        for item in stale_kickstarts
+        if item.get("action") == "deleted"
+    )
+
+    preserved_stale_count = sum(
+        1
+        for item in stale_kickstarts
+        if item.get("action") == "preserved"
+    )
+
     lines.extend(
         [
+            "</ul>",
+            "<h2>Generation Policy</h2>",
+            "<ul>",
+            f"<li>Kickstart edit policy: {config.generated_ks_edit_policy}</li>",
+            f"<li>Profile overrides: {config.override_profile_root}</li>",
+            f"<li>Template overrides: {config.override_template_root}</li>",
+            f"<li>Generated Kickstarts: {config.html_root / 'ks'}</li>",
+            "</ul>",
+            "<h2>Kickstart State</h2>",
+            "<ul>",
+            f"<li>Generated Kickstarts: {generated_count}</li>",
+            f"<li>Preserved manual Kickstarts: {preserved_manual_count}</li>",
+            f"<li>Deleted stale generated Kickstarts: {deleted_stale_count}</li>",
+            f"<li>Preserved stale or unmanaged Kickstarts: {preserved_stale_count}</li>",
+            "</ul>",
+            "<h2>Warnings</h2>",
+            "<ul>",
+            "<li>Direct edits under /ks may be preserved or overwritten depending on policy.</li>",
+            "<li>Use /overrides/profiles and /overrides/templates for repeatable customizations.</li>",
             "</ul>",
             "<h2>Generated Files</h2>",
             "<ul>",
@@ -2167,7 +2319,7 @@ def generate_once(config: GeneratorConfig) -> None:
 
     write_boot_ipxe(config, detected, profiles)
     render_status(config, detected, profiles, stale_kickstarts)
-    render_index(config, detected, profiles)
+    render_index(config, detected, profiles, stale_kickstarts)
 
     detected_names = ", ".join(item.os_id for item in detected) if detected else "none"
     profile_names = ", ".join(profile.profile_id for profile in profiles)
