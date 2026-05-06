@@ -1,3 +1,23 @@
+
+
+
+
+
+grep -E '\$6\$|REKKqe02' /tmp/status-7a.json /tmp/status-7a.txt /tmp/index-7a.html && {
+  echo "ERROR: root password hash leaked into status/index"
+  exit 1
+} || echo "OK: no root password hash leaked"
+
+
+
+
+
+
+
+
+
+
+
 CID=pxe-content
 SCRIPT=/usr/local/bin/generate-pxe-content.py
 
