@@ -20,3 +20,25 @@ grep -q '"active_overrides"' /tmp/status-6d.json
 grep -q '"stale_kickstarts"' /tmp/status-6d.json
 
 echo "6D test passed"
+
+
+
+
+
+
+
+
+
+curl -fss http://127.0.0.1:18080/generated/status.json -o /tmp/status-6d.json
+curl -fss http://127.0.0.1:18080/index.html -o /tmp/index-6d.html
+
+if grep -E '\$6\$|REKKqe02' /tmp/status-6d.json /tmp/index-6d.html; then
+  echo "ERROR: root password hash leaked into status/index"
+  exit 1
+else
+  echo "OK: no root password hash leaked into status/index"
+fi
+
+
+
+
