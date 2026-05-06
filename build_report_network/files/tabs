@@ -2067,6 +2067,105 @@ def validate_directory_exists(
     )
 
 
+def iso_repository_validation_status(item: DetectedISO) -> Dict[str, object]:
+    required_repos: List[Dict[str, object]] = []
+
+    def add_repo(name: str, metadata_path: Path, http_path: str) -> None:
+        exists = metadata_path.is_file()
+
+        required_repos.append(
+            {
+                "name": name,
+                "path": str(metadata_path),
+                "http_path": http_path,
+                "exists": exists,
+                "status": "ok" if exists else "warning",
+            }
+        )
+
+    if item.major >= 8:
+        layout = "baseos-appstream"
+
+        add_repo(
+            "BaseOS",
+            item.iso_path / "BaseOS" / "repodata" / "repomd.xml",
+            f"/{item.http_path}/BaseOS/repodata/repomd.xml",
+        )
+        add_repo(
+            "AppStream",
+            item.iso_path / "AppStream" / "repodata" / "repomd.xml",
+            f"/{item.http_path}/AppStream/repodata/repomd.xml",
+        )
+    else:
+        layout = "single-repo"
+
+        add_repo(
+            "RHEL 7 repository",
+            item.iso_path / "repodata" / "repomd.xml",
+            f"/{item.http_path}/repodata/repomd.xml",
+        )
+
+    missing = [
+        repo
+        for repo in required_repos
+        if repo["exists"] is not True
+    ]
+
+    return {
+        "layout": layout,
+        "health": "warning" if missing else "ok",
+        "required_repos": required_repos,
+        "missing_repos": missing,
+    }
+
+
+def validate_iso_repository_content(
+    results: List[Dict[str, object]],
+    item: DetectedISO,
+) -> None:
+    repo_status = iso_repository_validation_status(item)
+    required_repos = repo_status["required_repos"]
+
+    if not isinstance(required_repos, list):
+        return
+
+    for repo in required_repos:
+        name = str(repo["name"])
+        path = Path(str(repo["path"]))
+        http_path = str(repo["http_path"])
+        exists = repo["exists"] is True
+
+        check_name = name.lower().replace(" ", "_")
+
+        if exists:
+            results.append(
+                validation_result(
+                    check_id=f"repo_metadata_exists:{item.os_id}:{check_name}",
+                    status="ok",
+                    message=f"Repository metadata found for {item.os_id} {name}.",
+                    path=str(path),
+                    http_path=http_path,
+                    details={"size_bytes": path.stat().st_size},
+                )
+            )
+        else:
+            results.append(
+                validation_result(
+                    check_id=f"repo_metadata_exists:{item.os_id}:{check_name}",
+                    status="warning",
+                    message=(
+                        f"Repository metadata is missing for {item.os_id} {name}. "
+                        "The ISO tree has PXE boot files, but installs may fail if repo content is incomplete."
+                    ),
+                    path=str(path),
+                    http_path=http_path,
+                    details={
+                        "expected_layout": repo_status["layout"],
+                    },
+                )
+            )
+
+
 def validate_kickstart_content(
     results: List[Dict[str, object]],
     kickstart_name: str,
@@ -2204,6 +2303,8 @@ def validate_generated_content(
             f"/{item.http_path}/images/pxeboot/initrd.img",
         )
 
+        validate_iso_repository_content(results, item)
+
     for profile in profiles:
         if not profile.implemented:
             continue
@@ -2260,6 +2361,40 @@ def render_status_text(status: Dict[str, object]) -> str:
             lines.append(
                 f"- {item['os_id']}: {item['title']} from {item['iso_path']}"
             )
+    else:
+        lines.append("- none")
+
+    lines.extend(
+        [
+            "",
+            "Repository Content",
+            "------------------",
+        ]
+    )
+
+    if detected_isos:
+        for item in detected_isos:
+            repo_validation = item.get("repo_validation", {})
+
+            if not isinstance(repo_validation, dict):
+                continue
+
+            required_repos = repo_validation.get("required_repos", [])
+
+            if not isinstance(required_repos, list):
+                continue
+
+            for repo in required_repos:
+                if not isinstance(repo, dict):
+                    continue
+
+                repo_status = str(repo.get("status", "warning")).upper()
+                repo_name = repo.get("name", "unknown")
+                repo_path = repo.get("path", "")
+
+                lines.append(
+                    f"- [{repo_status}] {item['os_id']} {repo_name}: {repo_path}"
+                )
     else:
         lines.append("- none")
 
@@ -2349,6 +2484,7 @@ def detected_iso_status(item: DetectedISO) -> Dict[str, object]:
         "http_path": f"/{item.http_path}",
         "uefi_enabled": item.uefi,
         "bios_enabled": item.bios,
+        "repo_validation": iso_repository_validation_status(item),
     }
 
 
@@ -2657,6 +2793,16 @@ def watched_paths(config: GeneratorConfig) -> List[Path]:
                 config.template_root / definition.ks_template,
             ]
         )
+
+        if definition.major >= 8:
+            paths.extend(
+                [
+                    iso_path / "BaseOS" / "repodata" / "repomd.xml",
+                    iso_path / "AppStream" / "repodata" / "repomd.xml",
+                ]
+            )
+        else:
+            paths.append(iso_path / "repodata" / "repomd.xml")
 
     paths.extend(watched_template_files(config.template_root))
     paths.extend(watched_template_files(config.override_template_root))
