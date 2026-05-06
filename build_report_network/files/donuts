@@ -1014,6 +1014,7 @@ def render_name_template(
             override_template_root=Path("/overrides/templates"),
             override_profile_root=Path("/overrides/profiles"),
             generated_ks_edit_policy="preserve",
+            validation_failure_policy="warn",
             background_path="",
             watch_interval=1,
             rootpw_hash="",
