@@ -1,0 +1,313 @@
+Yes — for 7D, most of your validation/reporting code is already there. You only need to add the policy knob and the enforcement step.
+
+Also, at the very bottom of what you pasted, make sure your real file does not say:
+
+main() in
+
+It must be:
+
+if __name__ == "__main__":
+    main()
+
+⸻
+
+1. Add a new config field
+
+Find this section:
+
+@dataclass(frozen=True)
+class GeneratorConfig:
+    pxe_server: str
+    pxe_port: str
+    iso_root: Path
+    html_root: Path
+    template_root: Path
+    profile_root: Path
+    override_root: Path
+    override_template_root: Path
+    override_profile_root: Path
+    generated_ks_edit_policy: str
+    background_path: str
+
+Change it to this:
+
+@dataclass(frozen=True)
+class GeneratorConfig:
+    pxe_server: str
+    pxe_port: str
+    iso_root: Path
+    html_root: Path
+    template_root: Path
+    profile_root: Path
+    override_root: Path
+    override_template_root: Path
+    override_profile_root: Path
+    generated_ks_edit_policy: str
+    validation_failure_policy: str
+    background_path: str
+
+⸻
+
+2. Add the env var in from_env()
+
+Find this line:
+
+generated_ks_edit_policy=getenv("PXE_GENERATED_KS_EDIT_POLICY", "preserve").lower(),
+
+Directly under it, add this:
+
+validation_failure_policy=getenv("PXE_VALIDATION_FAILURE_POLICY", "warn").lower(),
+
+So that block should look like:
+
+generated_ks_edit_policy=getenv("PXE_GENERATED_KS_EDIT_POLICY", "preserve").lower(),
+validation_failure_policy=getenv("PXE_VALIDATION_FAILURE_POLICY", "warn").lower(),
+background_path=getenv("PXE_BACKGROUND_PATH", "/ui/background.png"),
+
+⸻
+
+3. Validate the new setting
+
+Find this in validate():
+
+if self.generated_ks_edit_policy not in ("preserve", "overwrite"):
+    fail(
+        "PXE_GENERATED_KS_EDIT_POLICY must be one of: "
+        "preserve, overwrite."
+    )
+
+Directly under it, add:
+
+if self.validation_failure_policy not in ("warn", "fail"):
+    fail(
+        "PXE_VALIDATION_FAILURE_POLICY must be one of: "
+        "warn, fail."
+    )
+
+⸻
+
+4. Fix the dummy GeneratorConfig(...) in render_name_template()
+
+Find this block inside render_name_template():
+
+GeneratorConfig(
+    pxe_server="",
+    pxe_port="",
+    iso_root=Path("/"),
+    html_root=Path("/"),
+    template_root=Path("/"),
+    profile_root=Path("/"),
+    override_root=Path("/overrides"),
+    override_template_root=Path("/overrides/templates"),
+    override_profile_root=Path("/overrides/profiles"),
+    generated_ks_edit_policy="preserve",
+    background_path="",
+
+Add this line after generated_ks_edit_policy:
+
+validation_failure_policy="warn",
+
+So it becomes:
+
+GeneratorConfig(
+    pxe_server="",
+    pxe_port="",
+    iso_root=Path("/"),
+    html_root=Path("/"),
+    template_root=Path("/"),
+    profile_root=Path("/"),
+    override_root=Path("/overrides"),
+    override_template_root=Path("/overrides/templates"),
+    override_profile_root=Path("/overrides/profiles"),
+    generated_ks_edit_policy="preserve",
+    validation_failure_policy="warn",
+    background_path="",
+
+This one is easy to miss. If you do not add it, Python will complain that GeneratorConfig is missing an argument.
+
+⸻
+
+5. Add the enforcement function
+
+Put this new function near the end of the Validation and health reporting section.
+
+A good place is right after render_status_text() and before this header:
+
+# =============================================================================
+# Status and index rendering
+# =============================================================================
+
+Add this:
+
+def enforce_validation_failure_policy(
+    config: GeneratorConfig,
+    detected: List[DetectedISO],
+    profiles: List[ProfileDefinition],
+) -> None:
+    validation_results = validate_generated_content(config, detected, profiles)
+    summary = validation_summary(validation_results)
+    if config.validation_failure_policy == "warn":
+        return
+    if summary["error"] == 0:
+        return
+    error_lines = []
+    for result in validation_results:
+        if result.get("status") != "error":
+            continue
+        location = result.get("http_path") or result.get("path") or ""
+        suffix = f" [{location}]" if location else ""
+        error_lines.append(
+            f"- {result.get('check_id', 'unknown')}: "
+            f"{result.get('message', '')}{suffix}"
+        )
+    joined_errors = "\n".join(error_lines)
+    fail(
+        "Validation failed and PXE_VALIDATION_FAILURE_POLICY=fail.\n"
+        f"Validation errors: {summary['error']}\n"
+        f"{joined_errors}"
+    )
+
+⸻
+
+6. Add the policy to status.json
+
+Find this section inside render_status():
+
+"generator": {
+    "generated_at": utc_timestamp(),
+    "generated_ks_edit_policy": config.generated_ks_edit_policy,
+    "template_root": str(config.template_root),
+
+Change it to:
+
+"generator": {
+    "generated_at": utc_timestamp(),
+    "generated_ks_edit_policy": config.generated_ks_edit_policy,
+    "validation_failure_policy": config.validation_failure_policy,
+    "template_root": str(config.template_root),
+
+Then find this top-level part:
+
+"generated_ks_edit_policy": config.generated_ks_edit_policy,
+"detected_isos": detected_list,
+
+Change it to:
+
+"generated_ks_edit_policy": config.generated_ks_edit_policy,
+"validation_failure_policy": config.validation_failure_policy,
+"detected_isos": detected_list,
+
+⸻
+
+7. Add the policy to index.html
+
+Find this section in render_index():
+
+"<h2>Generation Policy</h2>",
+"<ul>",
+f"<li>Kickstart edit policy: {config.generated_ks_edit_policy}</li>",
+f"<li>Profile overrides: {config.override_profile_root}</li>",
+
+Change it to:
+
+"<h2>Generation Policy</h2>",
+"<ul>",
+f"<li>Kickstart edit policy: {config.generated_ks_edit_policy}</li>",
+f"<li>Validation failure policy: {config.validation_failure_policy}</li>",
+f"<li>Profile overrides: {config.override_profile_root}</li>",
+
+⸻
+
+8. Add it to watched_env_values()
+
+Find this section:
+
+str(config.override_root),
+str(config.override_template_root),
+str(config.override_profile_root),
+config.generated_ks_edit_policy,
+config.background_path,
+
+Change it to:
+
+str(config.override_root),
+str(config.override_template_root),
+str(config.override_profile_root),
+config.generated_ks_edit_policy,
+config.validation_failure_policy,
+config.background_path,
+
+⸻
+
+9. Enforce the policy in generate_once()
+
+Find this at the bottom of generate_once():
+
+write_boot_ipxe(config, detected, profiles)
+render_status(config, detected, profiles, stale_kickstarts)
+render_index(config, detected, profiles, stale_kickstarts)
+detected_names = ", ".join(item.os_id for item in detected) if detected else "none"
+
+Change it to this:
+
+write_boot_ipxe(config, detected, profiles)
+render_status(config, detected, profiles, stale_kickstarts)
+render_index(config, detected, profiles, stale_kickstarts)
+enforce_validation_failure_policy(config, detected, profiles)
+detected_names = ", ".join(item.os_id for item in detected) if detected else "none"
+
+That placement matters. It means status.json, status.txt, and index.html still get written before the script exits with an error.
+
+⸻
+
+Test commands for 7D
+
+After rebuilding/moving the image over, run this first:
+
+CID=pxe-content
+SCRIPT=/usr/local/bin/generate-pxe-content.py
+podman exec "$CID" python3 -m py_compile "$SCRIPT"
+podman exec "$CID" python3 "$SCRIPT" --once
+
+Then verify the policy is showing up:
+
+curl -fss http://127.0.0.1:18080/generated/status.json -o /tmp/status-7d.json
+python3 -m json.tool /tmp/status-7d.json >/dev/null
+grep -q '"validation_failure_policy": "warn"' /tmp/status-7d.json
+
+Now test fail mode with your current normal environment:
+
+podman exec "$CID" /bin/sh -lc '
+PXE_VALIDATION_FAILURE_POLICY=fail python3 /usr/local/bin/generate-pxe-content.py --once
+'
+
+If your current repo metadata warnings are only warnings and not errors, this should pass.
+
+Then test a real failure using a fake broken ISO root:
+
+podman exec "$CID" /bin/sh -lc '
+set -e
+rm -rf /tmp/pxe-7d
+mkdir -p /tmp/pxe-7d/iso/rhel8iso/images/pxeboot
+mkdir -p /tmp/pxe-7d/html
+touch /tmp/pxe-7d/iso/rhel8iso/images/pxeboot/vmlinuz
+set +e
+PXE_SERVER=127.0.0.1 \
+PXE_ISO_ROOT=/tmp/pxe-7d/iso \
+PXE_HTML_ROOT=/tmp/pxe-7d/html \
+PXE_VALIDATION_FAILURE_POLICY=fail \
+python3 /usr/local/bin/generate-pxe-content.py --once > /tmp/pxe-7d/out.txt 2>&1
+rc=$?
+set -e
+cat /tmp/pxe-7d/out.txt
+if [ "$rc" -eq 0 ]; then
+  echo "ERROR: fail policy did not fail on broken content"
+  exit 1
+fi
+test -f /tmp/pxe-7d/html/generated/status.json
+test -f /tmp/pxe-7d/html/generated/status.txt
+grep -Eq "PXE_VALIDATION_FAILURE_POLICY=fail|Validation failed|initrd|missing|error" /tmp/pxe-7d/out.txt /tmp/pxe-7d/html/generated/status.txt
+echo "OK: 7D fail policy works and status files were still written"
+'
+
+If that passes, 7D is good.
