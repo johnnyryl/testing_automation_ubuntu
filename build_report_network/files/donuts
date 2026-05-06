@@ -3196,6 +3196,8 @@ def generate_once(config: GeneratorConfig) -> None:
     render_status(config, detected, profiles, stale_kickstarts)
     render_index(config, detected, profiles, stale_kickstarts)
 
+    enforce_validation_failure_policy(config, detected, profiles)
+
     detected_names = ", ".join(item.os_id for item in detected) if detected else "none"
     profile_names = ", ".join(profile.profile_id for profile in profiles)
 
