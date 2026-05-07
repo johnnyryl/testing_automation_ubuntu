@@ -1,0 +1,477 @@
+# AeroLIT PXE Content Bundle Layout, Status, and Troubleshooting
+
+This document explains how the PXE content image fits into an AeroLIT bundle, what the generated status files mean, and how to troubleshoot common problems.
+
+The goal is to help someone verify the image and generated PXE content before testing with real PXE hardware.
+
+## Expected bundle layout
+
+A typical AeroLIT offline bundle may look like this:
+
+```text
+bootstrap.sh
+collections-hub/
+extracted_isos/
+files/
+repos/
+```
+
+The PXE content image normally fits under `files/pxe/`:
+
+```text
+files/
+  pxe/
+    pxe-content.tar
+```
+
+Extracted RHEL ISO trees usually live under `extracted_isos/`:
+
+```text
+extracted_isos/
+  rhel8iso/
+  rhel9iso/
+  rhel10iso/
+```
+
+RHEL 7 is supported by the generator, but it is not the main AeroLIT target. If needed, use:
+
+```text
+extracted_isos/
+  rhel7iso/
+```
+
+## ISO tree requirements
+
+A detected ISO tree must include PXE boot files:
+
+```text
+images/pxeboot/vmlinuz
+images/pxeboot/initrd.img
+```
+
+For RHEL 8, 9, and 10, the extracted ISO tree should also include:
+
+```text
+BaseOS/repodata/repomd.xml
+AppStream/repodata/repomd.xml
+```
+
+For RHEL 7, the extracted ISO tree should include:
+
+```text
+repodata/repomd.xml
+```
+
+If `vmlinuz` or `initrd.img` is missing, the ISO tree is not detected.
+
+If repository metadata is missing, the ISO tree may still be detected, but validation reports a warning because installs may fail after boot.
+
+## Container path mapping
+
+The generator uses container paths. The default paths are:
+
+```text
+/iso                  extracted ISO trees
+/overrides            user/site customizations
+/templates            built-in templates
+/profiles             built-in profiles
+/etc/nginx/html       generated web root
+```
+
+A normal run maps host bundle content into those container paths.
+
+Example:
+
+```bash
+podman run --rm -d \
+  --name pxe-content \
+  -p 18080:8080 \
+  -e PXE_SERVER=<pxe-server-ip-or-hostname> \
+  -e PXE_PORT=18080 \
+  -v /bundle/extracted_isos:/iso:Z \
+  -v /bundle/files/pxe/overrides:/overrides:Z \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:latest
+```
+
+## Generated files
+
+The image generates content under the web root.
+
+| Path | Purpose |
+|---|---|
+| `/boot.ipxe` | Main iPXE menu |
+| `/ks/*.ks` | Generated Kickstart files |
+| `/index.html` | Simple browser status page |
+| `/generated/status.json` | Machine-readable status and validation report |
+| `/generated/status.txt` | Human-readable status report |
+| `/generated/isos.txt` | Detected ISO inventory |
+| `/generated/kickstart-state/` | Hash state used to detect manual `/ks` edits |
+| `/generated/preserved-kickstarts/` | Candidate regenerated files when manual edits are preserved |
+
+## Status files
+
+Use these first when troubleshooting:
+
+```text
+/generated/status.txt
+/generated/status.json
+```
+
+`status.txt` is easiest for humans.
+
+`status.json` is best for automation, test scripts, and exact troubleshooting.
+
+Important `status.json` sections:
+
+| Section | Meaning |
+|---|---|
+| `validation_summary` | Overall health, total checks, warnings, and errors |
+| `validation_results` | Full list of validation checks |
+| `boot_artifact_validation` | Checks related to `boot.ipxe` and boot target references |
+| `detected_isos` | ISO trees discovered by the generator |
+| `repo_validation` | Repository metadata checks for each detected ISO |
+| `profiles` | Visible PXE profile definitions |
+| `generated_kickstarts` | Kickstart files generated for implemented profiles |
+| `active_overrides` | Override profile/template files that were detected |
+| `stale_kickstarts` | Old generated Kickstarts that were deleted or preserved |
+
+## Validation failure policy
+
+The generator validates generated content after rendering.
+
+Set policy with:
+
+```text
+PXE_VALIDATION_FAILURE_POLICY=warn
+PXE_VALIDATION_FAILURE_POLICY=fail
+```
+
+### `warn`
+
+This is the default.
+
+The generator writes the content and reports validation problems in status files, but it does not exit failed.
+
+Use this when you want the server to stay up while you troubleshoot.
+
+### `fail`
+
+The generator writes status files, then exits non-zero if validation errors exist.
+
+Use this in CI, test scripts, and merge-request validation.
+
+Warnings do not fail generation. Only validation errors fail when policy is `fail`.
+
+## Manual `/ks` edit policy
+
+Generated Kickstarts live under:
+
+```text
+/ks
+```
+
+The preferred customization path is still overrides:
+
+```text
+/overrides/profiles
+/overrides/templates
+```
+
+Manual edits under `/ks` are the emergency path.
+
+Set policy with:
+
+```text
+PXE_GENERATED_KS_EDIT_POLICY=preserve
+PXE_GENERATED_KS_EDIT_POLICY=overwrite
+```
+
+### `preserve`
+
+This is the default.
+
+If a generated Kickstart was manually edited, the generator preserves the edited `/ks` file and writes the newly regenerated version as a candidate under:
+
+```text
+/generated/preserved-kickstarts/
+```
+
+### `overwrite`
+
+The generator replaces manual edits under `/ks` with the newly generated version.
+
+Use this when you want generated content to return to a clean, repeatable state.
+
+## Known RHEL differences
+
+| Version | PXE support in current definitions | Repo layout | Notes |
+|---|---|---|---|
+| RHEL 7 | BIOS enabled, UEFI disabled | single repo metadata under `repodata/` | Older layout; not the main AeroLIT target |
+| RHEL 8 | UEFI and BIOS enabled | `BaseOS` and `AppStream` | Good baseline for legacy and UEFI testing |
+| RHEL 9 | UEFI enabled, BIOS disabled | `BaseOS` and `AppStream` | Primary modern target |
+| RHEL 10 | UEFI enabled, BIOS disabled | `BaseOS` and `AppStream` | Future/current target depending on site readiness |
+
+The generator only detects extracted ISO trees that match the configured directory names and contain the required PXE boot files.
+
+## Testing without real PXE hardware
+
+The built-in image test runner can validate most image behavior without DHCP, TFTP, Foreman, or a physical PXE client.
+
+Run:
+
+```bash
+podman run --rm \
+  --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test \
+  all
+```
+
+This creates fake ISO trees, generates PXE content, starts temporary Nginx where needed, and confirms generated HTTP paths work.
+
+Passing tests prove the image-generated content is healthy. They do not prove a specific network, DHCP scope, firewall path, or physical machine firmware setting is correct.
+
+## Troubleshooting
+
+### No ISOs are detected
+
+Check that the mounted ISO root contains the expected directory names:
+
+```text
+rhel7iso
+rhel8iso
+rhel9iso
+rhel10iso
+```
+
+Then check for:
+
+```text
+images/pxeboot/vmlinuz
+images/pxeboot/initrd.img
+```
+
+Also confirm the container can see the files:
+
+```bash
+podman exec pxe-content ls -l /iso
+podman exec pxe-content find /iso -path '*/images/pxeboot/*' -maxdepth 5 -type f
+```
+
+### ISO is detected, but install fails after boot
+
+The boot files may exist, but repo content may be incomplete.
+
+Check `repo_validation` in:
+
+```text
+/generated/status.json
+```
+
+For RHEL 8, 9, and 10, confirm:
+
+```text
+BaseOS/repodata/repomd.xml
+AppStream/repodata/repomd.xml
+```
+
+### `boot.ipxe` is missing
+
+Run the generator manually inside the container and check the error:
+
+```bash
+podman exec pxe-content python3 /usr/local/bin/generate-pxe-content.py --once
+```
+
+Common causes:
+
+- `PXE_SERVER` is not set
+- invalid profile YAML
+- missing template referenced by an implemented profile
+- Jinja rendering error
+
+### A profile appears but has no real install target
+
+That is expected for placeholder profiles.
+
+A profile only generates real boot targets when:
+
+```yaml
+implemented: true
+```
+
+Placeholder profiles can appear in the menu without generating real `inst.ks=` boot entries.
+
+### Override profile is not being used
+
+Check that the override file is under:
+
+```text
+/overrides/profiles/*.yml
+/overrides/profiles/*.yaml
+```
+
+Then check `active_overrides` and `profiles` in:
+
+```text
+/generated/status.json
+```
+
+An override profile with the same `profile_id` replaces the base profile.
+
+### Override template is not being used
+
+Check that the profile points to the expected template:
+
+```yaml
+kickstart_template: ks/rhel8-example.ks.j2
+```
+
+Then place the override template at:
+
+```text
+/overrides/templates/ks/rhel8-example.ks.j2
+```
+
+Check `template_source_detail` under `generated_kickstarts` in `status.json`.
+
+Expected value when override wins:
+
+```json
+"template_source_detail": "override"
+```
+
+### Jinja include fails
+
+Use quoted include paths:
+
+```jinja
+{% include "partials/packages-minimal.ks.j2" %}
+```
+
+The partial path must exist under the built-in or override template root.
+
+Built-in partials are under:
+
+```text
+templates/partials/
+```
+
+Override partials can be added under:
+
+```text
+/overrides/templates/partials/
+```
+
+### Manual `/ks` edit will not go away
+
+The default policy preserves manual edits.
+
+To force regeneration over manual edits, run with:
+
+```text
+PXE_GENERATED_KS_EDIT_POLICY=overwrite
+```
+
+Then regenerate.
+
+### Status health is warning
+
+Warnings usually mean content may still work, but something should be reviewed.
+
+Common warning:
+
+```text
+repository metadata is missing
+```
+
+This means the ISO tree has boot files, but install repo content may be incomplete.
+
+### Status health is error
+
+Errors mean generated content is structurally wrong.
+
+Common errors:
+
+- missing `boot.ipxe`
+- empty Kickstart
+- unresolved Jinja block
+- unresolved Jinja variable
+- generated boot target missing
+- generated Kickstart missing
+
+Open:
+
+```text
+/generated/status.txt
+```
+
+Then review the `Validation Results` section.
+
+### HTTP works, but PXE boot does not
+
+The image only serves HTTP content. Real PXE boot also depends on network configuration.
+
+Check:
+
+- DHCP scope
+- IP helper settings
+- firewall rules
+- route between PXE client and server
+- firmware mode, UEFI vs BIOS
+- iPXE chain URL
+- client can reach `http://<server>:<port>/boot.ipxe`
+
+### Browser can open `/boot.ipxe`, but install fails
+
+Check the URLs inside `boot.ipxe`:
+
+```bash
+curl http://<server>:18080/boot.ipxe
+```
+
+Then test the referenced files directly:
+
+```text
+/rhel8/images/pxeboot/vmlinuz
+/rhel8/images/pxeboot/initrd.img
+/ks/rhel8-minimal.ks
+/rhel8/BaseOS/repodata/repomd.xml
+/rhel8/AppStream/repodata/repomd.xml
+```
+
+### Root password hash concern
+
+Set a site-specific hash with:
+
+```text
+ROOTPW_HASH=<sha512-crypt-hash>
+```
+
+The default hash exists for lab/bootstrap testing. Do not rely on it for real environments.
+
+Status files should not expose the root password hash.
+
+## Quick pre-merge checklist
+
+Before merging an image or generator change:
+
+1. Build and push the `:test` image.
+2. Run the built-in tests:
+
+```bash
+podman run --rm \
+  --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test \
+  all
+```
+
+3. Confirm these pass:
+
+```text
+Basic image test passed
+Overrides and preserve policy test passed
+Validation / health policy test passed
+```
+
+4. Confirm the pipeline is green.
+5. Merge when the MR changes match the intended scope.
