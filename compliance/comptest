@@ -1,0 +1,752 @@
+Yes — let’s make the tests work both ways:
+
+# From the repo on a VM, against a running container
+./tests/test-basic-image.sh
+./tests/test-overrides-and-preserve-policy.sh
+./tests/test-validation-health-policy.sh
+
+And also:
+
+# From inside the image/container
+podman exec pxe-content pxe-content-test all
+
+Or against a freshly built image:
+
+podman run --rm --entrypoint /usr/local/bin/pxe-content-test registry.gitlab.us.lmco.com/lit/containers/pxe-content:test all
+
+1. Add this new helper file
+
+Create:
+
+tests/test-lib.sh
+#!/usr/bin/env bash
+: "${CID:=pxe-content}"
+: "${SCRIPT:=/usr/local/bin/generate-pxe-content.py}"
+pxe_test_inside_container() {
+  [[ "${PXE_TEST_INSIDE_CONTAINER:-0}" == "1" ]]
+}
+require_host_cmd() {
+  if pxe_test_inside_container; then
+    return 0
+  fi
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "ERROR: Required host command not found: $1" >&2
+    exit 1
+  }
+}
+container_exec() {
+  if pxe_test_inside_container; then
+    "$@"
+  else
+    podman exec -i "$CID" "$@"
+  fi
+}
+container_sh() {
+  if pxe_test_inside_container; then
+    /bin/sh -lc "$1"
+  else
+    podman exec -i "$CID" /bin/sh -lc "$1"
+  fi
+}
+
+2. Add this new image self-test wrapper
+
+Create:
+
+tests/pxe-content-test
+#!/usr/bin/env bash
+set -euo pipefail
+TEST_ROOT_DIR="${TEST_ROOT_DIR:-/usr/local/share/aerolit-pxe-content/tests}"
+export PXE_TEST_INSIDE_CONTAINER=1
+case "${1:-all}" in
+  basic)
+    "${TEST_ROOT_DIR}/test-basic-image.sh"
+    ;;
+  overrides|preserve|phase6)
+    "${TEST_ROOT_DIR}/test-overrides-and-preserve-policy.sh"
+    ;;
+  validation|health|policy|phase7)
+    "${TEST_ROOT_DIR}/test-validation-health-policy.sh"
+    ;;
+  all)
+    "${TEST_ROOT_DIR}/test-basic-image.sh"
+    "${TEST_ROOT_DIR}/test-overrides-and-preserve-policy.sh"
+    "${TEST_ROOT_DIR}/test-validation-health-policy.sh"
+    ;;
+  list|--list|-l)
+    echo "Available tests:"
+    echo "  basic"
+    echo "  overrides"
+    echo "  validation"
+    echo "  all"
+    ;;
+  *)
+    echo "ERROR: unknown test target: ${1}" >&2
+    echo "Run: pxe-content-test list" >&2
+    exit 1
+    ;;
+esac
+
+3. Replace tests/test-basic-image.sh with this
+
+#!/usr/bin/env bash
+set -euo pipefail
+TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${TEST_DIR}/test-lib.sh"
+TEST_ROOT="${TEST_ROOT:-/tmp/pxe-basic}"
+ISO_ROOT="${TEST_ROOT}/iso"
+HTML_ROOT="${TEST_ROOT}/html"
+OVERRIDE_ROOT="${TEST_ROOT}/overrides"
+NGINX_PREFIX="${TEST_ROOT}/nginx-runtime"
+NGINX_CONF="${TEST_ROOT}/nginx.conf"
+HTTP_PORT="${HTTP_PORT:-18081}"
+echo "== AeroLIT PXE Content basic image test =="
+require_host_cmd podman
+cleanup() {
+  container_sh "nginx -s stop -c '${NGINX_CONF}' -p '${NGINX_PREFIX}' >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+echo "[1/12] Confirm container is reachable"
+container_exec true
+echo "[2/12] Confirm required tools exist"
+container_exec command -v python3 >/dev/null
+container_exec command -v nginx >/dev/null
+echo "[3/12] Confirm generator exists and compiles"
+container_exec test -f "$SCRIPT"
+container_exec python3 -m py_compile "$SCRIPT"
+echo "[4/12] Create clean fake ISO/repo layout"
+container_sh "
+set -e
+rm -rf '${TEST_ROOT}'
+mkdir -p '${ISO_ROOT}/rhel8iso/images/pxeboot'
+mkdir -p '${ISO_ROOT}/rhel8iso/BaseOS/repodata'
+mkdir -p '${ISO_ROOT}/rhel8iso/AppStream/repodata'
+mkdir -p '${ISO_ROOT}/rhel9iso/images/pxeboot'
+mkdir -p '${HTML_ROOT}'
+mkdir -p '${OVERRIDE_ROOT}/profiles'
+mkdir -p '${OVERRIDE_ROOT}/templates'
+printf 'fake-rhel8-kernel\n' > '${ISO_ROOT}/rhel8iso/images/pxeboot/vmlinuz'
+printf 'fake-rhel8-initrd\n' > '${ISO_ROOT}/rhel8iso/images/pxeboot/initrd.img'
+printf 'fake-baseos-repodata\n' > '${ISO_ROOT}/rhel8iso/BaseOS/repodata/repomd.xml'
+printf 'fake-appstream-repodata\n' > '${ISO_ROOT}/rhel8iso/AppStream/repodata/repomd.xml'
+# Incomplete ISO tree on purpose. It should NOT be detected.
+printf 'incomplete-rhel9-kernel-only\n' > '${ISO_ROOT}/rhel9iso/images/pxeboot/vmlinuz'
+"
+echo "[5/12] Generate PXE content once with validation fail policy"
+container_sh "
+set -e
+PXE_SERVER=127.0.0.1 \
+PXE_PORT='${HTTP_PORT}' \
+PXE_ISO_ROOT='${ISO_ROOT}' \
+PXE_HTML_ROOT='${HTML_ROOT}' \
+PXE_OVERRIDE_ROOT='${OVERRIDE_ROOT}' \
+PXE_VALIDATION_FAILURE_POLICY=fail \
+python3 '${SCRIPT}' --once
+"
+echo "[6/12] Expose detected fake ISO tree under generated web root"
+container_sh "
+set -e
+ln -sfn '${ISO_ROOT}/rhel8iso' '${HTML_ROOT}/rhel8'
+"
+echo "[7/12] Confirm expected generated files exist"
+container_exec test -f "${HTML_ROOT}/boot.ipxe"
+container_exec test -f "${HTML_ROOT}/index.html"
+container_exec test -f "${HTML_ROOT}/generated/status.json"
+container_exec test -f "${HTML_ROOT}/generated/status.txt"
+container_exec test -f "${HTML_ROOT}/generated/isos.txt"
+container_exec test -f "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec test -f "${HTML_ROOT}/ks/rhel8-small-disk.ks"
+echo "[8/12] Validate status.json structure and health"
+container_exec python3 - <<PY
+import json
+from pathlib import Path
+status_path = Path("${HTML_ROOT}/generated/status.json")
+status = json.loads(status_path.read_text())
+summary = status.get("validation_summary", {})
+assert summary.get("health") == "ok", summary
+assert summary.get("error") == 0, summary
+detected = [item.get("os_id") for item in status.get("detected_isos", [])]
+assert "rhel8" in detected, detected
+assert "rhel9" not in detected, detected
+profiles = [item.get("profile_id") for item in status.get("profiles", [])]
+assert "minimal" in profiles, profiles
+assert "small_disk" in profiles, profiles
+enabled = status.get("enabled_profiles", [])
+assert "minimal" in enabled, enabled
+assert "small_disk" in enabled, enabled
+generated = [item.get("kickstart_name") for item in status.get("generated_kickstarts", [])]
+assert "rhel8-minimal.ks" in generated, generated
+assert "rhel8-small-disk.ks" in generated, generated
+print("status.json basic validation passed")
+PY
+echo "[9/12] Validate boot.ipxe content"
+container_exec grep -q '^#!ipxe' "${HTML_ROOT}/boot.ipxe"
+container_exec grep -q 'menu AeroLIT PXE Menu' "${HTML_ROOT}/boot.ipxe"
+container_exec grep -q 'Minimal Installs' "${HTML_ROOT}/boot.ipxe"
+container_exec grep -q 'Small Disk Installs' "${HTML_ROOT}/boot.ipxe"
+container_exec grep -q ':rhel8_minimal_uefi' "${HTML_ROOT}/boot.ipxe"
+container_exec grep -q ':rhel8_minimal_bios' "${HTML_ROOT}/boot.ipxe"
+container_exec grep -q ':rhel8_small_disk_uefi' "${HTML_ROOT}/boot.ipxe"
+container_exec grep -q ':rhel8_small_disk_bios' "${HTML_ROOT}/boot.ipxe"
+container_exec grep -q '/rhel8/images/pxeboot/vmlinuz' "${HTML_ROOT}/boot.ipxe"
+container_exec grep -q '/rhel8/images/pxeboot/initrd.img' "${HTML_ROOT}/boot.ipxe"
+container_exec grep -q '/ks/rhel8-minimal.ks' "${HTML_ROOT}/boot.ipxe"
+container_exec grep -q '/ks/rhel8-small-disk.ks' "${HTML_ROOT}/boot.ipxe"
+container_sh "
+set -e
+if grep -q 'rhel9' '${HTML_ROOT}/boot.ipxe'; then
+  echo 'ERROR: incomplete rhel9 ISO tree should not appear in boot.ipxe'
+  exit 1
+fi
+"
+echo "[10/12] Validate Kickstart basics"
+container_exec grep -q 'Managed by AeroLIT PXE Content Generator' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec grep -q 'rootpw --iscrypted' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec grep -q '@^minimal-environment' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec grep -q 'url --url=' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec grep -q 'Managed by AeroLIT PXE Content Generator' "${HTML_ROOT}/ks/rhel8-small-disk.ks"
+container_exec grep -q 'rootpw --iscrypted' "${HTML_ROOT}/ks/rhel8-small-disk.ks"
+container_exec grep -Eq 'clearpart|part /|autopart' "${HTML_ROOT}/ks/rhel8-small-disk.ks"
+container_exec grep -q '@^minimal-environment' "${HTML_ROOT}/ks/rhel8-small-disk.ks"
+echo "[11/12] Start temporary nginx and confirm HTTP serving works"
+container_sh "
+set -e
+mkdir -p '${NGINX_PREFIX}/logs'
+cat > '${NGINX_CONF}' <<EOF
+events {}
+http {
+    server {
+        listen 127.0.0.1:${HTTP_PORT};
+        server_name localhost;
+        root ${HTML_ROOT};
+        autoindex on;
+        location / {
+            try_files \\\$uri \\\$uri/ =404;
+        }
+    }
+}
+EOF
+nginx -t -c '${NGINX_CONF}' -p '${NGINX_PREFIX}'
+nginx -c '${NGINX_CONF}' -p '${NGINX_PREFIX}'
+"
+container_exec python3 - <<PY
+from urllib.request import urlopen
+base = "http://127.0.0.1:${HTTP_PORT}"
+paths = [
+    "/",
+    "/boot.ipxe",
+    "/index.html",
+    "/generated/status.json",
+    "/generated/status.txt",
+    "/generated/isos.txt",
+    "/ks/rhel8-minimal.ks",
+    "/ks/rhel8-small-disk.ks",
+    "/rhel8/images/pxeboot/vmlinuz",
+    "/rhel8/images/pxeboot/initrd.img",
+    "/rhel8/BaseOS/repodata/repomd.xml",
+    "/rhel8/AppStream/repodata/repomd.xml",
+]
+for path in paths:
+    data = urlopen(base + path, timeout=5).read()
+    if not data:
+        raise SystemExit(f"HTTP path returned empty content: {path}")
+print("HTTP serving checks passed")
+PY
+echo "[12/12] Confirm root password hash does not leak into status/index"
+container_sh "
+set -e
+if grep -F '\$6\$REKKqe02' \
+  '${HTML_ROOT}/generated/status.json' \
+  '${HTML_ROOT}/generated/status.txt' \
+  '${HTML_ROOT}/index.html'; then
+    echo 'ERROR: root password hash leaked into status/index'
+    exit 1
+fi
+"
+echo "== Basic image test passed =="
+
+4. Replace tests/test-validation-health-policy.sh with this
+
+This version is self-contained. It does not need a real running nginx service or real PXE hardware.
+
+#!/usr/bin/env bash
+set -euo pipefail
+TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${TEST_DIR}/test-lib.sh"
+TEST_ROOT="${TEST_ROOT:-/tmp/pxe-validation-health-policy}"
+NORMAL_ROOT="${TEST_ROOT}/normal"
+BROKEN_ROOT="${TEST_ROOT}/broken"
+DEFAULT_ROOT_HASH_PATTERN='\$6\$REKKqe02'
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+pass() {
+  echo "OK: $*"
+}
+echo "== AeroLIT PXE validation / health policy test =="
+require_host_cmd podman
+echo "[1/8] Confirm container and generator are usable"
+container_exec true
+container_exec test -f "${SCRIPT}"
+container_exec python3 -m py_compile "${SCRIPT}"
+pass "generator exists and compiles"
+echo "[2/8] Build clean normal test layout"
+container_sh "
+set -e
+rm -rf '${TEST_ROOT}'
+mkdir -p '${NORMAL_ROOT}/iso/rhel8iso/images/pxeboot'
+mkdir -p '${NORMAL_ROOT}/iso/rhel8iso/BaseOS/repodata'
+mkdir -p '${NORMAL_ROOT}/iso/rhel8iso/AppStream/repodata'
+mkdir -p '${NORMAL_ROOT}/html'
+mkdir -p '${NORMAL_ROOT}/overrides/profiles'
+mkdir -p '${NORMAL_ROOT}/overrides/templates'
+printf 'fake kernel\n' > '${NORMAL_ROOT}/iso/rhel8iso/images/pxeboot/vmlinuz'
+printf 'fake initrd\n' > '${NORMAL_ROOT}/iso/rhel8iso/images/pxeboot/initrd.img'
+printf 'fake baseos repodata\n' > '${NORMAL_ROOT}/iso/rhel8iso/BaseOS/repodata/repomd.xml'
+printf 'fake appstream repodata\n' > '${NORMAL_ROOT}/iso/rhel8iso/AppStream/repodata/repomd.xml'
+"
+echo "[3/8] Normal generation with warn policy"
+container_sh "
+set -e
+PXE_SERVER=127.0.0.1 \
+PXE_ISO_ROOT='${NORMAL_ROOT}/iso' \
+PXE_HTML_ROOT='${NORMAL_ROOT}/html' \
+PXE_OVERRIDE_ROOT='${NORMAL_ROOT}/overrides' \
+PXE_VALIDATION_FAILURE_POLICY=warn \
+python3 '${SCRIPT}' --once
+"
+container_exec test -f "${NORMAL_ROOT}/html/generated/status.json"
+container_exec test -f "${NORMAL_ROOT}/html/generated/status.txt"
+container_exec python3 -m json.tool "${NORMAL_ROOT}/html/generated/status.json" >/dev/null
+container_exec grep -q '"validation_summary"' "${NORMAL_ROOT}/html/generated/status.json"
+container_exec grep -q '"validation_results"' "${NORMAL_ROOT}/html/generated/status.json"
+container_exec grep -q '"boot_artifact_validation"' "${NORMAL_ROOT}/html/generated/status.json"
+container_exec grep -q '"repo_validation"' "${NORMAL_ROOT}/html/generated/status.json"
+container_exec grep -q '"validation_failure_policy": "warn"' "${NORMAL_ROOT}/html/generated/status.json"
+container_exec python3 - <<PY
+import json
+from pathlib import Path
+status = json.loads(Path("${NORMAL_ROOT}/html/generated/status.json").read_text())
+summary = status.get("validation_summary", {})
+assert summary.get("error") == 0, summary
+assert summary.get("health") == "ok", summary
+detected = status.get("detected_isos", [])
+assert detected, "No detected ISOs found"
+generated = status.get("generated_kickstarts", [])
+assert generated, "No generated kickstarts found"
+print("normal status validation passed")
+PY
+pass "normal generation produced healthy status output"
+echo "[4/8] Confirm root password hash does not leak into normal status/index"
+container_sh "
+set -e
+if grep -q '${DEFAULT_ROOT_HASH_PATTERN}' \
+  '${NORMAL_ROOT}/html/generated/status.json' \
+  '${NORMAL_ROOT}/html/generated/status.txt' \
+  '${NORMAL_ROOT}/html/index.html'; then
+    echo 'ERROR: default root password hash leaked into status or index output'
+    exit 1
+fi
+"
+pass "root password hash did not leak"
+echo "[5/8] Build intentionally broken layout"
+container_sh "
+set -e
+mkdir -p '${BROKEN_ROOT}/iso/rhel8iso/images/pxeboot'
+mkdir -p '${BROKEN_ROOT}/overrides/profiles'
+mkdir -p '${BROKEN_ROOT}/overrides/templates/ks'
+mkdir -p '${BROKEN_ROOT}/html'
+printf 'fake kernel\n' > '${BROKEN_ROOT}/iso/rhel8iso/images/pxeboot/vmlinuz'
+printf 'fake initrd\n' > '${BROKEN_ROOT}/iso/rhel8iso/images/pxeboot/initrd.img'
+cat > '${BROKEN_ROOT}/overrides/profiles/10-minimal.yml' <<'EOF'
+profile_id: minimal
+title: Minimal Installs
+install_label: Minimal
+menu_target: minimal
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+kickstart_template: ks/rhel8-broken.ks.tmpl
+kernel_args:
+  - inst.text
+  - nomodeset
+EOF
+cat > '${BROKEN_ROOT}/overrides/templates/ks/rhel8-broken.ks.tmpl' <<'EOF'
+#version=RHEL8
+text
+reboot
+# This is intentionally broken so validation fails:
+{% PHASE7_BROKEN_UNRESOLVED_JINJA_BLOCK %}
+lang en_US.UTF-8
+keyboard us
+timezone America/Chicago --utc
+network --bootproto=dhcp --device=link --activate
+rootpw --iscrypted \$ROOTPW_HASH
+url --url=\"\$REPO_URL\"
+%packages
+@^minimal-environment
+%end
+EOF
+"
+echo "[6/8] Warn policy reports broken content but exits zero"
+container_sh "
+set -e
+PXE_SERVER=127.0.0.1 \
+PXE_ISO_ROOT='${BROKEN_ROOT}/iso' \
+PXE_HTML_ROOT='${BROKEN_ROOT}/html' \
+PXE_OVERRIDE_ROOT='${BROKEN_ROOT}/overrides' \
+PXE_VALIDATION_FAILURE_POLICY=warn \
+python3 '${SCRIPT}' --once
+"
+container_exec test -f "${BROKEN_ROOT}/html/generated/status.json"
+container_exec test -f "${BROKEN_ROOT}/html/generated/status.txt"
+container_exec grep -q '"validation_failure_policy": "warn"' "${BROKEN_ROOT}/html/generated/status.json"
+container_exec grep -q '"unresolved_jinja_block' "${BROKEN_ROOT}/html/generated/status.json"
+container_exec grep -q 'unresolved_jinja_block' "${BROKEN_ROOT}/html/generated/status.txt"
+pass "warn policy reports validation error but does not fail generation"
+echo "[7/8] Fail policy exits non-zero but still writes status files"
+set +e
+container_sh "
+PXE_SERVER=127.0.0.1 \
+PXE_ISO_ROOT='${BROKEN_ROOT}/iso' \
+PXE_HTML_ROOT='${BROKEN_ROOT}/html' \
+PXE_OVERRIDE_ROOT='${BROKEN_ROOT}/overrides' \
+PXE_VALIDATION_FAILURE_POLICY=fail \
+python3 '${SCRIPT}' --once > '${BROKEN_ROOT}/fail-policy.out' 2>&1
+"
+rc=$?
+set -e
+container_exec cat "${BROKEN_ROOT}/fail-policy.out"
+if [ "${rc}" -eq 0 ]; then
+  fail "PXE_VALIDATION_FAILURE_POLICY=fail did not fail on broken generated content"
+fi
+container_exec grep -q 'Validation failed' "${BROKEN_ROOT}/fail-policy.out"
+container_exec grep -q 'unresolved_jinja_block' "${BROKEN_ROOT}/fail-policy.out"
+container_exec test -f "${BROKEN_ROOT}/html/generated/status.json"
+container_exec test -f "${BROKEN_ROOT}/html/generated/status.txt"
+container_exec grep -q '"validation_failure_policy": "fail"' "${BROKEN_ROOT}/html/generated/status.json"
+container_exec grep -q '"unresolved_jinja_block' "${BROKEN_ROOT}/html/generated/status.json"
+pass "fail policy fails correctly and status files are still written"
+echo "[8/8] Confirm default warn policy returns after previous fail test"
+container_sh "
+set -e
+PXE_SERVER=127.0.0.1 \
+PXE_ISO_ROOT='${NORMAL_ROOT}/iso' \
+PXE_HTML_ROOT='${NORMAL_ROOT}/html' \
+PXE_OVERRIDE_ROOT='${NORMAL_ROOT}/overrides' \
+python3 '${SCRIPT}' --once
+"
+container_exec grep -q '"validation_failure_policy": "warn"' "${NORMAL_ROOT}/html/generated/status.json"
+pass "default validation policy remains warn"
+echo "== Validation / health policy test passed =="
+
+5. Replace tests/test-overrides-and-preserve-policy.sh with this
+
+#!/usr/bin/env bash
+set -euo pipefail
+TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${TEST_DIR}/test-lib.sh"
+TEST_ROOT="${TEST_ROOT:-/tmp/pxe-overrides-preserve}"
+ISO_ROOT="${TEST_ROOT}/iso"
+HTML_ROOT="${TEST_ROOT}/html"
+OVERRIDE_ROOT="${TEST_ROOT}/overrides"
+DEFAULT_ROOT_HASH_PATTERN='\$6\$REKKqe02'
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+pass() {
+  echo "OK: $*"
+}
+echo "== AeroLIT PXE overrides and preserve policy test =="
+require_host_cmd podman
+echo "[1/9] Confirm container and generator are usable"
+container_exec true
+container_exec test -f "${SCRIPT}"
+container_exec python3 -m py_compile "${SCRIPT}"
+pass "generator exists and compiles"
+echo "[2/9] Build clean fake ISO and override layout"
+container_sh "
+set -e
+rm -rf '${TEST_ROOT}'
+mkdir -p '${ISO_ROOT}/rhel8iso/images/pxeboot'
+mkdir -p '${ISO_ROOT}/rhel8iso/BaseOS/repodata'
+mkdir -p '${ISO_ROOT}/rhel8iso/AppStream/repodata'
+mkdir -p '${HTML_ROOT}'
+mkdir -p '${OVERRIDE_ROOT}/profiles'
+mkdir -p '${OVERRIDE_ROOT}/templates/ks'
+printf 'fake kernel\n' > '${ISO_ROOT}/rhel8iso/images/pxeboot/vmlinuz'
+printf 'fake initrd\n' > '${ISO_ROOT}/rhel8iso/images/pxeboot/initrd.img'
+printf 'fake baseos repodata\n' > '${ISO_ROOT}/rhel8iso/BaseOS/repodata/repomd.xml'
+printf 'fake appstream repodata\n' > '${ISO_ROOT}/rhel8iso/AppStream/repodata/repomd.xml'
+cat > '${OVERRIDE_ROOT}/profiles/10-minimal.yml' <<'EOF'
+profile_id: minimal
+title: Minimal Installs
+install_label: Minimal
+menu_target: minimal
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+kickstart_template: ks/rhel8-minimal.ks.j2
+kernel_args:
+  - inst.text
+  - nomodeset
+EOF
+cat > '${OVERRIDE_ROOT}/templates/ks/rhel8-minimal.ks.j2' <<'EOF'
+# PHASE6 OVERRIDE TEMPLATE
+#version=RHEL{{ os_major }}
+{% include "partials/install-mode-text.ks.j2" %}
+{% include "partials/language-keyboard.ks.j2" %}
+{% include "partials/timezone.ks.j2" %}
+{% include "partials/network-dhcp.ks.j2" %}
+{% include "partials/root-password.ks.j2" %}
+{% include "partials/repo-url.ks.j2" %}
+{% include "partials/storage-default-lvm.ks.j2" %}
+{% include "partials/packages-minimal.ks.j2" %}
+{% include "partials/services-basic.ks.j2" %}
+{% include "partials/kdump-enabled.ks.j2" %}
+{% include "partials/post-empty.ks.j2" %}
+EOF
+"
+echo "[3/9] Generate once and prove override template wins"
+container_sh "
+set -e
+PXE_SERVER=127.0.0.1 \
+PXE_ISO_ROOT='${ISO_ROOT}' \
+PXE_HTML_ROOT='${HTML_ROOT}' \
+PXE_OVERRIDE_ROOT='${OVERRIDE_ROOT}' \
+PXE_VALIDATION_FAILURE_POLICY=fail \
+python3 '${SCRIPT}' --once
+"
+container_exec test -f "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec grep -q 'PHASE6 OVERRIDE TEMPLATE' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec grep -q 'rootpw --iscrypted' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec grep -q '@^minimal-environment' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec grep -q 'url --url=' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_sh "
+set -e
+if grep -Eq '\\{% include|partials/' '${HTML_ROOT}/ks/rhel8-minimal.ks'; then
+  echo 'ERROR: Jinja include remained in generated kickstart'
+  exit 1
+fi
+"
+pass "override template rendered and Jinja includes resolved"
+echo "[4/9] Confirm status/index show override and Phase 6 metadata"
+container_exec python3 -m json.tool "${HTML_ROOT}/generated/status.json" >/dev/null
+container_exec grep -q '"generator"' "${HTML_ROOT}/generated/status.json"
+container_exec grep -q '"active_overrides"' "${HTML_ROOT}/generated/status.json"
+container_exec grep -q '"stale_kickstarts"' "${HTML_ROOT}/generated/status.json"
+container_exec grep -q '"template_source_detail": "override"' "${HTML_ROOT}/generated/status.json"
+container_exec grep -q 'Generation Policy' "${HTML_ROOT}/index.html"
+container_exec grep -q 'Kickstart State' "${HTML_ROOT}/index.html"
+container_exec grep -q 'Warnings' "${HTML_ROOT}/index.html"
+container_exec grep -q 'Generated Files' "${HTML_ROOT}/index.html"
+pass "status and index expose override metadata"
+echo "[5/9] Confirm placeholder profiles do not generate real boot targets"
+container_sh "
+set -e
+if grep -Eq 'inst\\.ks=.*(developer-workstation|security-baseline|security-luks|embedded-edge)' '${HTML_ROOT}/boot.ipxe'; then
+  echo 'ERROR: future placeholder profile generated a real boot target'
+  exit 1
+fi
+"
+pass "placeholder profiles are safe"
+echo "[6/9] Confirm root password hash does not leak into status/index"
+container_sh "
+set -e
+if grep -q '${DEFAULT_ROOT_HASH_PATTERN}' \
+  '${HTML_ROOT}/generated/status.json' \
+  '${HTML_ROOT}/generated/status.txt' \
+  '${HTML_ROOT}/index.html'; then
+    echo 'ERROR: root password hash leaked into status/index'
+    exit 1
+fi
+"
+pass "root password hash did not leak"
+echo "[7/9] Direct /ks manual edit is preserved by default policy"
+container_sh "
+set -e
+echo '# PHASE6 MANUAL EDIT STILL HERE' >> '${HTML_ROOT}/ks/rhel8-minimal.ks'
+PXE_SERVER=127.0.0.1 \
+PXE_ISO_ROOT='${ISO_ROOT}' \
+PXE_HTML_ROOT='${HTML_ROOT}' \
+PXE_OVERRIDE_ROOT='${OVERRIDE_ROOT}' \
+PXE_GENERATED_KS_EDIT_POLICY=preserve \
+PXE_VALIDATION_FAILURE_POLICY=warn \
+python3 '${SCRIPT}' --once
+"
+container_exec grep -q 'PHASE6 MANUAL EDIT STILL HERE' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec test -f "${HTML_ROOT}/generated/preserved-kickstarts/rhel8-minimal.ks.candidate"
+container_exec grep -q '"preserved_manual_edit": true' "${HTML_ROOT}/generated/status.json"
+pass "manual /ks edit was preserved and candidate was written"
+echo "[8/9] Overwrite policy replaces manual /ks edit"
+container_sh "
+set -e
+PXE_SERVER=127.0.0.1 \
+PXE_ISO_ROOT='${ISO_ROOT}' \
+PXE_HTML_ROOT='${HTML_ROOT}' \
+PXE_OVERRIDE_ROOT='${OVERRIDE_ROOT}' \
+PXE_GENERATED_KS_EDIT_POLICY=overwrite \
+PXE_VALIDATION_FAILURE_POLICY=fail \
+python3 '${SCRIPT}' --once
+"
+container_sh "
+set -e
+if grep -q 'PHASE6 MANUAL EDIT STILL HERE' '${HTML_ROOT}/ks/rhel8-minimal.ks'; then
+  echo 'ERROR: overwrite policy did not replace manual /ks edit'
+  exit 1
+fi
+if test -f '${HTML_ROOT}/generated/preserved-kickstarts/rhel8-minimal.ks.candidate'; then
+  echo 'ERROR: overwrite policy should remove preserved candidate'
+  exit 1
+fi
+"
+container_exec grep -q '"preserved_manual_edit": false' "${HTML_ROOT}/generated/status.json"
+pass "overwrite policy replaced manual edit"
+echo "[9/9] Final sanity check after overwrite"
+container_exec grep -q 'PHASE6 OVERRIDE TEMPLATE' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec grep -q '"health": "ok"' "${HTML_ROOT}/generated/status.json"
+pass "final generated output is healthy"
+echo "== Overrides and preserve policy test passed =="
+
+6. Update the Dockerfile
+
+Add the tests into the image.
+
+Change this section:
+
+COPY scripts/generate-pxe-content.py /usr/local/bin/generate-pxe-content.py
+COPY entrypoint.sh /entrypoint.sh
+COPY content/profiles/ /profiles/
+RUN chmod 0755 /entrypoint.sh /usr/local/bin/generate-pxe-content.py
+
+to this:
+
+COPY scripts/generate-pxe-content.py /usr/local/bin/generate-pxe-content.py
+COPY entrypoint.sh /entrypoint.sh
+COPY content/profiles/ /profiles/
+COPY tests/ /usr/local/share/aerolit-pxe-content/tests/
+RUN chmod 0755 /entrypoint.sh /usr/local/bin/generate-pxe-content.py \
+    && chmod 0755 /usr/local/share/aerolit-pxe-content/tests/*.sh \
+    && chmod 0755 /usr/local/share/aerolit-pxe-content/tests/pxe-content-test \
+    && ln -sf /usr/local/share/aerolit-pxe-content/tests/pxe-content-test /usr/local/bin/pxe-content-test
+
+Also, based on the Python file you pasted, this line is no longer needed:
+
+COPY content/boot.ipxe.tmpl /templates/boot.ipxe.tmpl
+
+The generator builds boot.ipxe directly in Python now. It does not read boot.ipxe.tmpl. I would delete that Dockerfile line and delete:
+
+content/boot.ipxe.tmpl
+
+To double-check before deleting:
+
+grep -R "boot.ipxe.tmpl" -n .
+
+If it only shows the Dockerfile and maybe README references, it is safe to remove.
+
+7. Make the files executable
+
+Run this in the repo:
+
+chmod 0755 tests/test-lib.sh
+chmod 0755 tests/pxe-content-test
+chmod 0755 tests/test-basic-image.sh
+chmod 0755 tests/test-overrides-and-preserve-policy.sh
+chmod 0755 tests/test-validation-health-policy.sh
+
+8. How you test after rebuilding
+
+Build the image:
+
+podman build -t pxe-content:test .
+
+Run all tests directly from the image:
+
+podman run --rm --entrypoint /usr/local/bin/pxe-content-test pxe-content:test all
+
+Run one test:
+
+podman run --rm --entrypoint /usr/local/bin/pxe-content-test pxe-content:test basic
+podman run --rm --entrypoint /usr/local/bin/pxe-content-test pxe-content:test overrides
+podman run --rm --entrypoint /usr/local/bin/pxe-content-test pxe-content:test validation
+
+Against a running container:
+
+podman exec pxe-content pxe-content-test all
+
+9. GitLab tagging without manually commenting latest / test
+
+Yes, stop manually commenting latest and test. Let the pipeline choose the tag.
+
+Replace the hard-coded destination line:
+
+--destination "$IMAGE_NAME:${TAG_VERSION}" \
+
+with dynamic destinations.
+
+A good first version:
+
+variables:
+  IMAGE_NAME: "registry.gitlab.us.lmco.com/lit/containers/pxe-content"
+  DOCKER_FROM_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/nginx-python-alpine:latest"
+  DOCKER_AUTH_CONFIG: '{"auths":{"registry.gitlab.us.lmco.com":{"username":"RELEASE_TOKEN","password":"$RELEASE_TOKEN"}}}'
+build_pxe_content:
+  stage: build
+  image:
+    name: registry.gitlab.us.lmco.com/lit/containers/images/kaniko/kaniko:v1.23.0-debug
+    entrypoint: [""]
+  script:
+    - |
+      set -e
+      DESTINATIONS="--destination ${IMAGE_NAME}:sha-${CI_COMMIT_SHORT_SHA}"
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
+        echo "Tag pipeline detected: ${CI_COMMIT_TAG}"
+        DESTINATIONS="${DESTINATIONS} --destination ${IMAGE_NAME}:${CI_COMMIT_TAG} --destination ${IMAGE_NAME}:latest"
+      elif [ "${CI_COMMIT_BRANCH:-}" = "${CI_DEFAULT_BRANCH:-main}" ]; then
+        echo "Default branch pipeline detected"
+        DESTINATIONS="${DESTINATIONS} --destination ${IMAGE_NAME}:latest --destination ${IMAGE_NAME}:main-${CI_COMMIT_SHORT_SHA}"
+      elif [ "${CI_PIPELINE_SOURCE:-}" = "merge_request_event" ]; then
+        echo "Merge request pipeline detected"
+        DESTINATIONS="${DESTINATIONS} --destination ${IMAGE_NAME}:test --destination ${IMAGE_NAME}:mr-${CI_MERGE_REQUEST_IID} --destination ${IMAGE_NAME}:test-${CI_COMMIT_SHORT_SHA}"
+      else
+        echo "Branch pipeline detected"
+        DESTINATIONS="${DESTINATIONS} --destination ${IMAGE_NAME}:test-${CI_COMMIT_REF_SLUG}"
+      fi
+      echo "Image destinations:"
+      echo "${DESTINATIONS}" | tr ' ' '\n' | grep '^--destination' -A1 || true
+      /kaniko/executor \
+        --context "${CI_PROJECT_DIR}" \
+        --dockerfile "${CI_PROJECT_DIR}/Dockerfile" \
+        --build-arg DOCKER_FROM_IMAGE="${DOCKER_FROM_IMAGE}" \
+        ${DESTINATIONS} \
+        --cache=false
+
+That gives you:
+
+Pipeline type	Tags pushed
+Merge request	test, mr-<iid>, test-<commit-sha>, sha-<commit-sha>
+Default branch merge	latest, main-<commit-sha>, sha-<commit-sha>
+Git tag pipeline	<git-tag>, latest, sha-<commit-sha>
+Other branch	test-<branch-slug>, sha-<commit-sha>
+
+For the “version tag when merged” part: I would not invent a fake semver in this pipeline yet. Use a real Git tag later from your existing release/versioning process. When the pipeline runs on CI_COMMIT_TAG, it will publish that version tag and latest.
+
+So the flow becomes:
+
+1. MR pipeline updates :test and :mr-58.
+2. You test with:
+
+podman run --rm --entrypoint /usr/local/bin/pxe-content-test registry.gitlab.us.lmco.com/lit/containers/pxe-content:test all
+
+3. Merge to default branch updates :latest.
+4. Release/tag pipeline updates :<version> and :latest.
+
+That keeps testing, latest, and future versioned releases clean without manual edits.
