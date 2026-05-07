@@ -1,27 +1,197 @@
-CID=pxe-content
-SCRIPT=/usr/local/bin/generate-pxe-content.py
+Do not change the Python file for 7E. Add this as a separate test script.
 
-podman exec "$CID" python3 -m py_compile "$SCRIPT"
-podman exec "$CID" python3 "$SCRIPT" --once
+Create it here:
 
-curl -fss http://127.0.0.1:18080/generated/status.json -o /tmp/status-7c.json
-curl -fss http://127.0.0.1:18080/generated/status.txt -o /tmp/status-7c.txt
+mkdir -p tests
+vim tests/test-phase7.sh
 
-python3 -m json.tool /tmp/status-7c.json >/dev/null
+Paste this whole script:
 
-grep -q '"boot_artifact_validation"' /tmp/status-7c.json
-grep -q 'boot_ipxe_has_main_menu' /tmp/status-7c.json
-grep -q 'boot_ipxe_has_shell_target' /tmp/status-7c.json
-grep -q 'boot_ipxe_no_unresolved_jinja_variable' /tmp/status-7c.json
-grep -q 'boot_target_exists:rhel8:minimal:uefi' /tmp/status-7c.json
-grep -q 'boot_kickstart_reference_exists:rhel8:minimal:uefi' /tmp/status-7c.json
-grep -q 'Boot Artifact Validation' /tmp/status-7c.txt
-
-if grep -E '\$6\$|REKKqe02' /tmp/status-7c.json /tmp/status-7c.txt; then
-  echo "ERROR: root password hash leaked into status output"
+#!/usr/bin/env bash
+set -euo pipefail
+CID="${CID:-pxe-content}"
+SCRIPT="${SCRIPT:-/usr/local/bin/generate-pxe-content.py}"
+BASE_URL="${BASE_URL:-http://127.0.0.1:18080}"
+TMP_HOST="${TMP_HOST:-/tmp/aerolit-phase7e-test}"
+TEST_ROOT="${TEST_ROOT:-/tmp/pxe-7e}"
+DEFAULT_ROOT_HASH_PATTERN='\$6\$REKKqe02'
+fail() {
+  echo "ERROR: $*" >&2
   exit 1
-else
-  echo "OK: no root password hash leaked into status output"
+}
+pass() {
+  echo "OK: $*"
+}
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "Required command not found: $1"
+}
+fetch() {
+  local path="$1"
+  local output="$2"
+  curl -fss "${BASE_URL}${path}" -o "${output}" || {
+    fail "Failed to fetch ${BASE_URL}${path}"
+  }
+}
+echo "== Phase 7E PXE generator regression test =="
+echo "Container: ${CID}"
+echo "Generator:  ${SCRIPT}"
+echo "Base URL:   ${BASE_URL}"
+echo
+require_cmd podman
+require_cmd curl
+require_cmd grep
+require_cmd python3
+podman inspect "${CID}" >/dev/null 2>&1 || fail "Container not found: ${CID}"
+rm -rf "${TMP_HOST}"
+mkdir -p "${TMP_HOST}"
+echo "== Test 1: Python syntax check =="
+podman exec "${CID}" python3 -m py_compile "${SCRIPT}"
+pass "generator compiles"
+echo
+echo "== Test 2: normal generation with warn policy =="
+podman exec "${CID}" /bin/sh -lc "
+  PXE_VALIDATION_FAILURE_POLICY=warn python3 '${SCRIPT}' --once
+"
+pass "normal generation completed"
+echo
+echo "== Test 3: HTTP-served output exists =="
+fetch "/boot.ipxe" "${TMP_HOST}/boot.ipxe"
+fetch "/generated/status.json" "${TMP_HOST}/status.json"
+fetch "/generated/status.txt" "${TMP_HOST}/status.txt"
+fetch "/generated/isos.txt" "${TMP_HOST}/isos.txt"
+fetch "/index.html" "${TMP_HOST}/index.html"
+python3 -m json.tool "${TMP_HOST}/status.json" >/dev/null
+grep -q '^#!ipxe' "${TMP_HOST}/boot.ipxe"
+grep -q 'AeroLIT PXE Content Status' "${TMP_HOST}/status.txt"
+grep -q '/generated/status.json' "${TMP_HOST}/index.html"
+grep -q '/generated/status.txt' "${TMP_HOST}/index.html"
+pass "boot.ipxe, status.json, status.txt, isos.txt, and index.html are served"
+echo
+echo "== Test 4: status.json contains Phase 7 fields =="
+grep -q '"validation_summary"' "${TMP_HOST}/status.json"
+grep -q '"validation_results"' "${TMP_HOST}/status.json"
+grep -q '"boot_artifact_validation"' "${TMP_HOST}/status.json"
+grep -q '"repo_validation"' "${TMP_HOST}/status.json"
+grep -q '"validation_failure_policy": "warn"' "${TMP_HOST}/status.json"
+python3 - "${TMP_HOST}/status.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+summary = data.get("validation_summary", {})
+detected = data.get("detected_isos", [])
+generated = data.get("generated_kickstarts", [])
+if not detected:
+    raise SystemExit("No detected ISOs found in status.json")
+if not generated:
+    raise SystemExit("No generated kickstarts found in status.json")
+if int(summary.get("error", 0)) != 0:
+    raise SystemExit(f"Expected 0 validation errors in normal run, got {summary.get('error')}")
+print("OK: status.json has detected ISOs, generated kickstarts, and no validation errors")
+PY
+pass "Phase 7 status fields look good"
+echo
+echo "== Test 5: root password hash does not leak into status/index =="
+if grep -q "${DEFAULT_ROOT_HASH_PATTERN}" \
+  "${TMP_HOST}/status.json" \
+  "${TMP_HOST}/status.txt" \
+  "${TMP_HOST}/index.html"; then
+  fail "Default root password hash leaked into status or index output"
 fi
+pass "root password hash did not leak into status/index"
+echo
+echo "== Test 6: isolated warn policy allows broken generated content but reports it =="
+podman exec "${CID}" /bin/sh -lc "
+set -e
+rm -rf '${TEST_ROOT}'
+mkdir -p '${TEST_ROOT}/iso/rhel8iso/images/pxeboot'
+mkdir -p '${TEST_ROOT}/overrides/profiles'
+mkdir -p '${TEST_ROOT}/overrides/templates/ks'
+mkdir -p '${TEST_ROOT}/html'
+touch '${TEST_ROOT}/iso/rhel8iso/images/pxeboot/vmlinuz'
+touch '${TEST_ROOT}/iso/rhel8iso/images/pxeboot/initrd.img'
+cat > '${TEST_ROOT}/overrides/profiles/10-minimal.yml' <<'EOF'
+profile_id: minimal
+title: Minimal Installs
+install_label: Minimal
+menu_target: minimal
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+kickstart_template: ks/rhel8-broken.ks.tmpl
+kernel_args:
+  - inst.text
+  - nomodeset
+EOF
+cat > '${TEST_ROOT}/overrides/templates/ks/rhel8-broken.ks.tmpl' <<'EOF'
+#version=RHEL8
+text
+reboot
+# This is intentionally broken so validation fails:
+{% PHASE7E_BROKEN_UNRESOLVED_JINJA_BLOCK %}
+lang en_US.UTF-8
+keyboard us
+timezone America/Chicago --utc
+network --bootproto=dhcp --device=link --activate
+rootpw --iscrypted \$ROOTPW_HASH
+url --url=\"\$REPO_URL\"
+%packages
+@^minimal-environment
+%end
+EOF
+PXE_SERVER=127.0.0.1 \
+PXE_ISO_ROOT='${TEST_ROOT}/iso' \
+PXE_HTML_ROOT='${TEST_ROOT}/html' \
+PXE_OVERRIDE_ROOT='${TEST_ROOT}/overrides' \
+PXE_VALIDATION_FAILURE_POLICY=warn \
+python3 '${SCRIPT}' --once
+"
+podman exec "${CID}" test -f "${TEST_ROOT}/html/generated/status.json"
+podman exec "${CID}" test -f "${TEST_ROOT}/html/generated/status.txt"
+podman exec "${CID}" grep -q '"validation_failure_policy": "warn"' "${TEST_ROOT}/html/generated/status.json"
+podman exec "${CID}" grep -q '"unresolved_jinja_block' "${TEST_ROOT}/html/generated/status.json"
+podman exec "${CID}" grep -q 'unresolved_jinja_block' "${TEST_ROOT}/html/generated/status.txt"
+pass "warn policy reports validation error but does not fail generation"
+echo
+echo "== Test 7: isolated fail policy exits non-zero but still writes status files =="
+set +e
+podman exec "${CID}" /bin/sh -lc "
+PXE_SERVER=127.0.0.1 \
+PXE_ISO_ROOT='${TEST_ROOT}/iso' \
+PXE_HTML_ROOT='${TEST_ROOT}/html' \
+PXE_OVERRIDE_ROOT='${TEST_ROOT}/overrides' \
+PXE_VALIDATION_FAILURE_POLICY=fail \
+python3 '${SCRIPT}' --once > '${TEST_ROOT}/fail-policy.out' 2>&1
+"
+rc=$?
+set -e
+podman exec "${CID}" cat "${TEST_ROOT}/fail-policy.out" > "${TMP_HOST}/fail-policy.out"
+if [ "${rc}" -eq 0 ]; then
+  cat "${TMP_HOST}/fail-policy.out"
+  fail "PXE_VALIDATION_FAILURE_POLICY=fail did not fail on broken generated content"
+fi
+grep -q 'Validation failed' "${TMP_HOST}/fail-policy.out"
+grep -q 'unresolved_jinja_block' "${TMP_HOST}/fail-policy.out"
+podman exec "${CID}" test -f "${TEST_ROOT}/html/generated/status.json"
+podman exec "${CID}" test -f "${TEST_ROOT}/html/generated/status.txt"
+podman exec "${CID}" grep -q '"validation_failure_policy": "fail"' "${TEST_ROOT}/html/generated/status.json"
+podman exec "${CID}" grep -q '"unresolved_jinja_block' "${TEST_ROOT}/html/generated/status.json"
+pass "fail policy fails correctly and status files are still written"
+echo
+echo "== Phase 7E complete =="
+echo "OK: Phase 7 regression test passed"
 
-echo "7C test passed"
+Then run:
+
+chmod +x tests/test-phase7.sh
+./tests/test-phase7.sh
+
+Expected final output:
+
+OK: Phase 7 regression test passed
+
+This script tests the real running PXE container first, then does the broken-content warn and fail tests inside an isolated /tmp/pxe-7e directory so it does not damage your real /etc/nginx/html PXE content.
