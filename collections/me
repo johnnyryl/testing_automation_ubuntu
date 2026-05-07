@@ -1,0 +1,225 @@
+# AeroLIT PXE Content
+
+AeroLIT PXE Content is a container image that serves dynamic PXE boot content for AeroLIT provisioning workflows.
+
+It generates and serves:
+
+- `boot.ipxe`
+- Kickstart files under `/ks`
+- a simple web index
+- generated status and validation reports
+- profile-driven install menus for detected RHEL ISO trees
+
+The image is intended to be a lightweight PXE content layer. It does not replace Foreman, DHCP, TFTP, Ansible, or the AeroLIT bootstrap workflow. It provides the HTTP-served PXE menu and Kickstart content those workflows can use.
+
+## What this image does
+
+At startup, the image runs Nginx and the PXE content generator.
+
+The generator detects supported ISO trees, reads built-in and override profile definitions, renders Kickstart files, creates `boot.ipxe`, and writes status files.
+
+Supported ISO tree names are:
+
+```text
+rhel7iso
+rhel8iso
+rhel9iso
+rhel10iso
+```
+
+A valid ISO tree must include:
+
+```text
+images/pxeboot/vmlinuz
+images/pxeboot/initrd.img
+```
+
+For RHEL 8, 9, and 10, repository metadata should also exist under:
+
+```text
+BaseOS/repodata/repomd.xml
+AppStream/repodata/repomd.xml
+```
+
+For RHEL 7, repository metadata should exist under:
+
+```text
+repodata/repomd.xml
+```
+
+Missing repository metadata creates a warning because PXE boot files may exist even though the install content is incomplete.
+
+## Current project layout
+
+Important project paths:
+
+```text
+content/
+  profiles/
+  ui/
+  examples/overrides/
+
+nginx/
+  pxe.conf
+
+scripts/
+  generate-pxe-content.py
+
+templates/
+  ks/
+  partials/
+
+tests/
+  pxe-content-test
+  test-basic-image.sh
+  test-overrides-and-preserve-policy.sh
+  test-validation-health-policy.sh
+  test-lib.sh
+
+Dockerfile
+entrypoint.sh
+README.md
+```
+
+## Built-in profiles
+
+Current profile sets are defined under:
+
+```text
+content/profiles/
+```
+
+Implemented profiles generate real boot targets and Kickstarts.
+
+Placeholder profiles appear in the menu, but they do not generate real install targets or real Kickstart references.
+
+Current profile intent:
+
+```text
+developer_workstation   placeholder
+security_baseline       placeholder
+security_luks           placeholder
+embedded_edge           placeholder
+minimal                 implemented
+small_disk              implemented
+```
+
+## Quick start
+
+Example container run:
+
+```bash
+podman run --rm -d \
+  --name pxe-content \
+  -p 18080:8080 \
+  -e PXE_SERVER=<pxe-server-ip-or-hostname> \
+  -e PXE_PORT=18080 \
+  -v /path/to/extracted_isos:/iso:Z \
+  -v /path/to/overrides:/overrides:Z \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:latest
+```
+
+Then open or test:
+
+```text
+http://<pxe-server-ip-or-hostname>:18080/
+http://<pxe-server-ip-or-hostname>:18080/boot.ipxe
+http://<pxe-server-ip-or-hostname>:18080/generated/status.txt
+http://<pxe-server-ip-or-hostname>:18080/generated/status.json
+```
+
+For iPXE testing, the chain command normally looks like:
+
+```ipxe
+chain http://<pxe-server-ip-or-hostname>:18080/boot.ipxe
+```
+
+## Common environment variables
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `PXE_SERVER` | required | Server name or IP used in generated PXE URLs |
+| `PXE_PORT` | `18080` | External HTTP port used in generated PXE URLs |
+| `PXE_ISO_ROOT` | `/iso` | Container path where extracted ISO trees are mounted |
+| `PXE_HTML_ROOT` | `/etc/nginx/html` | Web root where generated content is written |
+| `PXE_TEMPLATE_ROOT` | `/templates` | Built-in Kickstart template root |
+| `PXE_PROFILE_ROOT` | `/profiles` | Built-in profile definition root |
+| `PXE_OVERRIDE_ROOT` | `/overrides` | Main customization root |
+| `PXE_GENERATED_KS_EDIT_POLICY` | `preserve` | Controls manual edits under generated `/ks` |
+| `PXE_VALIDATION_FAILURE_POLICY` | `warn` | Controls whether validation errors fail generation |
+| `PXE_WATCH_INTERVAL` | `15` | Seconds between generator watch checks |
+| `ROOTPW_HASH` | built-in default | Root password hash used in generated Kickstarts |
+| `ALLOW_DEFAULT_ROOTPW` | `true` | Allows the built-in default password hash |
+
+The default root password is only for lab/bootstrap use. Set `ROOTPW_HASH` for real use.
+
+## Generated files
+
+| Path | Purpose |
+|---|---|
+| `/boot.ipxe` | Main iPXE menu |
+| `/ks/*.ks` | Generated Kickstart files |
+| `/index.html` | Basic browser landing page |
+| `/generated/status.json` | Machine-readable generator status and validation report |
+| `/generated/status.txt` | Human-readable status report |
+| `/generated/isos.txt` | Detected ISO inventory |
+| `/generated/kickstart-state/` | State used to detect manual edits |
+| `/generated/preserved-kickstarts/` | Candidate files created when manual edits are preserved |
+
+## Testing the image
+
+The image includes a built-in test runner.
+
+Run all tests against the image:
+
+```bash
+podman run --rm \
+  --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test \
+  all
+```
+
+This validates the generator, profiles, templates, override behavior, preserve/overwrite policy, validation failure policy, generated status files, and basic HTTP serving without requiring real PXE hardware.
+
+See:
+
+```text
+docs/testing.md
+```
+
+## Customization overview
+
+Preferred customization path:
+
+```text
+/overrides/profiles/
+/overrides/templates/
+```
+
+Example override files are stored in:
+
+```text
+content/examples/overrides/
+```
+
+Use overrides when you want repeatable changes.
+
+Manual edits under generated `/ks` are supported as an emergency path. By default, manual edits are preserved and regenerated content is written as a candidate file under:
+
+```text
+/generated/preserved-kickstarts/
+```
+
+Use `PXE_GENERATED_KS_EDIT_POLICY=overwrite` to allow the generator to replace manual `/ks` edits.
+
+## More documentation
+
+| Topic | File |
+|---|---|
+| Testing | `docs/testing.md` |
+| Bundle layout | `docs/bundle-layout.md` |
+| Customization and overrides | `docs/customization.md` |
+| Profiles | `docs/profiles.md` |
+| Validation and status files | `docs/validation-and-status.md` |
+| Troubleshooting | `docs/troubleshooting.md` |
+| Future Foreman and Ansible integration notes | `docs/future-integrations.md` |
