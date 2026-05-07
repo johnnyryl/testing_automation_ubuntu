@@ -1,0 +1,425 @@
+# AeroLIT PXE Content: Profiles, Overrides, and Emergency Edits
+
+This document explains how PXE profiles work, how to add or override profiles, how to override Kickstart templates, and how emergency edits under `/ks` behave.
+
+## Where the files live
+
+Current project layout used by the image:
+
+```text
+content/
+  profiles/
+    10-developer-workstation.yml
+    20-security-baseline.yml
+    30-security-luks.yml
+    40-embedded-edge.yml
+    50-minimal.yml
+    60-small-disk.yml
+  examples/overrides/
+    profiles/
+      10-minimal-override.example.yml
+    templates/ks/
+      rhel8-minimal.example.ks.j2
+  ui/
+    background.png
+scripts/
+  generate-pxe-content.py
+templates/
+  ks/
+    rhel7-minimal.ks.j2
+    rhel7-small-disk.ks.j2
+    rhel8-minimal.ks.j2
+    rhel8-small-disk.ks.j2
+    rhel9-minimal.ks.j2
+    rhel9-small-disk.ks.j2
+    rhel10-minimal.ks.j2
+    rhel10-small-disk.ks.j2
+  partials/
+    *.ks.j2
+tests/
+  pxe-content-test
+  test-basic-image.sh
+  test-overrides-and-preserve-policy.sh
+  test-validation-health-policy.sh
+  test-lib.sh
+```
+
+At runtime, the generator reads built-in content from the image and optional site-specific overrides from `/overrides` by default.
+
+## Profile basics
+
+A profile is a YAML file that creates one install menu group in `boot.ipxe`. A profile decides:
+
+- What title appears in the PXE menu.
+- Which RHEL versions it supports.
+- Whether it is implemented or only a safe placeholder.
+- Which Kickstart template should be rendered.
+- Which extra kernel arguments should be added.
+
+Example profile:
+
+```yaml
+profile_id: minimal
+title: Minimal Installs
+install_label: Minimal
+menu_target: minimal
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+  - rhel9
+kickstart_template: ks/{{ os_id }}-minimal.ks.j2
+kernel_args:
+  - inst.text
+  - nomodeset
+```
+
+Important rules:
+
+- `profile_id` and `menu_target` must use lowercase letters, numbers, and underscores only.
+- Boolean values must be real YAML booleans: `true` or `false`. Do not quote them.
+- `implemented: false` creates safe menu placeholders only. It does not create real boot targets or Kickstarts.
+- `implemented: true` creates real boot targets and generated Kickstarts for supported detected ISOs.
+- `supported_os` can include `rhel7`, `rhel8`, `rhel9`, and `rhel10`.
+
+## Current built-in profile set
+
+The current built-in profile order is:
+
+1. Developer Workstation Installs
+2. Security Baseline Installs
+3. Security + LUKS Installs
+4. Embedded / Edge Hardware Installs
+5. Minimal Installs
+6. Small Disk Installs
+
+Only profiles marked `implemented: true` generate real boot targets and Kickstarts. The placeholder profiles are shown so users can see planned install paths without accidentally booting unfinished automation.
+
+## Adding a new profile
+
+Use this pattern when adding a new built-in profile to the project.
+
+1. Add a new file under `content/profiles/`.
+2. Give it a numbered filename so the menu order is obvious.
+3. Add or reuse a Kickstart template under `templates/ks/`.
+4. Run the built-in tests before merging.
+
+Example:
+
+```text
+content/profiles/70-lab-workstation.yml
+templates/ks/rhel8-lab-workstation.ks.j2
+templates/ks/rhel9-lab-workstation.ks.j2
+templates/ks/rhel10-lab-workstation.ks.j2
+```
+
+Example profile:
+
+```yaml
+profile_id: lab_workstation
+title: Lab Workstation Installs
+install_label: Lab Workstation
+menu_target: lab_workstation
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+  - rhel9
+  - rhel10
+kickstart_template: ks/{{ os_id }}-lab-workstation.ks.j2
+kernel_args:
+  - inst.text
+  - nomodeset
+```
+
+Then test the image:
+
+```bash
+podman run --rm --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test all
+```
+
+## Overriding a profile at runtime
+
+Use profile overrides when a site needs different menu text, supported OS choices, firmware support, kernel arguments, or a different Kickstart template without rebuilding the image.
+
+Default override location inside the container:
+
+```text
+/overrides/profiles/
+```
+
+Example runtime override:
+
+```text
+/overrides/profiles/10-minimal.yml
+```
+
+If the override file uses an existing `profile_id`, it replaces that built-in profile. If it uses a new `profile_id`, it is added as a new profile.
+
+Example override:
+
+```yaml
+profile_id: minimal
+title: Site Minimal Installs
+install_label: Site Minimal
+menu_target: minimal
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: false
+supported_os:
+  - rhel9
+kickstart_template: ks/rhel9-site-minimal.ks.j2
+kernel_args:
+  - inst.text
+  - nomodeset
+```
+
+## Overriding a Kickstart template
+
+Use template overrides when the menu/profile is mostly correct but the install content needs to change.
+
+Default override location:
+
+```text
+/overrides/templates/ks/
+```
+
+Two common approaches are supported.
+
+### Option 1: Replace a template by using the same relative path
+
+For a built-in template like:
+
+```text
+templates/ks/rhel8-minimal.ks.j2
+```
+
+Create this runtime override:
+
+```text
+/overrides/templates/ks/rhel8-minimal.ks.j2
+```
+
+The override template wins over the built-in template.
+
+### Option 2: Point a profile override to a new template name
+
+Profile override:
+
+```yaml
+kickstart_template: ks/rhel8-site-minimal.ks.j2
+```
+
+Template override:
+
+```text
+/overrides/templates/ks/rhel8-site-minimal.ks.j2
+```
+
+This is cleaner when the site wants a clearly named custom template instead of replacing the built-in template name.
+
+## Template variables
+
+Kickstart templates may use Jinja2 variables from the generator. Common variables include:
+
+```jinja2
+{{ os_id }}
+{{ os_major }}
+{{ os_title }}
+{{ profile_id }}
+{{ profile_title }}
+{{ base_url }}
+{{ repo_url }}
+{{ kickstart_url }}
+{{ rootpw_hash }}
+{{ kernel_args_string }}
+```
+
+Uppercase versions are also available for simple `$VARIABLE` style templates, such as `$REPO_URL` and `$ROOTPW_HASH`.
+
+## Using Kickstart partials
+
+Built-in templates can include reusable partials from `templates/partials/`:
+
+```jinja2
+{% include "partials/install-mode-text.ks.j2" %}
+{% include "partials/language-keyboard.ks.j2" %}
+{% include "partials/network-dhcp.ks.j2" %}
+{% include "partials/root-password.ks.j2" %}
+{% include "partials/repo-url.ks.j2" %}
+{% include "partials/packages-minimal.ks.j2" %}
+```
+
+When writing override templates, prefer using the same partials where possible. That keeps site customizations smaller and makes future changes easier to review.
+
+## Manual or emergency edits under `/ks`
+
+The preferred customization path is always:
+
+```text
+/overrides/profiles/
+/overrides/templates/
+```
+
+However, direct emergency edits under the generated `/ks` directory are supported.
+
+Default behavior:
+
+```text
+PXE_GENERATED_KS_EDIT_POLICY=preserve
+```
+
+With `preserve`, if someone manually edits a generated Kickstart under `/ks`, the generator does not overwrite it on the next run. Instead, it writes the newly generated version as a candidate file:
+
+```text
+/generated/preserved-kickstarts/<kickstart-name>.candidate
+```
+
+The state is tracked under:
+
+```text
+/generated/kickstart-state/<kickstart-name>.json
+```
+
+Use this during emergency troubleshooting when PXE install work must continue before a clean profile/template override can be created.
+
+To force the generator to overwrite manual edits:
+
+```text
+PXE_GENERATED_KS_EDIT_POLICY=overwrite
+```
+
+Use `overwrite` when the generated source of truth should win and manual edits should be discarded.
+
+## Generated status and index files
+
+The generator writes human-readable and machine-readable status files:
+
+```text
+/generated/status.json
+/generated/status.txt
+/index.html
+```
+
+Use `status.json` for automation and troubleshooting. It includes:
+
+- Detected ISO trees.
+- Visible and enabled profiles.
+- Generated Kickstarts.
+- Active profile/template overrides.
+- Validation summary and detailed validation results.
+- Preserved manual edit state.
+- Stale Kickstart cleanup actions.
+
+Use `status.txt` when reading from the command line. Use `index.html` when checking the container from a browser.
+
+## Validation failure policy
+
+The generator always writes status files before enforcing the validation failure policy.
+
+Default behavior:
+
+```text
+PXE_VALIDATION_FAILURE_POLICY=warn
+```
+
+`warn` means validation errors are reported in status output, but generation does not fail.
+
+Strict behavior:
+
+```text
+PXE_VALIDATION_FAILURE_POLICY=fail
+```
+
+`fail` means the generator exits non-zero when validation errors exist. This is useful for CI/CD and test scripts.
+
+## Quick test command
+
+After building or pulling the image, run all included tests from inside the image:
+
+```bash
+podman run --rm --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test all
+```
+
+Run one test at a time:
+
+```bash
+podman run --rm --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test basic
+
+podman run --rm --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test overrides
+
+podman run --rm --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test validation
+```
+
+Passing tests prove the image can generate PXE content, render profiles/templates, serve generated files, preserve emergency edits, enforce validation policy, and avoid leaking the root password hash into status pages.
+
+## Common troubleshooting
+
+### No ISOs detected
+
+Confirm the ISO tree exists under the configured ISO root and includes:
+
+```text
+rhel8iso/images/pxeboot/vmlinuz
+rhel8iso/images/pxeboot/initrd.img
+```
+
+For RHEL 8, 9, and 10, also confirm repository metadata exists:
+
+```text
+BaseOS/repodata/repomd.xml
+AppStream/repodata/repomd.xml
+```
+
+### Profile file fails to load
+
+Check for quoted booleans or unsupported boolean words.
+
+Correct:
+
+```yaml
+implemented: true
+```
+
+Incorrect:
+
+```yaml
+implemented: "true"
+implemented: yes
+implemented: on
+```
+
+### Override template cannot include partials
+
+Make sure the image still includes the built-in `templates/partials/` directory. Override templates can include built-in partials through the Jinja search path.
+
+### Validation fails because of unresolved Jinja
+
+Look for leftover template syntax in a generated Kickstart:
+
+```text
+{% ... %}
+{{ ... }}
+```
+
+That usually means a template block was intentionally broken, misspelled, or not rendered through Jinja2.
+
+### Manual `/ks` edit will not go away
+
+The default policy preserves manual edits. Regenerate with:
+
+```text
+PXE_GENERATED_KS_EDIT_POLICY=overwrite
+```
+
+Then rerun the generator.
