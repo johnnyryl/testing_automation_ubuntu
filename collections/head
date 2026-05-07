@@ -1,0 +1,314 @@
+# Phase 8F — Image Tagging, Test Runner, and Merge Checklist
+
+This phase documents the workflow that makes the PXE content image easier to test before merge and easier to consume after merge.
+
+The goal is simple:
+
+```text
+Use :test when validating a branch or merge request.
+Use :latest after the change is merged and promoted.
+Keep sha-* tags for traceability.
+```
+
+## Why this matters
+
+Before the test runner was added, testing required copying scripts to the VM or cloning the project where the container was running.
+
+Now the image carries its own test scripts. That means a user can pull the image and run a single command to validate the image contents, generator behavior, override behavior, validation policy, and generated HTTP content.
+
+## Recommended image tags
+
+The pipeline should publish tags that make both testing and traceability easy.
+
+Recommended behavior:
+
+| Pipeline type | Recommended tags | Purpose |
+|---|---|---|
+| Branch or merge request validation | `test`, `sha-<short-sha>` | Easy testing plus exact build traceability |
+| Merge request pipeline, if MR variables are available | `test`, `mr-<iid>`, `test-<short-sha>`, `sha-<short-sha>` | Easy testing plus MR-specific traceability |
+| Default branch after merge | `latest`, `main-<short-sha>`, `sha-<short-sha>` | Promoted image for normal use |
+| Git tag pipeline | `<git-tag>`, `latest`, `sha-<short-sha>` | Release-style tagging |
+
+The most important tags are:
+
+```text
+test
+latest
+sha-<short-sha>
+```
+
+`test` is intentionally a moving tag. It is meant for quick manual validation of the latest image produced by the active branch or merge request.
+
+`sha-<short-sha>` is the exact immutable-ish build reference for troubleshooting.
+
+`latest` should represent the promoted image from the default branch after merge.
+
+## Recommended test command
+
+Run all built-in tests against the `:test` image:
+
+```bash
+podman run --rm \
+  --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test \
+  all
+```
+
+A successful run should show these test groups passing:
+
+```text
+Basic image test passed
+Overrides and preserve policy test passed
+Validation / health policy test passed
+```
+
+## Running one test group
+
+Use these when you only need one test group:
+
+```bash
+podman run --rm \
+  --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test \
+  basic
+```
+
+```bash
+podman run --rm \
+  --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test \
+  overrides
+```
+
+```bash
+podman run --rm \
+  --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test \
+  validation
+```
+
+Use `all` before merge.
+
+Use a single group when troubleshooting a specific failure.
+
+## Test runner files
+
+Source files in the repo:
+
+```text
+tests/
+  pxe-content-test
+  test-basic-image.sh
+  test-overrides-and-preserve-policy.sh
+  test-validation-health-policy.sh
+  test-lib.sh
+```
+
+Installed paths inside the image:
+
+```text
+/usr/local/bin/pxe-content-test
+/usr/local/share/aerolit-pxe-content/tests/
+```
+
+The Dockerfile should copy the test directory into the image, make the scripts executable, and create the `/usr/local/bin/pxe-content-test` symlink.
+
+## Test runner requirements
+
+The image must include:
+
+```text
+python3
+nginx
+bash
+```
+
+The test scripts must have:
+
+```text
+Unix line endings
+executable permissions
+```
+
+A good quick verification command is:
+
+```bash
+podman run --rm \
+  --entrypoint /bin/sh \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test \
+  -lc 'head -1 /usr/local/bin/pxe-content-test | cat -A; command -v bash; ls -l /usr/local/bin/pxe-content-test'
+```
+
+Good output should include:
+
+```text
+#!/usr/bin/env bash$
+/usr/bin/bash
+```
+
+or another valid Bash path.
+
+If the first line shows `^M`, the script has Windows line endings and the image needs to be rebuilt after fixing them.
+
+## What the passing tests prove
+
+Passing tests prove the image can:
+
+- run the generator
+- compile the generator script
+- detect valid fake RHEL ISO trees
+- ignore incomplete fake ISO trees
+- generate `boot.ipxe`
+- generate Kickstarts
+- generate `index.html`
+- generate `status.json`
+- generate `status.txt`
+- generate `isos.txt`
+- serve generated content over HTTP
+- render Jinja templates and partials
+- use override profiles
+- use override templates
+- preserve manual `/ks` edits when policy is `preserve`
+- overwrite manual `/ks` edits when policy is `overwrite`
+- report validation issues in `warn` mode
+- fail on validation issues in `fail` mode
+- avoid leaking the root password hash into status and index files
+
+## What the tests do not prove
+
+The tests do not prove:
+
+- DHCP is configured correctly
+- a physical machine can PXE boot on the real network
+- a VM can boot through the real PXE flow
+- a real RHEL install completes against a real ISO tree
+- Foreman integration works
+- Ansible post-install automation works
+
+Those are higher-level integration tests.
+
+Do not block normal documentation or generator cleanup changes on a full real PXE install unless the change affects actual boot or install behavior.
+
+## Recommended merge workflow
+
+Use this process for normal changes:
+
+1. Push the branch.
+2. Confirm the pipeline builds and pushes the `:test` image.
+3. Run the built-in test command:
+
+```bash
+podman run --rm \
+  --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test \
+  all
+```
+
+4. Confirm all three test groups pass.
+5. Review the changed docs, templates, scripts, and Dockerfile.
+6. Merge the MR.
+7. Confirm the default branch pipeline publishes `:latest`.
+
+## When to run a real PXE boot test
+
+Run a real VM or hardware PXE test when changing:
+
+- generated kernel arguments
+- `boot.ipxe` boot target logic
+- Kickstart storage logic
+- Kickstart repo logic
+- firmware behavior for UEFI or BIOS
+- RHEL version-specific boot behavior
+- Nginx serving paths used by real clients
+
+For documentation-only changes, test-script updates, or minor status/index changes, the built-in image test is usually enough.
+
+## Common failures
+
+### `No such file or directory` when running `pxe-content-test`
+
+Usually caused by one of these:
+
+- `/usr/local/bin/pxe-content-test` is missing
+- the symlink points to a missing file
+- Bash is missing
+- the script has Windows line endings
+
+Check with:
+
+```bash
+podman run --rm \
+  --entrypoint /bin/sh \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test \
+  -lc 'ls -l /usr/local/bin/pxe-content-test /usr/local/share/aerolit-pxe-content/tests/; head -1 /usr/local/bin/pxe-content-test | cat -A; command -v bash || true'
+```
+
+### Permission denied during temporary Nginx test
+
+The basic test creates temporary content under `/tmp`.
+
+The test script should ensure the temporary test tree is readable and executable:
+
+```bash
+chmod -R a+rX "${TEST_ROOT}"
+```
+
+The temporary Nginx test config should run as root inside the test container:
+
+```nginx
+user root;
+```
+
+### Jinja partial is undefined
+
+Use quoted include paths:
+
+```jinja
+{% include "partials/packages-minimal.ks.j2" %}
+```
+
+or:
+
+```jinja
+{% include 'partials/packages-minimal.ks.j2' %}
+```
+
+Do not use unquoted include paths:
+
+```jinja
+{% include partials/packages-minimal.ks.j2 %}
+```
+
+### Test image did not update
+
+Check the pipeline image destinations.
+
+For easy testing, branch or MR pipelines should publish:
+
+```text
+:test
+```
+
+If the pipeline publishes only `test-<branch-name>`, either run that specific tag or update the CI tag logic to also push `test`.
+
+## Suggested final docs location
+
+This content can become:
+
+```text
+docs/testing-and-image-tags.md
+```
+
+or it can be merged into:
+
+```text
+docs/testing.md
+```
+
+Recommended final choice:
+
+```text
+docs/testing.md
+```
+
+Keep `docs/testing.md` as the single place for image test commands, test script descriptions, and tag expectations.
