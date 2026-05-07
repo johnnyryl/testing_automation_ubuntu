@@ -1,0 +1,138 @@
+Yes — don’t rebuild it. Tighten the story:
+
+Main message:
+AeroLIT has evolved from an Ansible playbook into a portable Linux provisioning and lifecycle platform.
+
+Best quick updates before presenting
+
+1. Slide 3 “What is AeroLIT?”
+    Replace with:
+
+AeroLIT is a modular Linux integration platform for provisioning, securing, packaging, and operating RHEL environments across connected and disconnected networks.
+
+Bullets:
+
+* Standardizes RHEL 8/9/10 provisioning and lifecycle workflows
+* Combines Ansible, GitLab CI/CD, collections, compliance policies, PXE, and offline bundles
+* Designed for repeatable deployment in disconnected and air-gapped environments
+
+2. Current Capabilities slide
+    Make the four columns:
+
+Provision
+
+* Bootstrap controller, repos, PXE, and inventory
+* Supports offline bundles and extracted ISO content
+* Dynamic PXE/Kickstart workflows in progress
+
+Secure
+
+* STIG/SCC/OpenSCAP alignment
+* Group-level compliance policies
+* Security-first automation patterns
+
+Package
+
+* Collections-Hub distributable
+* Offline package builder
+* Nexus-hosted artifacts and repos
+
+Operate
+
+* GitLab pipelines for linting, changelog, tagging, releases
+* Role → collection → hub automation
+* Cross-network transfer patterns
+
+3. GitLab & CI/CD slide
+    Title should be:
+
+GitLab as the Automation Backbone
+
+Replace bullets with:
+
+* Componentized pipeline templates
+* Group-level compliance policy enforcement
+* Automated role, collection, and release workflows
+* Offline package generation and artifact publishing
+* Supports disconnected network promotion patterns
+
+4. Compliance slide
+    Main point:
+
+Compliance is built into the workflow instead of checked at the end.
+
+Bullets:
+
+* Ansible lint
+* Markdown lint
+* Changelog generation
+* Tag/version/release automation
+* Galaxy collection generation
+* Future: README/docs, SBOM, validation pipelines
+
+5. Galaxy Collections slide
+    Say this:
+
+Roles are developed independently, then promoted into versioned collections and finally into Collections-Hub for users.
+
+Flow:
+Role MR → Collection Update → Version Tag → Release → Collections-Hub Bundle
+
+6. Corestack slide
+    This one likely needs the most cleanup. Rename it:
+
+AeroLIT Offline Deployment Bundle
+
+Show:
+
+* bootstrap.sh
+* collections-hub/
+* extracted_isos/
+* files/pxe/pxe-content.tar
+* repos/
+* generated vars / group_vars
+
+Right side:
+
+* Configure local repos
+* Deploy PXE content
+* Bootstrap Ansible controller
+* Run selected playbooks
+* Support disconnected installs
+
+7. Roadmap slide
+    Update to:
+
+Now
+
+* Offline bundle builder
+* Bootstrap controller workflow
+* PXE content container
+* Collections-Hub
+* Compliance pipelines
+
+Next
+
+* Dynamic PXE menu generator
+* Foreman handoff
+* Post-install Ansible hooks
+* GUI/IP helper
+
+Later
+
+* Image mode / RHEL image builder
+* AAP integration
+* Observability
+* Expanded validation/testing
+
+8. Key Advantages slide
+    Keep it, but make the four cards:
+
+* Standardized Linux Delivery
+* Built-in Security & Compliance
+* Disconnected Environment Ready
+* Modular, Scalable Architecture
+
+Add one closing line:
+
+AeroLIT gives teams a repeatable way to build, secure, package, transfer, and deploy Linux infrastructure across environments.
