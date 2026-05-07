@@ -1,0 +1,81 @@
+No, I don’t think you typed the command wrong. This part looks right:
+
+podman run --rm --entrypoint /usr/local/bin/pxe-content-test registry.gitlab.us.lmco.com/lit/containers/pxe-content:test all
+
+The issue is most likely inside the image, not your command.
+
+Based on your Dockerfile, the file should exist because you added:
+
+COPY tests/ /usr/local/share/aerolit-pxe-content/tests/
+RUN chmod 0755 /entrypoint.sh /usr/local/bin/generate-pxe-content.py \
+    && chmod 0755 /usr/local/share/aerolit-pxe-content/tests/*.sh \
+    && chmod 0755 /usr/local/share/aerolit-pxe-content/tests/pxe-content-test \
+    && ln -sf /usr/local/share/aerolit-pxe-content/tests/pxe-content-test /usr/local/bin/pxe-content-test
+
+The most likely problem is this:
+
+#!/usr/bin/env bash
+
+Your image is based on an Alpine-style image, and it probably does not have bash installed. When a script exists but its shebang points to a missing interpreter, Linux often reports it as:
+
+No such file or directory
+
+Run this to confirm:
+
+podman run --rm --entrypoint /bin/sh registry.gitlab.us.lmco.com/lit/containers/pxe-content:test -lc '
+set -e
+ls -l /usr/local/bin/pxe-content-test
+ls -l /usr/local/share/aerolit-pxe-content/tests/
+head -1 /usr/local/bin/pxe-content-test | cat -A
+command -v bash || true
+command -v env || true
+'
+
+If you see the script exists, but command -v bash prints nothing, that is the problem.
+
+The easiest fix is to install bash in the image. Add this near the top of the Dockerfile after the Python check, before the COPY tests/ lines:
+
+RUN command -v bash >/dev/null 2>&1 || apk add --no-cache bash
+
+So this section would become roughly:
+
+RUN command -v python3 >/dev/null 2>&1 || \
+    (echo "ERROR: base image must include python3." >&2 && exit 1)
+RUN command -v bash >/dev/null 2>&1 || apk add --no-cache bash
+COPY templates/ /templates/
+COPY content/boot.ipxe.tmpl /templates/boot.ipxe.tmpl
+COPY content/ui/ /etc/nginx/html/ui/
+COPY nginx/pxe.conf /etc/nginx/conf.d/default.conf
+COPY nginx/pxe.conf /etc/nginx/http.d/default.conf
+COPY scripts/generate-pxe-content.py /usr/local/bin/generate-pxe-content.py
+COPY entrypoint.sh /entrypoint.sh
+COPY content/profiles/ /profiles/
+COPY tests/ /usr/local/share/aerolit-pxe-content/tests/
+RUN chmod 0755 /entrypoint.sh /usr/local/bin/generate-pxe-content.py \
+    && chmod 0755 /usr/local/share/aerolit-pxe-content/tests/*.sh \
+    && chmod 0755 /usr/local/share/aerolit-pxe-content/tests/pxe-content-test \
+    && ln -sf /usr/local/share/aerolit-pxe-content/tests/pxe-content-test /usr/local/bin/pxe-content-test
+
+Then rebuild/push the test image and run:
+
+podman run --rm --entrypoint /usr/local/bin/pxe-content-test registry.gitlab.us.lmco.com/lit/containers/pxe-content:test all
+
+One more thing to check: make sure tests/pxe-content-test itself does not have Windows line endings. This command will show it:
+
+podman run --rm --entrypoint /bin/sh registry.gitlab.us.lmco.com/lit/containers/pxe-content:test -lc '
+head -1 /usr/local/bin/pxe-content-test | cat -A
+'
+
+Good output:
+
+#!/usr/bin/env bash$
+
+Bad output:
+
+#!/usr/bin/env bash^M$
+
+If you see ^M, run this in the repo before rebuilding:
+
+sed -i 's/\r$//' tests/pxe-content-test tests/*.sh
+
+So: your command is fine. I’d fix the Dockerfile by installing bash, rebuild the test image, and rerun the same command.
