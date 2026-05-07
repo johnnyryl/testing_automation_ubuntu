@@ -1,0 +1,307 @@
+# Phase 8E — Example Files and Documentation Map
+
+This phase adds practical examples and a simple documentation map so users know where to start.
+
+The goal is not to make the project wordy. The goal is to give users safe examples they can copy, edit, and understand without having to read the Python generator first.
+
+## Recommended project documentation layout
+
+Use this layout for the final docs:
+
+```text
+README.md
+
+docs/
+  testing.md
+  profiles-and-overrides.md
+  bundle-layout-validation-troubleshooting.md
+  future-integrations-branding-operational-notes.md
+
+content/
+  examples/
+    overrides/
+      README.md
+      profiles/
+        10-minimal-custom-title.yml
+        20-developer-workstation-example.yml
+      templates/
+        ks/
+          rhel8-developer-workstation.ks.j2
+```
+
+Suggested mapping from the phase docs we created:
+
+| Phase file | Final location |
+|---|---|
+| `README_phase8a.md` | `README.md` |
+| `testing.md` | `docs/testing.md` |
+| `phase8b_profiles_overrides_emergency_edits.md` | `docs/profiles-and-overrides.md` |
+| `phase8c_bundle_layout_validation_troubleshooting.md` | `docs/bundle-layout-validation-troubleshooting.md` |
+| `phase8d_future_integrations_branding_operational_notes.md` | `docs/future-integrations-branding-operational-notes.md` |
+| this file | use as the guide for adding example files |
+
+## Why add example files
+
+The generator already supports override profiles and override templates. Example files make that feature easier to use.
+
+Users should be able to look at `content/examples/overrides/`, copy it to their bundle or site-specific override directory, and make small edits.
+
+Recommended runtime override location:
+
+```text
+/overrides/profiles/
+/overrides/templates/
+```
+
+Recommended source example location in this repo:
+
+```text
+content/examples/overrides/
+```
+
+The examples should not be active by default. They are reference material only.
+
+---
+
+# File: `content/examples/overrides/README.md`
+
+```markdown
+# UNCLASSIFIED
+
+# PXE Override Examples
+
+This directory contains example profile and Kickstart template overrides for the AeroLIT PXE content image.
+
+These files are examples only. They are not automatically used by the image unless copied or mounted into the runtime override directory.
+
+Runtime override paths:
+
+```text
+/overrides/profiles/
+/overrides/templates/
+```
+
+## How to use these examples
+
+Copy the example override directory to the system or bundle location that will be mounted into the container as `/overrides`.
+
+Example:
+
+```bash
+mkdir -p /opt/aerolit/pxe-overrides
+cp -r content/examples/overrides/* /opt/aerolit/pxe-overrides/
+```
+
+Run the PXE content image with:
+
+```bash
+podman run --rm -d \
+  --name pxe-content \
+  -p 18080:8080 \
+  -e PXE_SERVER=<pxe-server-ip-or-hostname> \
+  -e PXE_PORT=18080 \
+  -v /path/to/extracted_isos:/iso:Z \
+  -v /opt/aerolit/pxe-overrides:/overrides:Z \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:latest
+```
+
+Then check:
+
+```text
+http://<pxe-server>:18080/generated/status.txt
+http://<pxe-server>:18080/generated/status.json
+http://<pxe-server>:18080/boot.ipxe
+```
+
+## Important rules
+
+Use `/overrides/profiles/` to change profile behavior.
+
+Use `/overrides/templates/` to change Kickstart rendering.
+
+Do not treat `/ks` as the normal customization path. `/ks` is generated output. Manual edits under `/ks` are supported for emergency use only and are controlled by `PXE_GENERATED_KS_EDIT_POLICY`.
+
+# UNCLASSIFIED
+```
+
+---
+
+# File: `content/examples/overrides/profiles/10-minimal-custom-title.yml`
+
+This is a safe example that replaces the built-in `minimal` profile with a customized menu title while still using the normal minimal Kickstart template.
+
+```yaml
+profile_id: minimal
+title: Minimal Installs - Site Default
+install_label: Minimal
+menu_target: minimal
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel10
+  - rhel9
+  - rhel8
+  - rhel7
+kickstart_template: ks/{{ os_id }}-minimal.ks.j2
+kernel_args:
+  - inst.text
+  - nomodeset
+```
+
+Expected result:
+
+```text
+Minimal Installs - Site Default
+```
+
+appears in `boot.ipxe` instead of the built-in minimal title.
+
+---
+
+# File: `content/examples/overrides/profiles/20-developer-workstation-example.yml`
+
+This example turns the developer workstation placeholder into an implemented profile for RHEL 8 only.
+
+It is intentionally scoped to RHEL 8 so users understand how `supported_os` limits profile generation.
+
+```yaml
+profile_id: developer_workstation
+title: Developer Workstation Installs
+install_label: Developer Workstation
+menu_target: developer_workstation
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+kickstart_template: ks/rhel8-developer-workstation.ks.j2
+kernel_args:
+  - inst.text
+  - nomodeset
+```
+
+Expected result:
+
+```text
+Install RHEL 8 Developer Workstation (UEFI)
+Install RHEL 8 Developer Workstation (BIOS / Legacy)
+```
+
+appear as real boot targets in `boot.ipxe` when `rhel8iso` is detected.
+
+---
+
+# File: `content/examples/overrides/templates/ks/rhel8-developer-workstation.ks.j2`
+
+This is a simple example Kickstart template for the developer workstation profile.
+
+It reuses the built-in partials where possible and adds a small package section.
+
+```jinja
+# Example Developer Workstation Kickstart override
+#version=RHEL{{ os_major }}
+
+{% include "partials/install-mode-text.ks.j2" %}
+{% include "partials/language-keyboard.ks.j2" %}
+{% include "partials/timezone.ks.j2" %}
+{% include "partials/network-dhcp.ks.j2" %}
+{% include "partials/root-password.ks.j2" %}
+{% include "partials/repo-url.ks.j2" %}
+
+zerombr
+clearpart --all --initlabel
+autopart --type=lvm
+
+%packages
+@^minimal-environment
+vim-enhanced
+git
+curl
+tar
+python3
+%end
+
+{% include "partials/services-basic.ks.j2" %}
+{% include "partials/kdump-enabled.ks.j2" %}
+{% include "partials/post-empty.ks.j2" %}
+```
+
+Notes:
+
+- Keep include paths quoted.
+- Keep template paths relative.
+- Do not include `inst.ks`, `inst.repo`, `inst.stage2`, `ip`, or `initrd` in profile `kernel_args`; the generator owns those values.
+- Add real site packages only after confirming the repositories contain them.
+
+---
+
+## Optional example: emergency `/ks` edit workflow
+
+This is not a source-controlled example file. It is an operational workflow.
+
+Use this only when you need to quickly test or repair generated Kickstart output on a running PXE server.
+
+```bash
+# edit the generated file directly in the running web root
+vi /etc/nginx/html/ks/rhel8-minimal.ks
+```
+
+With the default policy:
+
+```text
+PXE_GENERATED_KS_EDIT_POLICY=preserve
+```
+
+manual edits are preserved. The regenerated candidate file is written under:
+
+```text
+/generated/preserved-kickstarts/
+```
+
+To force the generator to overwrite manual `/ks` edits:
+
+```text
+PXE_GENERATED_KS_EDIT_POLICY=overwrite
+```
+
+Recommended rule:
+
+```text
+Use /overrides for planned customization.
+Use /ks manual edits only for emergency troubleshooting.
+```
+
+---
+
+## Optional example: testing the examples
+
+After adding or changing examples, rebuild the test image and run:
+
+```bash
+podman run --rm \
+  --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test \
+  all
+```
+
+Passing tests prove the image can generate, validate, preserve, overwrite, and serve PXE content without real PXE hardware.
+
+They do not replace a real PXE boot test when boot behavior or install behavior changes.
+
+---
+
+## Cleanup guidance
+
+Before merging the final Phase 8 docs, check for these common cleanup items:
+
+- Remove old generated sample files that are no longer used.
+- Do not keep a static generated `index.html` if the Python generator creates it at runtime.
+- Keep examples under `content/examples/` so they do not become active runtime profiles by accident.
+- Keep active built-in profiles under `content/profiles/`.
+- Keep active built-in templates under `templates/`.
+- Keep test scripts under `tests/` and copy them into the image through the Dockerfile.
+- Make sure test scripts have Unix line endings and executable permissions.
+- Make sure the Dockerfile installs or includes any shell used by the scripts.
