@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CID="${CID:-pxe-content}"
+SCRIPT="${SCRIPT:-/usr/local/bin/generate-pxe-content.py}"
+
+TEST_ROOT="${TEST_ROOT:-/tmp/pxe-basic}"
+ISO_ROOT="${TEST_ROOT}/iso"
+HTML_ROOT="${TEST_ROOT}/html"
+OVERRIDE_ROOT="${TEST_ROOT}/overrides"
+NGINX_PREFIX="${TEST_ROOT}/nginx-runtime"
+NGINX_CONF="${TEST_ROOT}/nginx.conf"
+HTTP_PORT="${HTTP_PORT:-18081}"
+
+echo "== AeroLIT PXE Content basic image test =="
+
+cleanup() {
+  podman exec "$CID" /bin/sh -lc "nginx -s stop -c '${NGINX_CONF}' -p '${NGINX_PREFIX}' >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+echo "[1/12] Confirm container is reachable"
+podman exec "$CID" true
+
+echo "[2/12] Confirm required tools exist"
+podman exec "$CID" command -v python3 >/dev/null
+podman exec "$CID" command -v nginx >/dev/null
+
+echo "[3/12] Confirm generator exists and compiles"
+podman exec "$CID" test -f "$SCRIPT"
+podman exec "$CID" python3 -m py_compile "$SCRIPT"
+
+echo "[4/12] Create clean fake ISO/repo layout"
+podman exec "$CID" /bin/sh -lc "
+set -e
+
+rm -rf '${TEST_ROOT}'
+
+mkdir -p '${ISO_ROOT}/rhel8iso/images/pxeboot'
+mkdir -p '${ISO_ROOT}/rhel8iso/BaseOS/repodata'
+mkdir -p '${ISO_ROOT}/rhel8iso/AppStream/repodata'
+
+mkdir -p '${ISO_ROOT}/rhel9iso/images/pxeboot'
+
+mkdir -p '${HTML_ROOT}'
+mkdir -p '${OVERRIDE_ROOT}/profiles'
+mkdir -p '${OVERRIDE_ROOT}/templates'
+
+printf 'fake-rhel8-kernel\n' > '${ISO_ROOT}/rhel8iso/images/pxeboot/vmlinuz'
+printf 'fake-rhel8-initrd\n' > '${ISO_ROOT}/rhel8iso/images/pxeboot/initrd.img'
+printf 'fake-baseos-repodata\n' > '${ISO_ROOT}/rhel8iso/BaseOS/repodata/repomd.xml'
+printf 'fake-appstream-repodata\n' > '${ISO_ROOT}/rhel8iso/AppStream/repodata/repomd.xml'
+
+# Incomplete ISO tree on purpose. It should NOT be detected.
+printf 'incomplete-rhel9-kernel-only\n' > '${ISO_ROOT}/rhel9iso/images/pxeboot/vmlinuz'
+"
+
+echo "[5/12] Generate PXE content once with validation fail policy"
+podman exec "$CID" /bin/sh -lc "
+set -e
+
+PXE_SERVER=127.0.0.1 \
+PXE_PORT='${HTTP_PORT}' \
+PXE_ISO_ROOT='${ISO_ROOT}' \
+PXE_HTML_ROOT='${HTML_ROOT}' \
+PXE_OVERRIDE_ROOT='${OVERRIDE_ROOT}' \
+PXE_VALIDATION_FAILURE_POLICY=fail \
+python3 '${SCRIPT}' --once
+"
+
+echo "[6/12] Expose detected fake ISO tree under generated web root"
+podman exec "$CID" /bin/sh -lc "
+set -e
+
+ln -sfn '${ISO_ROOT}/rhel8iso' '${HTML_ROOT}/rhel8'
+"
+
+echo "[7/12] Confirm expected generated files exist"
+podman exec "$CID" test -f "${HTML_ROOT}/boot.ipxe"
+podman exec "$CID" test -f "${HTML_ROOT}/index.html"
+podman exec "$CID" test -f "${HTML_ROOT}/generated/status.json"
+podman exec "$CID" test -f "${HTML_ROOT}/generated/status.txt"
+podman exec "$CID" test -f "${HTML_ROOT}/generated/isos.txt"
+podman exec "$CID" test -f "${HTML_ROOT}/ks/rhel8-minimal.ks"
+podman exec "$CID" test -f "${HTML_ROOT}/ks/rhel8-small-disk.ks"
+
+echo "[8/12] Validate status.json structure and health"
+podman exec "$CID" python3 - <<PY
+import json
+from pathlib import Path
+
+status_path = Path("${HTML_ROOT}/generated/status.json")
+status = json.loads(status_path.read_text())
+
+summary = status.get("validation_summary", {})
+assert summary.get("health") == "ok", summary
+assert summary.get("error") == 0, summary
+
+detected = [item.get("os_id") for item in status.get("detected_isos", [])]
+assert "rhel8" in detected, detected
+assert "rhel9" not in detected, detected
+
+profiles = [item.get("profile_id") for item in status.get("profiles", [])]
+assert "minimal" in profiles, profiles
+assert "small_disk" in profiles, profiles
+
+enabled = status.get("enabled_profiles", [])
+assert "minimal" in enabled, enabled
+assert "small_disk" in enabled, enabled
+
+generated = [item.get("kickstart_name") for item in status.get("generated_kickstarts", [])]
+assert "rhel8-minimal.ks" in generated, generated
+assert "rhel8-small-disk.ks" in generated, generated
+
+print("status.json basic validation passed")
+PY
+
+echo "[9/12] Validate boot.ipxe content"
+podman exec "$CID" grep -q '^#!ipxe' "${HTML_ROOT}/boot.ipxe"
+podman exec "$CID" grep -q 'menu AeroLIT PXE Menu' "${HTML_ROOT}/boot.ipxe"
+podman exec "$CID" grep -q 'Minimal Installs' "${HTML_ROOT}/boot.ipxe"
+podman exec "$CID" grep -q 'Small Disk Installs' "${HTML_ROOT}/boot.ipxe"
+
+podman exec "$CID" grep -q ':rhel8_minimal_uefi' "${HTML_ROOT}/boot.ipxe"
+podman exec "$CID" grep -q ':rhel8_minimal_bios' "${HTML_ROOT}/boot.ipxe"
+podman exec "$CID" grep -q ':rhel8_small_disk_uefi' "${HTML_ROOT}/boot.ipxe"
+podman exec "$CID" grep -q ':rhel8_small_disk_bios' "${HTML_ROOT}/boot.ipxe"
+
+podman exec "$CID" grep -q '/rhel8/images/pxeboot/vmlinuz' "${HTML_ROOT}/boot.ipxe"
+podman exec "$CID" grep -q '/rhel8/images/pxeboot/initrd.img' "${HTML_ROOT}/boot.ipxe"
+podman exec "$CID" grep -q '/ks/rhel8-minimal.ks' "${HTML_ROOT}/boot.ipxe"
+podman exec "$CID" grep -q '/ks/rhel8-small-disk.ks' "${HTML_ROOT}/boot.ipxe"
+
+podman exec "$CID" /bin/sh -lc "
+set -e
+if grep -q 'rhel9' '${HTML_ROOT}/boot.ipxe'; then
+  echo 'ERROR: incomplete rhel9 ISO tree should not appear in boot.ipxe'
+  exit 1
+fi
+"
+
+echo "[10/12] Validate Kickstart basics"
+podman exec "$CID" grep -q 'Managed by AeroLIT PXE Content Generator' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+podman exec "$CID" grep -q 'rootpw --iscrypted' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+podman exec "$CID" grep -q '@^minimal-environment' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+podman exec "$CID" grep -q 'url --url=' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+
+podman exec "$CID" grep -q 'Managed by AeroLIT PXE Content Generator' "${HTML_ROOT}/ks/rhel8-small-disk.ks"
+podman exec "$CID" grep -q 'rootpw --iscrypted' "${HTML_ROOT}/ks/rhel8-small-disk.ks"
+podman exec "$CID" grep -Eq 'clearpart|part /|autopart' "${HTML_ROOT}/ks/rhel8-small-disk.ks"
+podman exec "$CID" grep -q '@^minimal-environment' "${HTML_ROOT}/ks/rhel8-small-disk.ks"
+
+echo "[11/12] Start temporary nginx and confirm HTTP serving works"
+podman exec "$CID" /bin/sh -lc "
+set -e
+
+mkdir -p '${NGINX_PREFIX}/logs'
+
+cat > '${NGINX_CONF}' <<EOF
+events {}
+
+http {
+    server {
+        listen 127.0.0.1:${HTTP_PORT};
+        server_name localhost;
+        root ${HTML_ROOT};
+        autoindex on;
+
+        location / {
+            try_files \\\$uri \\\$uri/ =404;
+        }
+    }
+}
+EOF
+
+nginx -t -c '${NGINX_CONF}' -p '${NGINX_PREFIX}'
+nginx -c '${NGINX_CONF}' -p '${NGINX_PREFIX}'
+"
+
+podman exec "$CID" python3 - <<PY
+from urllib.request import urlopen
+
+base = "http://127.0.0.1:${HTTP_PORT}"
+
+paths = [
+    "/",
+    "/boot.ipxe",
+    "/index.html",
+    "/generated/status.json",
+    "/generated/status.txt",
+    "/generated/isos.txt",
+    "/ks/rhel8-minimal.ks",
+    "/ks/rhel8-small-disk.ks",
+    "/rhel8/images/pxeboot/vmlinuz",
+    "/rhel8/images/pxeboot/initrd.img",
+    "/rhel8/BaseOS/repodata/repomd.xml",
+    "/rhel8/AppStream/repodata/repomd.xml",
+]
+
+for path in paths:
+    data = urlopen(base + path, timeout=5).read()
+    if not data:
+        raise SystemExit(f"HTTP path returned empty content: {path}")
+
+print("HTTP serving checks passed")
+PY
+
+echo "[12/12] Confirm root password hash does not leak into status/index"
+podman exec "$CID" /bin/sh -lc "
+set -e
+
+if grep -F '\$6\$REKKqe02' \
+  '${HTML_ROOT}/generated/status.json' \
+  '${HTML_ROOT}/generated/status.txt' \
+  '${HTML_ROOT}/index.html'; then
+    echo 'ERROR: root password hash leaked into status/index'
+    exit 1
+fi
+"
+
+echo "== Basic image test passed =="
