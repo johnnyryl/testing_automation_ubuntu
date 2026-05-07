@@ -1,0 +1,235 @@
+# Testing PXE Content
+
+The PXE content image includes built-in tests so the image can be validated without moving test scripts to a VM, cloning the project, or using real PXE hardware.
+
+## Recommended test command
+
+Use the `:test` image tag when validating a merge request or branch build:
+
+```bash
+podman run --rm \
+  --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test \
+  all
+```
+
+A successful run ends with all tests passing.
+
+This is the preferred quick proof that the image is healthy before merging.
+
+## What the built-in tests prove
+
+The test runner validates that the image can:
+
+- start in a test container
+- find Python, Nginx, and the generator script
+- compile the generator script
+- create fake RHEL ISO trees for testing
+- detect valid ISO trees
+- ignore incomplete ISO trees
+- generate `boot.ipxe`
+- generate Kickstart files
+- generate `index.html`
+- generate `status.json`, `status.txt`, and `isos.txt`
+- serve content over HTTP using Nginx
+- render Jinja Kickstart templates and partials
+- apply override profiles and override templates
+- preserve manual `/ks` edits by default
+- overwrite manual `/ks` edits when configured
+- report validation errors in warn mode
+- fail on validation errors in fail mode
+- avoid leaking the root password hash into status and index files
+- keep placeholder profiles from creating real boot targets
+
+These tests do not prove that a physical machine can PXE boot on a specific network. They prove the image-generated HTTP content is structurally healthy and internally consistent.
+
+## Test runner
+
+The image installs this test runner:
+
+```text
+/usr/local/bin/pxe-content-test
+```
+
+The source file is:
+
+```text
+tests/pxe-content-test
+```
+
+The test runner calls the project test scripts under:
+
+```text
+/usr/local/share/aerolit-pxe-content/tests/
+```
+
+## Test scripts
+
+| Script | Purpose |
+|---|---|
+| `test-basic-image.sh` | Validates basic generator behavior, generated files, fake ISO detection, Kickstart content, status health, and HTTP serving |
+| `test-overrides-and-preserve-policy.sh` | Validates override profiles, override templates, Jinja partial rendering, manual `/ks` edit preservation, and overwrite behavior |
+| `test-validation-health-policy.sh` | Validates status health, validation reporting, warn policy, fail policy, and validation error handling |
+| `test-lib.sh` | Shared helper functions used by the test scripts |
+| `pxe-content-test` | Convenience wrapper for running the tests from inside the image |
+
+## Running all tests
+
+```bash
+podman run --rm \
+  --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test \
+  all
+```
+
+## Running tests from a live container
+
+If the image is already running as `pxe-content`, you can run tests with:
+
+```bash
+podman exec pxe-content /usr/local/bin/pxe-content-test all
+```
+
+The test runner creates its own temporary test paths under `/tmp`, so it does not need real ISO content.
+
+## Running individual scripts from source
+
+When working from a local clone of the project, the scripts can also be run directly:
+
+```bash
+./tests/test-basic-image.sh
+./tests/test-overrides-and-preserve-policy.sh
+./tests/test-validation-health-policy.sh
+```
+
+By default, the scripts target a running container named:
+
+```text
+pxe-content
+```
+
+Override the container name with:
+
+```bash
+CID=<container-name> ./tests/test-basic-image.sh
+```
+
+## Image tag expectations
+
+Recommended tag usage:
+
+| Tag | Intended use |
+|---|---|
+| `test` | Easy manual testing of the latest merge request or branch build |
+| `sha-<commit>` | Commit-specific traceability |
+| `mr-<number>` | Merge-request-specific traceability, if enabled |
+| `latest` | Default branch / promoted image after merge |
+
+For normal MR validation, use:
+
+```text
+pxe-content:test
+```
+
+For promoted usage after merge, use:
+
+```text
+pxe-content:latest
+```
+
+## Testing without PXE hardware
+
+The tests do not require DHCP, TFTP, iPXE clients, Foreman, or a physical machine.
+
+The basic image test creates fake ISO content like this:
+
+```text
+/tmp/pxe-basic/iso/rhel8iso/images/pxeboot/vmlinuz
+/tmp/pxe-basic/iso/rhel8iso/images/pxeboot/initrd.img
+/tmp/pxe-basic/iso/rhel8iso/BaseOS/repodata/repomd.xml
+/tmp/pxe-basic/iso/rhel8iso/AppStream/repodata/repomd.xml
+```
+
+It then generates PXE content and starts a temporary Nginx instance to confirm that the generated HTTP paths can be served.
+
+This catches most image, generator, template, and content regressions before testing with real PXE hardware.
+
+## What to check before merging
+
+Before merging a PXE content change, run:
+
+```bash
+podman run --rm \
+  --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test \
+  all
+```
+
+The merge request is in good shape when:
+
+- the image builds successfully
+- the `:test` tag is pushed
+- the built-in test command passes
+- the generated status output reports healthy content
+- no expected profile, template, or generated file is missing
+
+## Common test failures
+
+### `No such file or directory`
+
+Confirm the test runner exists inside the image:
+
+```bash
+podman run --rm \
+  --entrypoint /bin/sh \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test \
+  -lc 'ls -l /usr/local/bin/pxe-content-test /usr/local/share/aerolit-pxe-content/tests/'
+```
+
+### `Permission denied`
+
+Confirm the Dockerfile makes the test scripts executable.
+
+Expected installed paths:
+
+```text
+/usr/local/bin/pxe-content-test
+/usr/local/share/aerolit-pxe-content/tests/*.sh
+```
+
+### HTTP 404 during tests
+
+This usually means the temporary Nginx test root cannot serve the generated path.
+
+Check:
+
+- the generated file exists
+- the fake ISO tree was linked under the generated web root
+- Nginx is using the expected test config
+- the test root has usable directory permissions
+
+### Jinja include or partial errors
+
+This usually means an override template references a partial path that is not available to the Jinja loader.
+
+Use built-in partial names from:
+
+```text
+templates/partials/
+```
+
+Example include:
+
+```jinja
+{% include "partials/packages-minimal.ks.j2" %}
+```
+
+### Validation fail policy did not fail
+
+Confirm the test intentionally created broken generated content and ran with:
+
+```text
+PXE_VALIDATION_FAILURE_POLICY=fail
+```
+
+The generator should still write status files before exiting non-zero.
