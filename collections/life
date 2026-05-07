@@ -1,0 +1,292 @@
+# Future Integrations, Branding, and Operational Notes
+
+This document captures planned expansion areas for the AeroLIT PXE Content image.
+
+The current image should stay focused on one job: generate and serve PXE HTTP content. Larger orchestration workflows, such as Foreman registration, Ansible post-install configuration, DHCP, TFTP, and bootstrap orchestration, should remain outside this image unless there is a clear reason to add a small handoff point.
+
+## Current role of this image
+
+The PXE Content image currently provides:
+
+```text
+/boot.ipxe
+/ks/*.ks
+/index.html
+/generated/status.json
+/generated/status.txt
+/generated/isos.txt
+```
+
+It dynamically builds the iPXE menu from detected ISO trees and profile definitions.
+
+It supports:
+
+- built-in profiles
+- override profiles
+- override templates
+- Jinja Kickstart partials
+- manual `/ks` edit preservation
+- validation and health reporting
+- built-in image regression tests
+
+It does not currently own:
+
+- DHCP configuration
+- TFTP configuration
+- Foreman/Katello lifecycle management
+- Ansible controller setup
+- post-install Ansible execution
+- host inventory management
+- long-term node state tracking
+
+Those responsibilities should stay in the AeroLIT bootstrap, PXE server role, Ansible controller role, Foreman workflows, or future orchestration components.
+
+## Future Foreman handoff notes
+
+Foreman can eventually consume or reference this content image instead of duplicating the PXE content logic.
+
+Possible future handoff points:
+
+```text
+/boot.ipxe
+/ks/<profile>.ks
+/generated/status.json
+/generated/isos.txt
+```
+
+A future Foreman integration could use this image as the âthin PXE content layerâ while Foreman handles host records, provisioning templates, lifecycle environments, and reporting.
+
+Recommended future direction:
+
+1. Keep ISO discovery and menu generation in this image.
+2. Let Foreman point hosts or subnets to generated iPXE/Kickstart URLs.
+3. Add optional Foreman-specific metadata only if needed.
+4. Avoid making this image require Foreman to function.
+
+A possible future metadata file could be:
+
+```text
+/generated/foreman-handoff.json
+```
+
+That file could describe detected OS versions, generated Kickstart URLs, available profiles, and suggested Foreman provisioning template values.
+
+Do not add this until there is a real Foreman workflow ready to consume it.
+
+## Future Ansible post-install hook notes
+
+The current Kickstarts perform OS installation only. A future profile could add a post-install handoff to Ansible.
+
+Possible approaches:
+
+### Option 1: Kickstart `%post` callback
+
+A Kickstart profile could call back to an AeroLIT endpoint after install:
+
+```bash
+curl -f http://<server>:<port>/post-install/<node-or-token>
+```
+
+This would require a real callback service outside the PXE Content image.
+
+### Option 2: First boot systemd unit
+
+A Kickstart could install a small first-boot unit that runs after the new system starts.
+
+Example intent:
+
+```text
+Install OS â reboot â first boot service runs â Ansible/bootstrap starts
+```
+
+This may be cleaner than doing too much inside Kickstart `%post`.
+
+### Option 3: Pull-based bootstrap
+
+A Kickstart could place a small bootstrap script on the new host. The new host then pulls configuration from the AeroLIT controller or local bundle.
+
+This is likely the best fit for disconnected environments.
+
+## Recommended post-install rule
+
+Keep the PXE Content image from becoming a full automation controller.
+
+The image may generate Kickstarts that point to post-install logic, but the actual post-install orchestration should live in:
+
+```text
+collections-hub/
+bootstrap.sh
+ansible_controller role
+pxe_server role
+future Foreman workflows
+```
+
+## Branding and menu customization
+
+Branding should be lightweight and safe.
+
+Current branding input:
+
+```text
+PXE_BACKGROUND_PATH=/ui/background.png
+```
+
+The generated `boot.ipxe` references the background path like this:
+
+```ipxe
+console --picture ${base}/ui/background.png --left 360 --right 360 --top 140 --bottom 140 || goto main
+```
+
+To customize branding, mount or bake in a replacement image at the configured path.
+
+Example override idea:
+
+```text
+/etc/nginx/html/ui/background.png
+```
+
+Or set:
+
+```bash
+PXE_BACKGROUND_PATH=/ui/site-background.png
+```
+
+Then make sure the file exists under the web root.
+
+## Menu customization
+
+The main menu is generated from profile definitions.
+
+To change menu entries, prefer profile overrides instead of editing `boot.ipxe` directly.
+
+Example profile fields that affect menu text:
+
+```yaml
+profile_id: small_disk
+title: Small Disk Installs
+install_label: Small Disk
+menu_target: small_disk
+implemented: true
+show_in_main_menu: true
+```
+
+Field behavior:
+
+| Field | Menu effect |
+|---|---|
+| `title` | Main profile menu label |
+| `install_label` | OS install option label |
+| `menu_target` | iPXE target name |
+| `show_in_main_menu` | Shows or hides the profile from the main menu |
+| `implemented` | Controls whether real boot targets are generated |
+
+Do not manually edit generated `boot.ipxe` as the normal customization path. It will be regenerated.
+
+## Safe expansion rules
+
+When adding future capability, use these rules:
+
+1. Keep `/ks` and `boot.ipxe` generated output.
+2. Put repeatable customization under `/overrides`.
+3. Keep generated status files readable and useful.
+4. Add validation when adding new generated content.
+5. Add or update image tests when changing behavior.
+6. Avoid requiring Foreman, Ansible, or DHCP for basic image functionality.
+7. Avoid storing environment-specific secrets in generated status output.
+
+## Adding future profiles
+
+Good candidates for future implemented profiles:
+
+```text
+security_baseline
+security_luks
+developer_workstation
+embedded_edge
+```
+
+Before flipping a placeholder profile to `implemented: true`, make sure it has:
+
+- a profile YAML definition
+- a Kickstart template
+- successful test coverage
+- validation results with no errors
+- a clear reason for any warnings
+
+A new implemented profile should be tested with:
+
+```bash
+podman run --rm \
+  --entrypoint /usr/local/bin/pxe-content-test \
+  registry.gitlab.us.lmco.com/lit/containers/pxe-content:test \
+  all
+```
+
+## Tagging and testing workflow
+
+The project can publish multiple image tags from CI.
+
+Recommended intent:
+
+| Tag | Purpose |
+|---|---|
+| `test` | Easy branch or merge request testing |
+| `sha-<commit>` | Exact commit traceability |
+| `mr-<number>` | Merge request traceability, if enabled |
+| `latest` | Promoted default branch image |
+
+For merge request validation, test:
+
+```text
+pxe-content:test
+```
+
+After merge, consumers should normally use:
+
+```text
+pxe-content:latest
+```
+
+## What should not be added yet
+
+Avoid adding these until there is a real consumer and test plan:
+
+- Foreman API calls from inside this image
+- Ansible execution from inside this image
+- DHCP server logic inside this image
+- TFTP server logic inside this image
+- node inventory database logic
+- secrets or tokens in generated status files
+
+Those can be integrated later, but this image should remain useful as a simple standalone PXE HTTP content server.
+
+## Practical future roadmap
+
+Short-term improvements:
+
+- improve example override profiles
+- add more profile-specific Kickstart templates
+- add documentation screenshots or example generated status output
+- add CI job that runs the built-in tests automatically after building `:test`
+
+Medium-term improvements:
+
+- add security baseline profile
+- add LUKS profile
+- add developer workstation profile
+- add better branding examples
+- add optional profile metadata in `status.json`
+
+Long-term improvements:
+
+- Foreman handoff metadata
+- Ansible first-boot handoff pattern
+- site defaults file
+- per-site menu branding
+- optional generated inventory or install manifest
+
+## Final guidance
+
+Treat this image as the PXE content engine.
+
+Let it generate clean, testable, override-friendly PXE content. Let other AeroLIT pieces handle orchestration, host state, post-install configuration, and lifecycle management.
