@@ -1,3 +1,30 @@
+
+
+
+
+
+COPY tests/ /usr/local/share/aerolit-pxe-content/tests/
+
+RUN find /usr/local/share/aerolit-pxe-content/tests -type f \( -name '*.sh' -o -name 'pxe-content-test' \) -exec sed -i 's/\r$//' {} \; \
+    && chmod 0755 /entrypoint.sh /usr/local/bin/generate-pxe-content.py \
+    && chmod 0755 /usr/local/share/aerolit-pxe-content/tests/*.sh \
+    && chmod 0755 /usr/local/share/aerolit-pxe-content/tests/pxe-content-test \
+    && ln -sf /usr/local/share/aerolit-pxe-content/tests/pxe-content-test /usr/local/bin/pxe-content-test
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 No, I don’t think you typed the command wrong. This part looks right:
 
 podman run --rm --entrypoint /usr/local/bin/pxe-content-test registry.gitlab.us.lmco.com/lit/containers/pxe-content:test all
