@@ -4,6 +4,250 @@ set -euo pipefail
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${TEST_DIR}/test-lib.sh"
 
+TEST_ROOT="${TEST_ROOT:-/tmp/pxe-overrides-preserve}"
+ISO_ROOT="${TEST_ROOT}/iso"
+HTML_ROOT="${TEST_ROOT}/html"
+OVERRIDE_ROOT="${TEST_ROOT}/overrides"
+
+DEFAULT_ROOT_HASH_PATTERN='\$6\$REKKqe02'
+
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+pass() {
+  echo "OK: $*"
+}
+
+echo "== AeroLIT PXE overrides and preserve policy test =="
+
+require_host_cmd podman
+
+echo "[1/9] Confirm container and generator are usable"
+container_exec true
+container_exec test -f "${SCRIPT}"
+container_exec python3 -m py_compile "${SCRIPT}"
+pass "generator exists and compiles"
+
+echo "[2/9] Build clean fake ISO and override layout"
+container_sh "
+set -e
+
+rm -rf '${TEST_ROOT}'
+
+mkdir -p '${ISO_ROOT}/rhel8iso/images/pxeboot'
+mkdir -p '${ISO_ROOT}/rhel8iso/BaseOS/repodata'
+mkdir -p '${ISO_ROOT}/rhel8iso/AppStream/repodata'
+mkdir -p '${HTML_ROOT}'
+mkdir -p '${OVERRIDE_ROOT}/profiles'
+mkdir -p '${OVERRIDE_ROOT}/templates/ks'
+
+printf 'fake kernel\n' > '${ISO_ROOT}/rhel8iso/images/pxeboot/vmlinuz'
+printf 'fake initrd\n' > '${ISO_ROOT}/rhel8iso/images/pxeboot/initrd.img'
+printf 'fake baseos repodata\n' > '${ISO_ROOT}/rhel8iso/BaseOS/repodata/repomd.xml'
+printf 'fake appstream repodata\n' > '${ISO_ROOT}/rhel8iso/AppStream/repodata/repomd.xml'
+
+cat > '${OVERRIDE_ROOT}/profiles/10-minimal.yml' <<'EOF'
+profile_id: minimal
+title: Minimal Installs
+install_label: Minimal
+menu_target: minimal
+implemented: true
+show_in_main_menu: true
+uefi: true
+bios: true
+supported_os:
+  - rhel8
+kickstart_template: ks/rhel8-minimal.ks.j2
+kernel_args:
+  - inst.text
+  - nomodeset
+EOF
+
+cat > '${OVERRIDE_ROOT}/templates/ks/rhel8-minimal.ks.j2' <<'EOF'
+# PHASE6 OVERRIDE TEMPLATE
+#version=RHEL{{ os_major }}
+{% include 'partials/install-mode-text.ks.j2' %}
+{% include 'partials/language-keyboard.ks.j2' %}
+{% include 'partials/timezone.ks.j2' %}
+{% include 'partials/network-dhcp.ks.j2' %}
+{% include 'partials/root-password.ks.j2' %}
+{% include 'partials/repo-url.ks.j2' %}
+{% include 'partials/storage-default-lvm.ks.j2' %}
+{% include 'partials/packages-minimal.ks.j2' %}
+{% include 'partials/services-basic.ks.j2' %}
+{% include 'partials/kdump-enabled.ks.j2' %}
+{% include 'partials/post-empty.ks.j2' %}
+EOF
+"
+
+echo "[3/9] Generate once and prove override template wins"
+container_sh "
+set -e
+
+PXE_SERVER=127.0.0.1 \
+PXE_ISO_ROOT='${ISO_ROOT}' \
+PXE_HTML_ROOT='${HTML_ROOT}' \
+PXE_OVERRIDE_ROOT='${OVERRIDE_ROOT}' \
+PXE_VALIDATION_FAILURE_POLICY=fail \
+python3 '${SCRIPT}' --once
+"
+
+container_exec test -f "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec grep -q 'PHASE6 OVERRIDE TEMPLATE' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec grep -q 'rootpw --iscrypted' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec grep -q '@^minimal-environment' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec grep -q 'url --url=' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+
+container_sh "
+set -e
+if grep -Eq '\\{% include|partials/' '${HTML_ROOT}/ks/rhel8-minimal.ks'; then
+  echo 'ERROR: Jinja include remained in generated kickstart'
+  exit 1
+fi
+"
+
+pass "override template rendered and Jinja includes resolved"
+
+echo "[4/9] Confirm status/index show override and Phase 6 metadata"
+container_exec python3 -m json.tool "${HTML_ROOT}/generated/status.json" >/dev/null
+container_exec grep -q '"generator"' "${HTML_ROOT}/generated/status.json"
+container_exec grep -q '"active_overrides"' "${HTML_ROOT}/generated/status.json"
+container_exec grep -q '"stale_kickstarts"' "${HTML_ROOT}/generated/status.json"
+container_exec grep -q '"template_source_detail": "override"' "${HTML_ROOT}/generated/status.json"
+container_exec grep -q 'Generation Policy' "${HTML_ROOT}/index.html"
+container_exec grep -q 'Kickstart State' "${HTML_ROOT}/index.html"
+container_exec grep -q 'Warnings' "${HTML_ROOT}/index.html"
+container_exec grep -q 'Generated Files' "${HTML_ROOT}/index.html"
+
+pass "status and index expose override metadata"
+
+echo "[5/9] Confirm placeholder profiles do not generate real boot targets"
+container_sh "
+set -e
+
+if grep -Eq 'inst\\.ks=.*(developer-workstation|security-baseline|security-luks|embedded-edge)' '${HTML_ROOT}/boot.ipxe'; then
+  echo 'ERROR: future placeholder profile generated a real boot target'
+  exit 1
+fi
+"
+
+pass "placeholder profiles are safe"
+
+echo "[6/9] Confirm root password hash does not leak into status/index"
+container_sh "
+set -e
+
+if grep -q '${DEFAULT_ROOT_HASH_PATTERN}' \
+  '${HTML_ROOT}/generated/status.json' \
+  '${HTML_ROOT}/generated/status.txt' \
+  '${HTML_ROOT}/index.html'; then
+    echo 'ERROR: root password hash leaked into status/index'
+    exit 1
+fi
+"
+
+pass "root password hash did not leak"
+
+echo "[7/9] Direct /ks manual edit is preserved by default policy"
+container_sh "
+set -e
+
+echo '# PHASE6 MANUAL EDIT STILL HERE' >> '${HTML_ROOT}/ks/rhel8-minimal.ks'
+
+PXE_SERVER=127.0.0.1 \
+PXE_ISO_ROOT='${ISO_ROOT}' \
+PXE_HTML_ROOT='${HTML_ROOT}' \
+PXE_OVERRIDE_ROOT='${OVERRIDE_ROOT}' \
+PXE_GENERATED_KS_EDIT_POLICY=preserve \
+PXE_VALIDATION_FAILURE_POLICY=warn \
+python3 '${SCRIPT}' --once
+"
+
+container_exec grep -q 'PHASE6 MANUAL EDIT STILL HERE' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec test -f "${HTML_ROOT}/generated/preserved-kickstarts/rhel8-minimal.ks.candidate"
+container_exec grep -q '"preserved_manual_edit": true' "${HTML_ROOT}/generated/status.json"
+
+pass "manual /ks edit was preserved and candidate was written"
+
+echo "[8/9] Overwrite policy replaces manual /ks edit"
+container_sh "
+set -e
+
+PXE_SERVER=127.0.0.1 \
+PXE_ISO_ROOT='${ISO_ROOT}' \
+PXE_HTML_ROOT='${HTML_ROOT}' \
+PXE_OVERRIDE_ROOT='${OVERRIDE_ROOT}' \
+PXE_GENERATED_KS_EDIT_POLICY=overwrite \
+PXE_VALIDATION_FAILURE_POLICY=fail \
+python3 '${SCRIPT}' --once
+"
+
+container_sh "
+set -e
+
+if grep -q 'PHASE6 MANUAL EDIT STILL HERE' '${HTML_ROOT}/ks/rhel8-minimal.ks'; then
+  echo 'ERROR: overwrite policy did not replace manual /ks edit'
+  exit 1
+fi
+
+if test -f '${HTML_ROOT}/generated/preserved-kickstarts/rhel8-minimal.ks.candidate'; then
+  echo 'ERROR: overwrite policy should remove preserved candidate'
+  exit 1
+fi
+"
+
+container_exec grep -q '"preserved_manual_edit": false' "${HTML_ROOT}/generated/status.json"
+
+pass "overwrite policy replaced manual edit"
+
+echo "[9/9] Final sanity check after overwrite"
+container_exec grep -q 'PHASE6 OVERRIDE TEMPLATE' "${HTML_ROOT}/ks/rhel8-minimal.ks"
+container_exec grep -q '"health": "ok"' "${HTML_ROOT}/generated/status.json"
+
+pass "final generated output is healthy"
+
+echo "== Overrides and preserve policy test passed =="
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${TEST_DIR}/test-lib.sh"
+
 TEST_ROOT="${TEST_ROOT:-/tmp/pxe-basic}"
 ISO_ROOT="${TEST_ROOT}/iso"
 HTML_ROOT="${TEST_ROOT}/html"
