@@ -1,0 +1,333 @@
+Perfect — next is Batch 4: 130-packages.
+
+For this section, I would keep the package selections clean and not mix in site-specific things like Chrome, VS Code, NVIDIA scripts, domain join, proxy setup, or internal repo cleanup. Those belong in 140-post, 200-extras, Ansible, or a later handoff hook.
+
+Kickstart package selections go inside %packages and must close with %end; packages can be selected by environment, group, module, or package name, and Red Hat points users to the ISO/repo comps metadata for the exact environment/group names available for that release.  ￼
+
+⸻
+
+templates/partials/130-packages/_meta.yml
+
+title: Package selection
+order: 130
+required: true
+selection: one
+default: minimal
+description: Chooses which software packages and package groups are installed during the operating system installation.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: minimal
+    file: minimal.ks.j2
+    title: Minimal install
+    description: Installs the smallest practical RHEL environment for a server, lab VM, PXE test target, or base automation target.
+    recommended: true
+    risk: low
+    warning: This does not install a graphical desktop.
+    applies_to:
+      os:
+        - rhel7
+        - rhel8
+        - rhel9
+        - rhel10
+      profiles:
+        - minimal
+        - small_disk
+    requires: []
+    conflicts:
+      - minimal_plus_tools
+      - workstation
+      - developer_workstation
+    tags:
+      - default
+      - minimal
+      - server
+      - lab
+  - id: minimal_plus_tools
+    file: minimal-plus-tools.ks.j2
+    title: Minimal install plus common tools
+    description: Installs the minimal environment plus practical troubleshooting, network, compliance, and automation helper tools.
+    recommended: true
+    risk: low
+    warning: Slightly larger than minimal, but still does not install a graphical desktop.
+    applies_to:
+      os:
+        - rhel7
+        - rhel8
+        - rhel9
+        - rhel10
+      profiles:
+        - minimal
+        - small_disk
+    requires: []
+    conflicts:
+      - minimal
+      - workstation
+      - developer_workstation
+    tags:
+      - minimal
+      - tools
+      - troubleshooting
+      - automation
+  - id: workstation
+    file: workstation.ks.j2
+    title: Workstation desktop
+    description: Installs a graphical RHEL workstation-style environment with common administration and security tools.
+    recommended: false
+    risk: medium
+    warning: Requires more disk space and repo content than the minimal profiles.
+    applies_to:
+      os:
+        - rhel8
+        - rhel9
+        - rhel10
+      profiles:
+        - developer_workstation
+    requires: []
+    conflicts:
+      - minimal
+      - minimal_plus_tools
+      - developer_workstation
+    tags:
+      - graphical
+      - workstation
+      - desktop
+  - id: developer_workstation
+    file: developer-workstation.ks.j2
+    title: Developer workstation
+    description: Installs a graphical workstation with development, automation, container, identity, and security tooling.
+    recommended: false
+    risk: medium
+    warning: This is intentionally broader than workstation and depends on AppStream and optional internal repo content being available.
+    applies_to:
+      os:
+        - rhel8
+        - rhel9
+        - rhel10
+      profiles:
+        - developer_workstation
+    requires: []
+    conflicts:
+      - minimal
+      - minimal_plus_tools
+      - workstation
+    tags:
+      - graphical
+      - developer
+      - workstation
+      - containers
+      - automation
+notes: Keep this section focused on package selection only. Do not put repo setup, NVIDIA install scripts, Chrome, VS Code, domain join, proxy setup, or post-install configuration here. Those belong in post sections, optional extras, or Ansible.
+tags:
+  - required
+  - packages
+  - software
+
+⸻
+
+templates/partials/130-packages/minimal.ks.j2
+
+# Package selection: minimal install
+#
+# Best for:
+#   - PXE validation
+#   - lab VMs
+#   - small servers
+#   - Ansible-managed base systems
+#
+# Keep this intentionally small. Add tools in minimal-plus-tools.ks.j2 instead.
+%packages
+@^minimal-environment
+%end
+
+⸻
+
+templates/partials/130-packages/minimal-plus-tools.ks.j2
+
+# Package selection: minimal install plus common tools
+#
+# Best for:
+#   - small systems that still need troubleshooting tools
+#   - Ansible controller targets
+#   - PXE lab machines
+#   - systems that need basic compliance/scanning readiness
+#
+# Keep this useful, but not workstation-sized.
+%packages
+@^minimal-environment
+# Core troubleshooting and administration
+bash-completion
+bind-utils
+curl
+lsof
+net-tools
+nfs-utils
+rsync
+tar
+tmux
+unzip
+vim-enhanced
+wget
+zip
+# Security, audit, and compliance helpers
+aide
+audit
+kexec-tools
+openscap-scanner
+scap-security-guide
+# Identity and domain-readiness packages
+adcli
+oddjob
+oddjob-mkhomedir
+realmd
+sssd
+# Automation and container basics
+git
+podman
+{% if os_major | int == 7 %}
+# RHEL 7 uses a different policycoreutils helper package name.
+policycoreutils-python
+{% else %}
+policycoreutils-python-utils
+{% endif %}
+%end
+
+⸻
+
+templates/partials/130-packages/workstation.ks.j2
+
+# Package selection: workstation desktop
+#
+# Best for:
+#   - graphical RHEL workstation installs
+#   - engineering desktop baselines
+#   - developer workstation profiles that do not need the broader developer package set
+#
+# Keep this focused on the OS workstation experience. Put site-specific software
+# such as Chrome, VS Code, NVIDIA scripts, internal agents, or domain joins in
+# post-install/extra sections or Ansible.
+%packages
+@^workstation-product-environment
+@development
+@graphical-admin-tools
+@system-tools
+@security-tools
+# Common workstation/admin tools
+aide
+curl
+git
+kexec-tools
+nfs-utils
+podman
+rsync
+tmux
+vim-enhanced
+wget
+# Identity and directory integration readiness
+adcli
+oddjob
+oddjob-mkhomedir
+realmd
+sssd
+{% if os_major | int == 8 %}
+# RHEL 8 workstation builds commonly used gnome-apps in the older reference files.
+@gnome-apps
+scap-workbench
+{% elif os_major | int >= 9 %}
+# RHEL 9/10 reference files moved toward gnome-desktop and left gnome-apps out.
+@gnome-desktop
+{% endif %}
+{% if os_major | int == 7 %}
+# RHEL 7 uses a different policycoreutils helper package name.
+policycoreutils-python
+{% else %}
+policycoreutils-python-utils
+{% endif %}
+%end
+
+⸻
+
+templates/partials/130-packages/developer-workstation.ks.j2
+
+# Package selection: developer workstation
+#
+# Best for:
+#   - graphical developer systems
+#   - automation development
+#   - container-based workflows
+#   - systems that need common Linux troubleshooting and identity tools
+#
+# This intentionally avoids site-specific packages and external-vendor packages.
+# Examples intentionally NOT included here:
+#   - Google Chrome
+#   - VS Code
+#   - NVIDIA driver scripts
+#   - internal proxy configuration
+#   - domain join commands
+#   - internal certificate pulls
+#
+# Put those in post-install sections, optional extras, or Ansible.
+%packages
+@^workstation-product-environment
+@development
+@graphical-admin-tools
+@system-tools
+@security-tools
+# Shell, editing, and troubleshooting
+bash-completion
+bind-utils
+curl
+git
+lsof
+net-tools
+nfs-utils
+rsync
+tar
+tmux
+tree
+unzip
+vim-enhanced
+wget
+zip
+# Security, audit, and compliance helpers
+aide
+audit
+kexec-tools
+openscap-scanner
+scap-security-guide
+# Identity and domain-readiness packages
+adcli
+oddjob
+oddjob-mkhomedir
+realmd
+sssd
+# Containers and automation
+podman
+python3
+{% if os_major | int == 8 %}
+# RHEL 8 developer workstation reference behavior.
+@gnome-apps
+scap-workbench
+{% elif os_major | int >= 9 %}
+# RHEL 9/10 developer workstation reference behavior.
+@gnome-desktop
+{% endif %}
+{% if os_major | int == 7 %}
+# RHEL 7 uses a different policycoreutils helper package name.
+policycoreutils-python
+{% else %}
+policycoreutils-python-utils
+{% endif %}
+%end
+
+⸻
+
+Next batch should be 140-addons, then 150-post, then 160-anaconda-policy.
