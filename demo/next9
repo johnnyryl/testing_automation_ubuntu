@@ -1,0 +1,78 @@
+Next is Batch 5: 140-addons.
+
+This one is small. Right now it only covers kdump, which is good. I would not add more addon files yet unless we have a real need.
+
+templates/partials/140-addons/_meta.yml
+
+title: Installer addons
+order: 140
+required: true
+selection: one
+default: kdump_enabled
+description: Controls optional Anaconda installer addons, such as kernel crash dump support.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: kdump_enabled
+    file: kdump-enabled.ks.j2
+    title: Enable kdump
+    description: Enables kernel crash dump support so the system can capture diagnostic data after a kernel crash.
+    recommended: true
+    risk: low
+    warning: Kdump reserves some memory for crash capture. This is normally worth keeping enabled on managed systems.
+    requires: []
+    conflicts:
+      - kdump_disabled
+    tags:
+      - default
+      - diagnostics
+      - supportability
+  - id: kdump_disabled
+    file: kdump-disabled.ks.j2
+    title: Disable kdump
+    description: Disables kernel crash dump support.
+    recommended: false
+    risk: medium
+    warning: Disabling kdump can make kernel crash troubleshooting harder.
+    requires: []
+    conflicts:
+      - kdump_enabled
+    tags:
+      - diagnostics
+      - small-systems
+notes: Kdump is useful for troubleshooting kernel crashes. Keep it enabled by default unless the target system has very limited memory or a documented reason to disable it.
+tags:
+  - required
+  - addons
+  - kdump
+  - diagnostics
+
+templates/partials/140-addons/kdump-enabled.ks.j2
+
+# Enable kdump crash capture support
+%addon com_redhat_kdump --enable --reserve-mb='auto'
+%end
+
+templates/partials/140-addons/kdump-disabled.ks.j2
+
+# Disable kdump crash capture support
+%addon com_redhat_kdump --disable
+%end
+
+That’s it for 140-addons.
+
+Next should be 150-post, which will include:
+
+empty.ks.j2
+firstboot-marker.ks.j2
+workstation-light.ks.j2
+ansible-handoff-placeholder.ks.j2
+subscription-manager-cleanup-placeholder.ks.j2
