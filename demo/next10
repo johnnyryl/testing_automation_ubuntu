@@ -1,0 +1,189 @@
+Yes — next is Batch 6: 150-post.
+
+These are intentionally light. Nothing here should do domain join, proxy setup, NVIDIA install, Chrome/VS Code install, or site-specific cleanup yet.
+
+templates/partials/150-post/_meta.yml
+
+title: Post-install actions
+order: 150
+required: false
+selection: optional_many
+default:
+  - empty
+description: Optional scripts that run near the end of the Kickstart installation.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: empty
+    file: empty.ks.j2
+    title: No post-install actions
+    description: Does not run any post-install customization.
+    recommended: true
+    risk: low
+    warning: ""
+    requires: []
+    conflicts:
+      - firstboot_marker
+      - workstation_light
+      - ansible_handoff_placeholder
+      - subscription_manager_cleanup_placeholder
+    tags:
+      - default
+      - no-op
+  - id: firstboot_marker
+    file: firstboot-marker.ks.j2
+    title: Write AeroLIT install marker
+    description: Writes a small marker file under /root/aerolit showing which PXE profile generated the install.
+    recommended: true
+    risk: low
+    warning: ""
+    requires: []
+    conflicts:
+      - empty
+    tags:
+      - inventory
+      - troubleshooting
+      - audit
+  - id: workstation_light
+    file: workstation-light.ks.j2
+    title: Light workstation setup
+    description: Enables graphical boot target and writes a workstation install info file.
+    recommended: false
+    risk: low
+    warning: Use with graphical workstation package selections.
+    applies_to:
+      os:
+        - rhel8
+        - rhel9
+        - rhel10
+      profiles:
+        - developer_workstation
+    requires: []
+    conflicts:
+      - empty
+    tags:
+      - workstation
+      - graphical
+  - id: ansible_handoff_placeholder
+    file: ansible-handoff-placeholder.ks.j2
+    title: Ansible handoff placeholder
+    description: Creates a placeholder handoff file that future AeroLIT automation can use after the OS install.
+    recommended: false
+    risk: low
+    warning: This does not run Ansible yet. It only creates a placeholder file for future automation.
+    requires: []
+    conflicts:
+      - empty
+    tags:
+      - ansible
+      - future-hook
+      - automation
+  - id: subscription_manager_cleanup_placeholder
+    file: subscription-manager-cleanup-placeholder.ks.j2
+    title: Subscription Manager cleanup placeholder
+    description: Documents where future subscription-manager cleanup or message suppression logic could go.
+    recommended: false
+    risk: low
+    warning: This file is intentionally a no-op placeholder right now.
+    requires: []
+    conflicts:
+      - empty
+    tags:
+      - placeholder
+      - subscription-manager
+      - future
+notes: Keep generic post-install scripts light. Site-specific tasks should usually be done later by Ansible or by an override template.
+tags:
+  - optional
+  - post-install
+  - automation
+
+templates/partials/150-post/empty.ks.j2
+
+# No post-install actions selected.
+
+templates/partials/150-post/firstboot-marker.ks.j2
+
+# Write AeroLIT install marker
+%post --interpreter=/bin/bash --log=/root/aerolit-firstboot-marker-post.log
+set -o pipefail
+mkdir -p /root/aerolit
+cat > /root/aerolit/install-info.txt <<EOF
+AeroLIT PXE Install
+Profile ID: {{ profile_id }}
+Profile title: {{ profile_title }}
+OS ID: {{ os_id }}
+OS title: {{ os_title }}
+Install repo: {{ repo_url }}
+Kickstart URL: {{ kickstart_url }}
+Installed at UTC: $(date -u)
+EOF
+chmod 0600 /root/aerolit/install-info.txt
+%end
+
+templates/partials/150-post/workstation-light.ks.j2
+
+# Light workstation post-install setup
+%post --interpreter=/bin/bash --log=/root/aerolit-workstation-light-post.log
+set -o pipefail
+mkdir -p /root/aerolit
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl enable sshd || true
+    systemctl set-default graphical.target || true
+fi
+cat > /root/aerolit/workstation-install-info.txt <<EOF
+AeroLIT Developer Workstation
+Profile ID: {{ profile_id }}
+OS ID: {{ os_id }}
+Install repo: {{ repo_url }}
+Installed at UTC: $(date -u)
+EOF
+chmod 0600 /root/aerolit/workstation-install-info.txt
+%end
+
+templates/partials/150-post/ansible-handoff-placeholder.ks.j2
+
+# Future Ansible handoff placeholder
+#
+# This does not run Ansible yet. It only writes a small handoff file so future
+# AeroLIT automation has a predictable place to look.
+%post --interpreter=/bin/bash --log=/root/aerolit-ansible-handoff-placeholder-post.log
+set -o pipefail
+mkdir -p /root/aerolit/handoff
+cat > /root/aerolit/handoff/ansible-handoff.env <<EOF
+AEROLIT_PROFILE_ID={{ profile_id }}
+AEROLIT_OS_ID={{ os_id }}
+AEROLIT_REPO_URL={{ repo_url }}
+AEROLIT_KICKSTART_URL={{ kickstart_url }}
+AEROLIT_HANDOFF_READY=false
+EOF
+chmod 0600 /root/aerolit/handoff/ansible-handoff.env
+%end
+
+templates/partials/150-post/subscription-manager-cleanup-placeholder.ks.j2
+
+# Future Subscription Manager cleanup placeholder
+#
+# This is intentionally a no-op right now.
+# Put site-approved subscription-manager cleanup, message suppression, or
+# registration behavior in an override or Ansible role later.
+%post --interpreter=/bin/bash --log=/root/aerolit-subscription-placeholder-post.log
+set -o pipefail
+mkdir -p /root/aerolit
+cat > /root/aerolit/subscription-manager-placeholder.txt <<EOF
+AeroLIT Subscription Manager placeholder
+No subscription-manager changes were made by this generic Kickstart partial.
+Use an override template or Ansible role for site-specific subscription behavior.
+EOF
+chmod 0600 /root/aerolit/subscription-manager-placeholder.txt
+%end
+
+Next is 160-anaconda-policy, which should stay small unless you want to pull in more of the password-policy lines from your old workstation Kickstarts.
