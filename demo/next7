@@ -1,0 +1,431 @@
+Yes — next is Batch 3: 120-storage.
+
+Storage is the section where mistakes get expensive, so I’m separating the simple autopart options from the explicit dynamic partitioning options. Red Hat’s Kickstart docs say autopart should not be mixed with part, raid, logvol, or volgroup; clearpart --all can erase all reachable disks if not limited; ignoredisk --only-use limits what disks the installer can use; and VG/LV names should avoid dashes. That is why these use names like rootvg, datavg, vartmp, and separate the automatic layouts from the generated /tmp/part.conf layouts.  ￼
+
+⸻
+
+templates/partials/120-storage/_meta.yml
+
+title: Storage layout
+order: 120
+required: true
+selection: one
+default: default_lvm
+description: Chooses how the installer wipes disks and creates partitions or logical volumes.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: default_lvm
+    file: default-lvm.ks.j2
+    title: Default LVM
+    description: Wipes available install disks and lets Anaconda create a normal LVM layout.
+    recommended: true
+    risk: medium
+    warning: This erases the selected install disk layout. Use only on systems intended to be rebuilt.
+    requires: []
+    conflicts:
+      - small_disk_lvm
+      - clearpart_all_autopart_lvm
+      - clearpart_all_autopart_plain
+      - workstation_dynamic_lvm
+      - luks_workstation_dynamic_lvm
+  - id: small_disk_lvm
+    file: small-disk-lvm.ks.j2
+    title: Small disk LVM
+    description: Uses automatic LVM partitioning but avoids creating a separate /home partition.
+    recommended: true
+    risk: medium
+    warning: Best for small VM disks or constrained systems. This erases the selected install disk layout.
+    requires: []
+    conflicts:
+      - default_lvm
+      - clearpart_all_autopart_lvm
+      - clearpart_all_autopart_plain
+      - workstation_dynamic_lvm
+      - luks_workstation_dynamic_lvm
+  - id: clearpart_all_autopart_lvm
+    file: clearpart-all-autopart-lvm.ks.j2
+    title: Explicit wipe plus automatic LVM
+    description: Explicitly clears disks and then lets Anaconda create an automatic LVM layout.
+    recommended: false
+    risk: medium
+    warning: Functionally close to default_lvm, but named more explicitly for people reviewing the Kickstart.
+    requires: []
+    conflicts:
+      - default_lvm
+      - small_disk_lvm
+      - clearpart_all_autopart_plain
+      - workstation_dynamic_lvm
+      - luks_workstation_dynamic_lvm
+  - id: clearpart_all_autopart_plain
+    file: clearpart-all-autopart-plain.ks.j2
+    title: Explicit wipe plus plain partitions
+    description: Clears disks and lets Anaconda create a non-LVM plain partition layout.
+    recommended: false
+    risk: medium
+    warning: Avoid this if you want standard LVM flexibility after install.
+    requires: []
+    conflicts:
+      - default_lvm
+      - small_disk_lvm
+      - clearpart_all_autopart_lvm
+      - workstation_dynamic_lvm
+      - luks_workstation_dynamic_lvm
+  - id: workstation_dynamic_lvm
+    file: workstation-dynamic-lvm.ks.j2
+    title: Workstation dynamic LVM
+    description: Detects install disks during %pre, creates a STIG-friendly LVM layout, and optionally places /data on a second disk.
+    recommended: false
+    risk: high
+    warning: More powerful, but more complex. Test carefully on VMs before using on physical hardware.
+    requires: []
+    conflicts:
+      - default_lvm
+      - small_disk_lvm
+      - clearpart_all_autopart_lvm
+      - clearpart_all_autopart_plain
+      - luks_workstation_dynamic_lvm
+  - id: luks_workstation_dynamic_lvm
+    file: luks-workstation-dynamic-lvm.ks.j2
+    title: LUKS workstation dynamic LVM
+    description: Similar to workstation_dynamic_lvm, but encrypts the LVM physical volumes.
+    recommended: false
+    risk: high
+    warning: Do not use until the LUKS passphrase handling is finalized. Losing the passphrase means losing access to the encrypted data.
+    requires: []
+    conflicts:
+      - default_lvm
+      - small_disk_lvm
+      - clearpart_all_autopart_lvm
+      - clearpart_all_autopart_plain
+      - workstation_dynamic_lvm
+notes: The automatic options are safest for early testing. The dynamic workstation options are intended for later developer workstation profiles after VM testing proves the layout.
+tags:
+  - required
+  - storage
+  - destructive
+  - lvm
+  - disk-layout
+
+⸻
+
+templates/partials/120-storage/default-lvm.ks.j2
+
+# Storage layout: default automatic LVM
+#
+# This is the safest general-purpose default for early AeroLIT PXE testing.
+# Anaconda chooses the platform-specific boot partitions and creates an LVM layout.
+zerombr
+clearpart --all --initlabel
+autopart --type=lvm
+
+⸻
+
+templates/partials/120-storage/small-disk-lvm.ks.j2
+
+# Storage layout: small disk automatic LVM
+#
+# This keeps the layout simple for smaller VM disks by avoiding a separate /home.
+# Use this for constrained lab VMs, embedded test systems, or small disks.
+zerombr
+clearpart --all --initlabel
+autopart --type=lvm --nohome
+
+⸻
+
+templates/partials/120-storage/clearpart-all-autopart-lvm.ks.j2
+
+# Storage layout: explicit wipe plus automatic LVM
+#
+# This is intentionally similar to default-lvm.ks.j2, but the file name makes the
+# destructive clearpart behavior obvious to people building custom profiles.
+zerombr
+clearpart --all --initlabel
+autopart --type=lvm
+
+⸻
+
+templates/partials/120-storage/clearpart-all-autopart-plain.ks.j2
+
+# Storage layout: explicit wipe plus automatic plain partitions
+#
+# This avoids LVM. Keep it as an option, but do not make it the AeroLIT default.
+zerombr
+clearpart --all --initlabel
+autopart --type=plain
+
+⸻
+
+templates/partials/120-storage/workstation-dynamic-lvm.ks.j2
+
+# Storage layout: workstation dynamic LVM
+#
+# This creates /tmp/part.conf during %pre and includes it into the Kickstart.
+# It chooses a primary install disk, optionally detects a secondary data disk,
+# and creates separate logical volumes for common security/compliance boundaries.
+#
+# Jinja variables you can override later:
+#   storage_primary_only: true/false
+#   storage_min_primary_gib: minimum primary disk size warning threshold
+#   storage_add_data_volume: true/false
+%include /tmp/part.conf
+%pre --interpreter=/bin/bash
+set -o pipefail
+PART_CONFIG="/tmp/part.conf"
+INSTALL_TTY="/dev/tty1"
+PRIMARY_ONLY="{{ storage_primary_only | default('false') }}"
+ADD_DATA_VOLUME="{{ storage_add_data_volume | default('true') }}"
+MIN_PRIMARY_GIB="{{ storage_min_primary_gib | default('40') }}"
+if [ -e "${INSTALL_TTY}" ]; then
+    exec < "${INSTALL_TTY}" > "${INSTALL_TTY}" 2> "${INSTALL_TTY}"
+fi
+echo
+echo "=========================================="
+echo "AeroLIT workstation storage detection"
+echo "=========================================="
+echo
+# Build a disk list in the format:
+# name|rota|size_bytes
+#
+# rota=0 usually means SSD/NVMe.
+# rota=1 usually means spinning disk.
+mapfile -t DISK_LINES < <(
+    lsblk -dn -b -o NAME,TYPE,ROTA,SIZE \
+    | awk '$2 == "disk" { print $1 "|" $3 "|" $4 }'
+)
+if [ "${#DISK_LINES[@]}" -lt 1 ]; then
+    echo "ERROR: No installable disks were detected."
+    echo "reboot" > "${PART_CONFIG}"
+    exit 0
+fi
+# Prefer the largest non-rotational disk. If none exists, use the largest disk.
+PRIMARY_DISK="$(
+    printf '%s\n' "${DISK_LINES[@]}" \
+    | awk -F'|' '$2 == "0" { print }' \
+    | sort -t'|' -k3,3nr \
+    | head -n 1 \
+    | cut -d'|' -f1
+)"
+if [ -z "${PRIMARY_DISK}" ]; then
+    PRIMARY_DISK="$(
+        printf '%s\n' "${DISK_LINES[@]}" \
+        | sort -t'|' -k3,3nr \
+        | head -n 1 \
+        | cut -d'|' -f1
+    )"
+fi
+PRIMARY_SIZE_BYTES="$(
+    printf '%s\n' "${DISK_LINES[@]}" \
+    | awk -F'|' -v disk="${PRIMARY_DISK}" '$1 == disk { print $3 }'
+)"
+MIN_PRIMARY_BYTES=$(( MIN_PRIMARY_GIB * 1024 * 1024 * 1024 ))
+if [ "${PRIMARY_SIZE_BYTES:-0}" -lt "${MIN_PRIMARY_BYTES}" ]; then
+    echo "WARNING: Primary disk ${PRIMARY_DISK} is smaller than ${MIN_PRIMARY_GIB} GiB."
+    echo "Continuing because this may be an intentional lab or small VM install."
+fi
+SECONDARY_DISK="$(
+    printf '%s\n' "${DISK_LINES[@]}" \
+    | awk -F'|' -v primary="${PRIMARY_DISK}" '$1 != primary { print }' \
+    | sort -t'|' -k3,3nr \
+    | head -n 1 \
+    | cut -d'|' -f1
+)"
+if [ "${PRIMARY_ONLY}" = "true" ]; then
+    SECONDARY_DISK=""
+fi
+if [ "${ADD_DATA_VOLUME}" != "true" ]; then
+    SECONDARY_DISK=""
+fi
+DLIST="${PRIMARY_DISK}"
+if [ -n "${SECONDARY_DISK}" ]; then
+    DLIST="${PRIMARY_DISK},${SECONDARY_DISK}"
+fi
+echo "Primary disk: ${PRIMARY_DISK}"
+if [ -n "${SECONDARY_DISK}" ]; then
+    echo "Secondary data disk: ${SECONDARY_DISK}"
+else
+    echo "Secondary data disk: none"
+fi
+cat > "${PART_CONFIG}" <<EOF
+# Generated by AeroLIT workstation-dynamic-lvm.ks.j2
+ignoredisk --only-use=${DLIST}
+zerombr
+bootloader --append="crashkernel=auto" --boot-drive=${PRIMARY_DISK}
+clearpart --all --initlabel --drives=${DLIST}
+# Boot partitions
+part /boot --fstype=xfs --ondisk=${PRIMARY_DISK} --size=1024
+part /boot/efi --fstype=efi --ondisk=${PRIMARY_DISK} --size=600 --fsoptions="umask=0077,shortname=winnt"
+# Primary LVM physical volume
+part pv.01 --fstype=lvmpv --ondisk=${PRIMARY_DISK} --size=1 --grow
+# Primary volume group
+volgroup rootvg --pesize=4096 pv.01
+# Logical volumes
+logvol / --fstype=xfs --size=20480 --grow --name=root --vgname=rootvg
+logvol /home --fstype=xfs --size=20480 --name=home --vgname=rootvg
+logvol /tmp --fstype=xfs --size=10240 --name=tmp --vgname=rootvg
+logvol /var --fstype=xfs --size=15360 --name=var --vgname=rootvg
+logvol /var/log --fstype=xfs --size=20480 --name=log --vgname=rootvg
+logvol /var/log/audit --fstype=xfs --size=20480 --name=audit --vgname=rootvg
+logvol /var/tmp --fstype=xfs --size=5120 --name=vartmp --vgname=rootvg
+logvol /opt --fstype=xfs --size=10240 --name=opt --vgname=rootvg
+logvol swap --fstype=swap --size=4096 --name=swap --vgname=rootvg
+EOF
+if [ -n "${SECONDARY_DISK}" ]; then
+    cat >> "${PART_CONFIG}" <<EOF
+# Secondary data disk
+part pv.02 --fstype=lvmpv --ondisk=${SECONDARY_DISK} --size=1 --grow
+volgroup datavg --pesize=4096 pv.02
+logvol /data --fstype=xfs --size=1 --grow --name=data --vgname=datavg
+EOF
+fi
+echo
+echo "Generated storage configuration:"
+echo "--------------------------------"
+cat "${PART_CONFIG}"
+echo
+%end
+
+⸻
+
+templates/partials/120-storage/luks-workstation-dynamic-lvm.ks.j2
+
+# Storage layout: LUKS workstation dynamic LVM
+#
+# This creates /tmp/part.conf during %pre and includes it into the Kickstart.
+# It encrypts the LVM physical volumes.
+#
+# Jinja variables you can override later:
+#   storage_primary_only: true/false
+#   storage_min_primary_gib: minimum primary disk size warning threshold
+#   storage_add_data_volume: true/false
+#   luks_passphrase: temporary install-time LUKS passphrase
+#
+# WARNING:
+# Do not use this in production until passphrase/key handling is finalized.
+%include /tmp/part.conf
+%pre --interpreter=/bin/bash
+set -o pipefail
+PART_CONFIG="/tmp/part.conf"
+INSTALL_TTY="/dev/tty1"
+PRIMARY_ONLY="{{ storage_primary_only | default('false') }}"
+ADD_DATA_VOLUME="{{ storage_add_data_volume | default('true') }}"
+MIN_PRIMARY_GIB="{{ storage_min_primary_gib | default('40') }}"
+LUKS_PASSPHRASE="{{ luks_passphrase | default('CHANGE_ME_BEFORE_USE') }}"
+if [ -e "${INSTALL_TTY}" ]; then
+    exec < "${INSTALL_TTY}" > "${INSTALL_TTY}" 2> "${INSTALL_TTY}"
+fi
+echo
+echo "=========================================="
+echo "AeroLIT encrypted workstation storage detection"
+echo "=========================================="
+echo
+if [ "${LUKS_PASSPHRASE}" = "CHANGE_ME_BEFORE_USE" ]; then
+    echo "WARNING: LUKS passphrase is still the placeholder value."
+    echo "Do not use this option for real systems until passphrase handling is finalized."
+fi
+mapfile -t DISK_LINES < <(
+    lsblk -dn -b -o NAME,TYPE,ROTA,SIZE \
+    | awk '$2 == "disk" { print $1 "|" $3 "|" $4 }'
+)
+if [ "${#DISK_LINES[@]}" -lt 1 ]; then
+    echo "ERROR: No installable disks were detected."
+    echo "reboot" > "${PART_CONFIG}"
+    exit 0
+fi
+PRIMARY_DISK="$(
+    printf '%s\n' "${DISK_LINES[@]}" \
+    | awk -F'|' '$2 == "0" { print }' \
+    | sort -t'|' -k3,3nr \
+    | head -n 1 \
+    | cut -d'|' -f1
+)"
+if [ -z "${PRIMARY_DISK}" ]; then
+    PRIMARY_DISK="$(
+        printf '%s\n' "${DISK_LINES[@]}" \
+        | sort -t'|' -k3,3nr \
+        | head -n 1 \
+        | cut -d'|' -f1
+    )"
+fi
+PRIMARY_SIZE_BYTES="$(
+    printf '%s\n' "${DISK_LINES[@]}" \
+    | awk -F'|' -v disk="${PRIMARY_DISK}" '$1 == disk { print $3 }'
+)"
+MIN_PRIMARY_BYTES=$(( MIN_PRIMARY_GIB * 1024 * 1024 * 1024 ))
+if [ "${PRIMARY_SIZE_BYTES:-0}" -lt "${MIN_PRIMARY_BYTES}" ]; then
+    echo "WARNING: Primary disk ${PRIMARY_DISK} is smaller than ${MIN_PRIMARY_GIB} GiB."
+    echo "Continuing because this may be an intentional lab or small VM install."
+fi
+SECONDARY_DISK="$(
+    printf '%s\n' "${DISK_LINES[@]}" \
+    | awk -F'|' -v primary="${PRIMARY_DISK}" '$1 != primary { print }' \
+    | sort -t'|' -k3,3nr \
+    | head -n 1 \
+    | cut -d'|' -f1
+)"
+if [ "${PRIMARY_ONLY}" = "true" ]; then
+    SECONDARY_DISK=""
+fi
+if [ "${ADD_DATA_VOLUME}" != "true" ]; then
+    SECONDARY_DISK=""
+fi
+DLIST="${PRIMARY_DISK}"
+if [ -n "${SECONDARY_DISK}" ]; then
+    DLIST="${PRIMARY_DISK},${SECONDARY_DISK}"
+fi
+echo "Primary disk: ${PRIMARY_DISK}"
+if [ -n "${SECONDARY_DISK}" ]; then
+    echo "Secondary encrypted data disk: ${SECONDARY_DISK}"
+else
+    echo "Secondary encrypted data disk: none"
+fi
+cat > "${PART_CONFIG}" <<EOF
+# Generated by AeroLIT luks-workstation-dynamic-lvm.ks.j2
+ignoredisk --only-use=${DLIST}
+zerombr
+bootloader --append="crashkernel=auto" --boot-drive=${PRIMARY_DISK}
+clearpart --all --initlabel --drives=${DLIST}
+# Boot partitions remain unencrypted because the installer and firmware need them.
+part /boot --fstype=xfs --ondisk=${PRIMARY_DISK} --size=1024
+part /boot/efi --fstype=efi --ondisk=${PRIMARY_DISK} --size=600 --fsoptions="umask=0077,shortname=winnt"
+# Encrypted primary LVM physical volume
+part pv.01 --fstype=lvmpv --ondisk=${PRIMARY_DISK} --size=1 --grow --encrypted --passphrase=${LUKS_PASSPHRASE}
+# Primary volume group
+volgroup rootvg --pesize=4096 pv.01
+# Logical volumes
+logvol / --fstype=xfs --size=20480 --grow --name=root --vgname=rootvg
+logvol /home --fstype=xfs --size=20480 --name=home --vgname=rootvg
+logvol /tmp --fstype=xfs --size=10240 --name=tmp --vgname=rootvg
+logvol /var --fstype=xfs --size=15360 --name=var --vgname=rootvg
+logvol /var/log --fstype=xfs --size=20480 --name=log --vgname=rootvg
+logvol /var/log/audit --fstype=xfs --size=20480 --name=audit --vgname=rootvg
+logvol /var/tmp --fstype=xfs --size=5120 --name=vartmp --vgname=rootvg
+logvol /opt --fstype=xfs --size=10240 --name=opt --vgname=rootvg
+logvol swap --fstype=swap --size=4096 --name=swap --vgname=rootvg
+EOF
+if [ -n "${SECONDARY_DISK}" ]; then
+    cat >> "${PART_CONFIG}" <<EOF
+# Encrypted secondary data disk
+part pv.02 --fstype=lvmpv --ondisk=${SECONDARY_DISK} --size=1 --grow --encrypted --passphrase=${LUKS_PASSPHRASE}
+volgroup datavg --pesize=4096 pv.02
+logvol /data --fstype=xfs --size=1 --grow --name=data --vgname=datavg
+EOF
+fi
+echo
+echo "Generated encrypted storage configuration:"
+echo "------------------------------------------"
+sed 's/--passphrase=[^ ]*/--passphrase=__hidden__/g' "${PART_CONFIG}"
+echo
+%end
+
+⸻
+
+Next batch should be 130-packages, then 140-addons, 150-post, and 160-anaconda-policy.
