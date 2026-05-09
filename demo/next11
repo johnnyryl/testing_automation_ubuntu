@@ -1,0 +1,71 @@
+Next is Batch 7: 160-anaconda-policy.
+
+I would keep this section small for now. This is not system hardening after install; it is installer/anaconda policy. For now, just use the standard password policy lines and make this a fixed section.
+
+templates/partials/160-anaconda-policy/_meta.yml
+
+title: Anaconda installer policy
+order: 160
+required: false
+selection: fixed
+default: password_policies_default
+description: Adds installer-specific policy settings used by Anaconda during installation.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: password_policies_default
+    file: password-policies-default.ks.j2
+    title: Default password policies
+    description: Adds default installer password policy settings for root, user, and LUKS passwords.
+    recommended: true
+    risk: low
+    warning: These settings affect Anaconda installer password checks. They are not a replacement for operating system password policy hardening after install.
+    requires: []
+    conflicts: []
+    tags:
+      - default
+      - anaconda
+      - password-policy
+notes: Keep this section focused on installer behavior only. Real OS password policy, authselect, PAM, faillock, STIG hardening, and domain integration should be handled later by Ansible or another post-install hardening workflow.
+tags:
+  - optional
+  - anaconda
+  - installer-policy
+
+templates/partials/160-anaconda-policy/password-policies-default.ks.j2
+
+# Anaconda password policy defaults
+#
+# These settings control password checks inside the installer.
+# They do not replace post-install OS password policy hardening.
+pwpolicy root --minlen=6 --minquality=1 --notstrict --nochanges --notempty
+pwpolicy user --minlen=6 --minquality=1 --notstrict --nochanges --emptyok
+pwpolicy luks --minlen=6 --minquality=1 --notstrict --nochanges --notempty
+
+That finishes the main partial batches.
+
+Next I would do the actual full Kickstart recipe files under:
+
+templates/ks/
+
+Starting with the easiest ones:
+
+rhel8-minimal.ks.j2
+rhel9-minimal.ks.j2
+rhel10-minimal.ks.j2
+
+Then:
+
+rhel8-small-disk.ks.j2
+rhel9-small-disk.ks.j2
+rhel10-small-disk.ks.j2
+
+Then RHEL 7, then developer-workstation.ks.j2.
