@@ -1,0 +1,36 @@
+Yes — I’ll give you the files as copy/paste blocks.
+
+I would do one safe set first: the new templates/partials/workstation/ files, the shared templates/ks/developer-workstation.ks.j2, and the updated developer profile. These should not overwrite your existing minimal/small-disk partials.
+
+Before I paste the full set, one important note:
+
+When we turn developer_workstation to implemented: true, you need to update your test that currently treats developer workstation as a placeholder.
+
+Change this regex:
+
+developer-workstation|security-baseline|security-luks|embedded-edge
+
+to:
+
+security-baseline|security-luks|embedded-edge
+
+because developer workstation will no longer be a placeholder.
+
+The files I’m about to give you will be:
+
+templates/partials/workstation/eula.ks.j2
+templates/partials/workstation/install-mode-graphical.ks.j2
+templates/partials/workstation/repos-rhel-media.ks.j2
+templates/partials/workstation/language-keyboard-timezone.ks.j2
+templates/partials/workstation/network-dhcp.ks.j2
+templates/partials/workstation/root-password.ks.j2
+templates/partials/workstation/security-basics.ks.j2
+templates/partials/workstation/firstboot-reboot.ks.j2
+templates/partials/workstation/storage-workstation-lvm.ks.j2
+templates/partials/workstation/packages-workstation.ks.j2
+templates/partials/workstation/kdump-enabled.ks.j2
+templates/partials/workstation/post-workstation-light.ks.j2
+templates/ks/developer-workstation.ks.j2
+content/profiles/10-developer-workstation.yml
+
+I’ll give them in the next message as exact file-by-file copy/paste blocks so it’s easier to add them cleanly.
