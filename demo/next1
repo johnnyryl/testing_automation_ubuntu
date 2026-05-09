@@ -1,0 +1,235 @@
+Start with the template architecture, not the generator script.
+
+Your current Python generator already supports Jinja includes from /templates, so we can reorganize templates/partials/ and templates/ks/ without changing Python yet. The _meta.yml files will be ignored by the generator for now, but they will set us up for the future custom override builder.
+
+Start here
+
+Do this in this order:
+
+1. Create the new numbered partial directory layout.
+2. Add _meta.yml files to each partial slot.
+3. Create only the minimal/common partials first.
+4. Rebuild rhel8-minimal.ks.j2, rhel9-minimal.ks.j2, and rhel10-minimal.ks.j2 using the new partial paths.
+5. Run the image tests.
+6. Then move on to small-disk.
+7. Then move on to developer-workstation.
+
+Do not start with developer workstation. That one has the most site-specific and risky stuff, so it should be last.
+
+The first architecture I would implement
+
+Use this as the starting layout:
+
+templates/
+  ks/
+    rhel7-minimal.ks.j2
+    rhel7-small-disk.ks.j2
+    rhel8-minimal.ks.j2
+    rhel8-small-disk.ks.j2
+    rhel9-minimal.ks.j2
+    rhel9-small-disk.ks.j2
+    rhel10-minimal.ks.j2
+    rhel10-small-disk.ks.j2
+    developer-workstation.ks.j2
+  partials/
+    00-rhel-version/
+      _meta.yml
+      version-line.ks.j2
+    10-eula/
+      _meta.yml
+      agreed.ks.j2
+    20-install-mode/
+      _meta.yml
+      text.ks.j2
+      graphical.ks.j2
+    30-reboot-behavior/
+      _meta.yml
+      reboot.ks.j2
+      shutdown.ks.j2
+    40-firstboot/
+      _meta.yml
+      disabled.ks.j2
+      enabled.ks.j2
+    50-install-source/
+      _meta.yml
+      pxe-extracted-media.ks.j2
+    60-locale/
+      _meta.yml
+      us-central.ks.j2
+      us-chicago.ks.j2
+    70-network/
+      _meta.yml
+      dhcp-link.ks.j2
+      dhcp-link-with-hostname-prompt.ks.j2
+    80-auth/
+      _meta.yml
+      root-password.ks.j2
+    90-security/
+      _meta.yml
+      selinux-enforcing-firewall-ssh.ks.j2
+    100-services/
+      _meta.yml
+      sshd-enabled.ks.j2
+    110-storage/
+      _meta.yml
+      default-lvm.ks.j2
+      small-disk-lvm.ks.j2
+      workstation-dynamic-lvm.ks.j2
+      luks-workstation-dynamic-lvm.ks.j2
+    120-packages/
+      _meta.yml
+      minimal.ks.j2
+      workstation.ks.j2
+      developer-workstation.ks.j2
+    130-addons/
+      _meta.yml
+      kdump-enabled.ks.j2
+      kdump-disabled.ks.j2
+    140-post/
+      _meta.yml
+      empty.ks.j2
+      workstation-light.ks.j2
+      ansible-handoff-placeholder.ks.j2
+    150-anaconda-policy/
+      _meta.yml
+      password-policies-default.ks.j2
+
+_meta.yml fields I would use
+
+Keep it simple, but useful enough for the future helper script:
+
+title: Install mode
+required: true
+selection: one
+default: graphical.ks.j2
+description: Choose whether Anaconda runs in text mode or graphical mode.
+
+I would use these fields:
+
+title: Human-readable section name
+required: true
+selection: one
+default: file-name.ks.j2
+description: Short explanation for non-Linux users.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+
+The most important field is selection.
+
+Use:
+
+selection: one
+
+when the user should pick exactly one option, like text vs graphical.
+
+Use:
+
+selection: many
+
+when multiple options can be included from that slot.
+
+Use:
+
+selection: optional
+
+when the whole section can be skipped.
+
+Use:
+
+selection: fixed
+
+when the section should normally always be included and the user should not be prompted unless they are doing advanced customization.
+
+Examples:
+
+title: EULA
+required: true
+selection: fixed
+default: agreed.ks.j2
+description: Adds the required Red Hat license agreement line.
+title: Install mode
+required: true
+selection: one
+default: graphical.ks.j2
+description: Choose whether the installer uses text mode or graphical mode.
+title: Post-install actions
+required: false
+selection: one
+default: empty.ks.j2
+description: Optional commands to run after installation.
+
+What I would do first today
+
+Start with these files only:
+
+templates/partials/00-rhel-version/
+templates/partials/10-eula/
+templates/partials/20-install-mode/
+templates/partials/30-reboot-behavior/
+templates/partials/40-firstboot/
+templates/partials/50-install-source/
+templates/partials/60-locale/
+templates/partials/70-network/
+templates/partials/80-auth/
+templates/partials/90-security/
+templates/partials/100-services/
+templates/partials/110-storage/
+templates/partials/120-packages/
+templates/partials/130-addons/
+templates/partials/140-post/
+templates/partials/150-anaconda-policy/
+
+Then update just:
+
+templates/ks/rhel8-minimal.ks.j2
+templates/ks/rhel9-minimal.ks.j2
+templates/ks/rhel10-minimal.ks.j2
+
+Those three should become very small and easy to read, like:
+
+{% include "partials/00-rhel-version/version-line.ks.j2" %}
+{% include "partials/10-eula/agreed.ks.j2" %}
+{% include "partials/20-install-mode/text.ks.j2" %}
+{% include "partials/30-reboot-behavior/reboot.ks.j2" %}
+{% include "partials/40-firstboot/disabled.ks.j2" %}
+{% include "partials/50-install-source/pxe-extracted-media.ks.j2" %}
+{% include "partials/60-locale/us-chicago.ks.j2" %}
+{% include "partials/70-network/dhcp-link.ks.j2" %}
+{% include "partials/80-auth/root-password.ks.j2" %}
+{% include "partials/90-security/selinux-enforcing-firewall-ssh.ks.j2" %}
+{% include "partials/100-services/sshd-enabled.ks.j2" %}
+{% include "partials/110-storage/default-lvm.ks.j2" %}
+{% include "partials/120-packages/minimal.ks.j2" %}
+{% include "partials/130-addons/kdump-enabled.ks.j2" %}
+{% include "partials/140-post/empty.ks.j2" %}
+{% include "partials/150-anaconda-policy/password-policies-default.ks.j2" %}
+
+That proves the architecture works before we make it fancy.
+
+Important note
+
+After moving partial paths, you will probably need to update this test:
+
+test-overrides-and-preserve-policy.sh
+
+because it currently includes older partial paths like:
+
+{% include "partials/install-mode-text.ks.j2" %}
+
+Those will need to become the new paths, like:
+
+{% include "partials/20-install-mode/text.ks.j2" %}
+
+So the best next move is:
+
+First create the new minimal partials and update the three minimal KS templates. Then run pxe-content-test all.
+
+Once that passes, we move to small-disk.
