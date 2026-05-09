@@ -1,0 +1,105 @@
+Yes — here are the two _meta.yml files.
+
+templates/partials/060-language-keyboard/_meta.yml
+
+title: Language and keyboard
+order: 60
+required: true
+selection: one
+default: us_english
+description: Sets the operating system language and keyboard layout used during and after installation.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: us_english
+    file: us-english.ks.j2
+    title: US English
+    description: Uses US English as the system language and a standard US keyboard layout.
+    recommended: true
+    risk: low
+    warning: ""
+notes: >
+  Most AeroLIT environments should use this default unless a site specifically
+  requires a different language or keyboard layout.
+requires: []
+conflicts: []
+tags:
+  - required
+  - localization
+  - keyboard
+  - default
+
+templates/partials/070-timezone/_meta.yml
+
+title: Timezone
+order: 70
+required: true
+selection: one
+default: us_central
+description: Sets the system timezone for the installed machine.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: us_central
+    file: us-central.ks.j2
+    title: US Central
+    description: Uses the US Central timezone. This is the normal default for Fort Worth and many AeroLIT lab environments.
+    recommended: true
+    risk: low
+    warning: ""
+  - id: us_chicago
+    file: us-chicago.ks.j2
+    title: America/Chicago
+    description: Uses the IANA-style Chicago timezone name. Functionally similar to US Central for most installs.
+    recommended: false
+    risk: low
+    warning: "Keep either this or US Central as the preferred option long term to avoid confusing users."
+  - id: us_eastern
+    file: us-eastern.ks.j2
+    title: US Eastern
+    description: Uses the US Eastern timezone.
+    recommended: false
+    risk: low
+    warning: ""
+  - id: us_mountain
+    file: us-mountain.ks.j2
+    title: US Mountain
+    description: Uses the US Mountain timezone.
+    recommended: false
+    risk: low
+    warning: ""
+  - id: us_pacific
+    file: us-pacific.ks.j2
+    title: US Pacific
+    description: Uses the US Pacific timezone.
+    recommended: false
+    risk: low
+    warning: ""
+notes: >
+  Timezone is separated from language and keyboard so users can change the
+  system time zone without accidentally changing the system language or keyboard layout.
+requires: []
+conflicts: []
+tags:
+  - required
+  - timezone
+  - localization
+  - default
+
+One small recommendation: long term, I would probably keep either us-central.ks.j2 or us-chicago.ks.j2, not both. For now it is fine to keep both while you are building this out.
