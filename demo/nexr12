@@ -1,0 +1,287 @@
+Yes — for 200-extras, I would treat these as scratchpad optional %post snippets, not normal required Kickstart building blocks yet.
+
+Use them only when intentionally included in a future developer-workstation.ks.j2 or custom override. I would not include any of these in minimal or small-disk templates by default.
+
+Important: the files below are self-contained %post sections. Include them near the end of a Kickstart template, not inside another %post block.
+
+⸻
+
+templates/partials/200-extras/ad-sudo-group.ks.j2
+
+# Optional extra: AD / enterprise sudo group
+#
+# This creates a sudoers drop-in for an enterprise/admin group.
+# It does not create the group or join the system to a domain.
+%post --interpreter=/bin/bash --log=/root/aerolit-ad-sudo-group.log
+set -euo pipefail
+SUDO_GROUP="{{ ad_sudo_group | default('', true) }}"
+if [ -z "${SUDO_GROUP}" ]; then
+  echo "No ad_sudo_group was provided. Skipping sudo group configuration."
+  exit 0
+fi
+mkdir -p /etc/sudoers.d
+cat > /etc/sudoers.d/aerolit-ad-sudo-group <<EOF
+# Managed by AeroLIT Kickstart
+%${SUDO_GROUP} ALL=(ALL) ALL
+EOF
+chmod 0440 /etc/sudoers.d/aerolit-ad-sudo-group
+if command -v visudo >/dev/null 2>&1; then
+  visudo -cf /etc/sudoers.d/aerolit-ad-sudo-group
+fi
+echo "Configured sudo access for group: ${SUDO_GROUP}"
+%end
+
+⸻
+
+templates/partials/200-extras/banner-lockdown.ks.j2
+
+# Optional extra: login banners and basic desktop banner configuration
+#
+# This adds SSH/local login banners and attempts to configure the GNOME login
+# banner when dconf is available.
+%post --interpreter=/bin/bash --log=/root/aerolit-banner-lockdown.log
+set -euo pipefail
+BANNER_TEXT="{{ banner_text | default('This system is for authorized use only. Activity may be monitored.', true) }}"
+cat > /etc/issue <<EOF
+${BANNER_TEXT}
+EOF
+cat > /etc/issue.net <<EOF
+${BANNER_TEXT}
+EOF
+mkdir -p /etc/ssh/sshd_config.d
+cat > /etc/ssh/sshd_config.d/10-aerolit-banner.conf <<EOF
+# Managed by AeroLIT Kickstart
+Banner /etc/issue.net
+EOF
+# GNOME login banner support.
+# This is best-effort because minimal installs may not include dconf/GDM.
+if command -v dconf >/dev/null 2>&1 || [ -d /etc/dconf/db ]; then
+  mkdir -p /etc/dconf/db/gdm.d
+  mkdir -p /etc/dconf/db/gdm.d/locks
+  cat > /etc/dconf/db/gdm.d/01-aerolit-login-banner <<EOF
+[org/gnome/login-screen]
+banner-message-enable=true
+banner-message-text='${BANNER_TEXT}'
+disable-user-list=true
+EOF
+  cat > /etc/dconf/db/gdm.d/locks/01-aerolit-login-banner <<EOF
+/org/gnome/login-screen/banner-message-enable
+/org/gnome/login-screen/banner-message-text
+/org/gnome/login-screen/disable-user-list
+EOF
+  dconf update || true
+fi
+echo "Configured local, SSH, and best-effort GNOME login banners."
+%end
+
+⸻
+
+templates/partials/200-extras/chrome-vscode-install.ks.j2
+
+# Optional extra: install Chrome and VS Code
+#
+# This assumes the packages are already available from configured repositories.
+# It intentionally does not add public internet repositories.
+%post --interpreter=/bin/bash --log=/root/aerolit-chrome-vscode-install.log
+set -euo pipefail
+PKG_MGR="dnf"
+if ! command -v dnf >/dev/null 2>&1 && command -v yum >/dev/null 2>&1; then
+  PKG_MGR="yum"
+fi
+INSTALL_PACKAGES="{{ gui_tool_packages | default('google-chrome-stable code', true) }}"
+if [ -z "${INSTALL_PACKAGES}" ]; then
+  echo "No gui_tool_packages provided. Skipping Chrome/VS Code install."
+  exit 0
+fi
+echo "Attempting to install GUI tool packages: ${INSTALL_PACKAGES}"
+if ${PKG_MGR} -y install ${INSTALL_PACKAGES}; then
+  echo "GUI tool package install completed."
+else
+  echo "WARNING: One or more GUI tool packages could not be installed."
+  echo "Make sure the needed RPMs/repos are available in the offline environment."
+fi
+%end
+
+⸻
+
+templates/partials/200-extras/chrony-enterprise-server.ks.j2
+
+# Optional extra: configure enterprise Chrony/NTP servers
+#
+# Provide a space-separated list through chrony_servers.
+# Example:
+# chrony_servers: "10.10.10.10 time.example.local"
+%post --interpreter=/bin/bash --log=/root/aerolit-chrony-enterprise-server.log
+set -euo pipefail
+CHRONY_SERVERS="{{ chrony_servers | default('', true) }}"
+if [ -z "${CHRONY_SERVERS}" ]; then
+  echo "No chrony_servers provided. Skipping Chrony enterprise server configuration."
+  exit 0
+fi
+if [ ! -f /etc/chrony.conf ]; then
+  echo "WARNING: /etc/chrony.conf was not found. Skipping Chrony configuration."
+  exit 0
+fi
+cp -a /etc/chrony.conf /etc/chrony.conf.aerolit.bak
+# Remove common default pool/server lines so the enterprise list is authoritative.
+sed -i \
+  -e '/^[[:space:]]*pool[[:space:]]/d' \
+  -e '/^[[:space:]]*server[[:space:]]/d' \
+  /etc/chrony.conf
+{
+  echo ""
+  echo "# Managed by AeroLIT Kickstart"
+  for server in ${CHRONY_SERVERS}; do
+    echo "server ${server} iburst"
+  done
+} >> /etc/chrony.conf
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl enable chronyd || true
+fi
+echo "Configured Chrony servers: ${CHRONY_SERVERS}"
+%end
+
+⸻
+
+templates/partials/200-extras/disable-bluetooth.ks.j2
+
+# Optional extra: disable Bluetooth
+#
+# Useful for hardened or workstation-controlled environments where Bluetooth
+# is not allowed.
+%post --interpreter=/bin/bash --log=/root/aerolit-disable-bluetooth.log
+set -euo pipefail
+mkdir -p /etc/modprobe.d
+cat > /etc/modprobe.d/aerolit-disable-bluetooth.conf <<EOF
+# Managed by AeroLIT Kickstart
+install bluetooth /bin/true
+blacklist bluetooth
+blacklist btusb
+EOF
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl disable bluetooth.service >/dev/null 2>&1 || true
+  systemctl mask bluetooth.service >/dev/null 2>&1 || true
+fi
+echo "Bluetooth kernel modules and service disabled where applicable."
+%end
+
+⸻
+
+templates/partials/200-extras/domain-join.ks.j2
+
+# Optional extra: domain join placeholder
+#
+# Recommended approach:
+#   Use Ansible after install for real domain join logic.
+#
+# This Kickstart partial creates a helper script at:
+#   /root/aerolit-domain-join.sh
+#
+# It does not automatically join the domain unless explicitly enabled.
+%post --interpreter=/bin/bash --log=/root/aerolit-domain-join-placeholder.log
+set -euo pipefail
+DOMAIN="{{ domain_name | default('', true) }}"
+JOIN_USER="{{ domain_join_user | default('', true) }}"
+AUTO_JOIN="{{ domain_join_enabled | default('false', true) }}"
+cat > /root/aerolit-domain-join.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+DOMAIN="${1:-}"
+JOIN_USER="${2:-}"
+if [ -z "${DOMAIN}" ] || [ -z "${JOIN_USER}" ]; then
+  echo "Usage: $0 <domain> <join-user>"
+  echo "Example: $0 example.com admin_user"
+  exit 1
+fi
+if ! command -v realm >/dev/null 2>&1; then
+  echo "ERROR: realm command not found. Install realmd and required packages first."
+  exit 1
+fi
+echo "Discovering domain: ${DOMAIN}"
+realm discover "${DOMAIN}"
+echo "Joining domain: ${DOMAIN}"
+echo "You will be prompted for the domain join password."
+realm join --user="${JOIN_USER}" "${DOMAIN}"
+echo "Domain join complete."
+realm list
+EOF
+chmod 0700 /root/aerolit-domain-join.sh
+echo "Created /root/aerolit-domain-join.sh"
+if [ "${AUTO_JOIN}" = "true" ]; then
+  echo "domain_join_enabled=true was set, but automatic domain join is intentionally not performed by this placeholder."
+  echo "Run /root/aerolit-domain-join.sh after install or move domain join into Ansible."
+fi
+%end
+
+⸻
+
+templates/partials/200-extras/nvidia-driver-install.ks.j2
+
+# Optional extra: NVIDIA driver install placeholder
+#
+# This assumes NVIDIA RPMs are already available from configured repositories.
+# It intentionally does not add public internet repositories or use DKMS logic.
+%post --interpreter=/bin/bash --log=/root/aerolit-nvidia-driver-install.log
+set -euo pipefail
+ENABLE_NVIDIA="{{ install_nvidia_driver | default('false', true) }}"
+NVIDIA_PACKAGES="{{ nvidia_driver_packages | default('nvidia-driver nvidia-settings', true) }}"
+if [ "${ENABLE_NVIDIA}" != "true" ]; then
+  echo "install_nvidia_driver is not true. Skipping NVIDIA driver installation."
+  exit 0
+fi
+PKG_MGR="dnf"
+if ! command -v dnf >/dev/null 2>&1 && command -v yum >/dev/null 2>&1; then
+  PKG_MGR="yum"
+fi
+echo "Attempting to install NVIDIA packages: ${NVIDIA_PACKAGES}"
+if ${PKG_MGR} -y install ${NVIDIA_PACKAGES}; then
+  echo "NVIDIA package installation completed."
+else
+  echo "WARNING: NVIDIA packages could not be installed."
+  echo "Make sure the required NVIDIA RPM repository is available offline."
+fi
+%end
+
+⸻
+
+templates/partials/200-extras/proxy-enterprise.ks.j2
+
+# Optional extra: enterprise proxy configuration
+#
+# This writes shell proxy variables and optional DNF/YUM proxy settings.
+# Leave proxy_url empty to skip.
+%post --interpreter=/bin/bash --log=/root/aerolit-proxy-enterprise.log
+set -euo pipefail
+PROXY_URL="{{ proxy_url | default('', true) }}"
+NO_PROXY="{{ no_proxy | default('127.0.0.1,localhost', true) }}"
+if [ -z "${PROXY_URL}" ]; then
+  echo "No proxy_url provided. Skipping proxy configuration."
+  exit 0
+fi
+cat > /etc/profile.d/aerolit-proxy.sh <<EOF
+# Managed by AeroLIT Kickstart
+export http_proxy="${PROXY_URL}"
+export https_proxy="${PROXY_URL}"
+export HTTP_PROXY="${PROXY_URL}"
+export HTTPS_PROXY="${PROXY_URL}"
+export no_proxy="${NO_PROXY}"
+export NO_PROXY="${NO_PROXY}"
+EOF
+chmod 0644 /etc/profile.d/aerolit-proxy.sh
+if [ -f /etc/dnf/dnf.conf ]; then
+  if ! grep -q '^proxy=' /etc/dnf/dnf.conf; then
+    echo "proxy=${PROXY_URL}" >> /etc/dnf/dnf.conf
+  fi
+fi
+if [ -f /etc/yum.conf ]; then
+  if ! grep -q '^proxy=' /etc/yum.conf; then
+    echo "proxy=${PROXY_URL}" >> /etc/yum.conf
+  fi
+fi
+echo "Configured enterprise proxy: ${PROXY_URL}"
+echo "Configured no_proxy: ${NO_PROXY}"
+%end
+
+⸻
+
+I would keep these exactly as experimental optional snippets for now. The strongest ones to eventually promote into real partial sections are disable-bluetooth, chrony-enterprise-server, and banner-lockdown. The ones I would leave as placeholders for Ansible later are domain-join, nvidia-driver-install, and chrome-vscode-install.
