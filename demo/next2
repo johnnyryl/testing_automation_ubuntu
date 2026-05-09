@@ -1,0 +1,245 @@
+Yes — there are a few more options worth adding now, but I would avoid adding every possible Kickstart option. The goal should be: add options that are likely to become real profile choices, not options just because Kickstart supports them.
+
+Also, one important thing: since Kickstart syntax and support can differ by RHEL major version, especially RHEL 7 versus RHEL 8/9/10, I would keep the partials simple and use os_major conditionals only where needed. Red Hat keeps separate Kickstart references for RHEL 10 and RHEL 9, and the RHEL 9 docs specifically call out auth/authconfig as deprecated starting with RHEL 8, which is a good example of why we should be careful with cross-version partials.  ￼
+
+The one structural change I would make now
+
+I would split this:
+
+90-security/
+  selinux-enforcing-firewall-ssh.ks.j2
+
+That combines too many different decisions into one file:
+
+selinux
+firewall
+firewall ssh service
+
+Better:
+
+90-selinux/
+  _meta.yml
+  enforcing.ks.j2
+  permissive.ks.j2
+  disabled.ks.j2
+95-firewall/
+  _meta.yml
+  enabled-ssh.ks.j2
+  disabled.ks.j2
+
+Then keep:
+
+100-services/
+  _meta.yml
+  sshd-enabled.ks.j2
+
+That will make the future override-builder much cleaner because someone can choose SELinux mode separately from firewall behavior.
+
+Options I would add now
+
+20-install-mode/
+
+Add:
+
+cmdline.ks.j2
+
+So the folder becomes:
+
+20-install-mode/
+  _meta.yml
+  text.ks.j2
+  graphical.ks.j2
+  cmdline.ks.j2
+
+Use text as your safe default for PXE/server installs. Use graphical for workstation installs. Keep cmdline as an advanced option later.
+
+50-install-source/
+
+Add one extra option:
+
+pxe-baseos-appstream.ks.j2
+
+So:
+
+50-install-source/
+  _meta.yml
+  pxe-extracted-media.ks.j2
+  pxe-baseos-appstream.ks.j2
+
+Your normal/default should stay pxe-extracted-media.ks.j2 because your PXE content generator already serves the extracted ISO tree. The second option is useful later if you want a Kickstart that explicitly points BaseOS and AppStream to separate repo paths. Red Hat documents that Kickstart can install from installation media, ISO, CDN, or a server in the local network, so keeping install source as its own swappable partial makes sense.  ￼
+
+60-locale/
+
+Add:
+
+us-eastern.ks.j2
+us-mountain.ks.j2
+us-pacific.ks.j2
+
+So:
+
+60-locale/
+  _meta.yml
+  us-central.ks.j2
+  us-chicago.ks.j2
+  us-eastern.ks.j2
+  us-mountain.ks.j2
+  us-pacific.ks.j2
+
+I would probably make us-chicago.ks.j2 the default for you/AeroLIT right now, but having the common U.S. choices is useful.
+
+70-network/
+
+Add:
+
+dhcp-specific-device.ks.j2
+static-ip-placeholder.ks.j2
+
+So:
+
+70-network/
+  _meta.yml
+  dhcp-link.ks.j2
+  dhcp-link-with-hostname-prompt.ks.j2
+  dhcp-specific-device.ks.j2
+  static-ip-placeholder.ks.j2
+
+dhcp-link.ks.j2 should remain the default. static-ip-placeholder.ks.j2 should probably be marked experimental or placeholder in _meta.yml until the helper script can ask for IP, gateway, DNS, hostname, and interface.
+
+80-auth/
+
+Add:
+
+root-password-locked.ks.j2
+
+So:
+
+80-auth/
+  _meta.yml
+  root-password.ks.j2
+  root-password-locked.ks.j2
+
+I would not add authselect yet unless we are intentionally building a domain/auth profile. Keep domain join, sudo groups, and realm/authselect out of the base Kickstart for now. That belongs in Ansible later, or in a very specific future workstation/profile partial.
+
+110-storage/
+
+Add:
+
+clearpart-all-autopart-lvm.ks.j2
+clearpart-all-autopart-plain.ks.j2
+
+So:
+
+110-storage/
+  _meta.yml
+  default-lvm.ks.j2
+  small-disk-lvm.ks.j2
+  workstation-dynamic-lvm.ks.j2
+  luks-workstation-dynamic-lvm.ks.j2
+  clearpart-all-autopart-lvm.ks.j2
+  clearpart-all-autopart-plain.ks.j2
+
+This gives you a simple, safe fallback option if the dynamic workstation storage logic becomes too much or breaks. Keep the dynamic ones, but do not make them the only path.
+
+120-packages/
+
+Add:
+
+minimal-plus-tools.ks.j2
+
+So:
+
+120-packages/
+  _meta.yml
+  minimal.ks.j2
+  minimal-plus-tools.ks.j2
+  workstation.ks.j2
+  developer-workstation.ks.j2
+
+minimal-plus-tools can be your practical server baseline with things like bash-completion, vim, curl, wget, tar, rsync, python3, policycoreutils, etc., depending on what you want available immediately after install.
+
+140-post/
+
+Add:
+
+subscription-manager-cleanup-placeholder.ks.j2
+firstboot-marker.ks.j2
+
+So:
+
+140-post/
+  _meta.yml
+  empty.ks.j2
+  workstation-light.ks.j2
+  ansible-handoff-placeholder.ks.j2
+  firstboot-marker.ks.j2
+  subscription-manager-cleanup-placeholder.ks.j2
+
+I would keep post scripts light. The dangerous/site-specific stuff like proxies, AD join, banners, NVIDIA driver install, VS Code/Chrome install, etc., should not go into the generic first version.
+
+Options I would not add yet
+
+I would not add these yet:
+
+domain-join.ks.j2
+ad-sudo-group.ks.j2
+proxy-enterprise.ks.j2
+nvidia-driver-install.ks.j2
+chrome-vscode-install.ks.j2
+banner-lockdown.ks.j2
+disable-bluetooth.ks.j2
+chrony-enterprise-server.ks.j2
+
+Those are real needs, but they are too site-specific for the generic PXE content image. They can become future override examples or AeroLIT workstation profile options, but I would not bake them into the default partial library yet.
+
+Final recommended layout adjustment
+
+I would change your current layout to this before filling the files:
+
+partials/
+  00-rhel-version/
+  10-eula/
+  20-install-mode/
+  30-reboot-behavior/
+  40-firstboot/
+  50-install-source/
+  60-locale/
+  70-network/
+  80-auth/
+  90-selinux/
+  95-firewall/
+  100-services/
+  110-storage/
+  120-packages/
+  130-addons/
+  140-post/
+  150-anaconda-policy/
+
+That is better than keeping 90-security because it avoids one partial doing three different jobs.
+
+My recommendation
+
+Add the extra files now, but mark anything not ready as status: placeholder in _meta.yml. Then the future helper script can hide or warn on placeholders.
+
+For example:
+
+title: Network configuration
+required: true
+selection: one
+default: dhcp-link.ks.j2
+description: Controls how the installed system configures networking during installation.
+options:
+  - file: dhcp-link.ks.j2
+    label: DHCP on active link
+    status: supported
+  - file: dhcp-link-with-hostname-prompt.ks.j2
+    label: DHCP with hostname prompt
+    status: supported
+  - file: dhcp-specific-device.ks.j2
+    label: DHCP on a specific device
+    status: supported
+  - file: static-ip-placeholder.ks.j2
+    label: Static IP
+    status: placeholder
+
+That gives you room to grow without accidentally presenting unfinished choices as production-ready.
