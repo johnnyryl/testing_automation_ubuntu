@@ -1,0 +1,373 @@
+Yep — here is Batch 2, covering:
+
+070-network
+080-auth
+090-selinux
+100-firewall
+110-services
+
+These are still “safe baseline” partials. I’m intentionally keeping the risky/personal extras out of this batch.
+
+⸻
+
+templates/partials/070-network/_meta.yml
+
+title: Network configuration
+order: 70
+required: true
+selection: one
+default: dhcp_link
+description: Configures the primary network connection used during and after installation.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: dhcp_link
+    file: dhcp-link.ks.j2
+    title: DHCP on active link
+    description: Uses DHCP on the first active network link. This is the safest default for PXE labs and most VM installs.
+    recommended: true
+    risk: low
+    warning: ""
+    requires: []
+    conflicts:
+      - dhcp_link_with_hostname_prompt
+      - dhcp_specific_device
+      - static_ip_placeholder
+  - id: dhcp_link_with_hostname_prompt
+    file: dhcp-link-with-hostname-prompt.ks.j2
+    title: DHCP with hostname prompt
+    description: Uses DHCP and asks the installer user to type a hostname during installation.
+    recommended: false
+    risk: medium
+    warning: This requires console interaction and is not fully unattended.
+    requires: []
+    conflicts:
+      - dhcp_link
+      - dhcp_specific_device
+      - static_ip_placeholder
+  - id: dhcp_specific_device
+    file: dhcp-specific-device.ks.j2
+    title: DHCP on a specific network device
+    description: Uses DHCP on a specific interface name, such as ens192.
+    recommended: false
+    risk: medium
+    warning: Interface names can change between hardware, VMs, and OS versions.
+    requires: []
+    conflicts:
+      - dhcp_link
+      - dhcp_link_with_hostname_prompt
+      - static_ip_placeholder
+  - id: static_ip_placeholder
+    file: static-ip-placeholder.ks.j2
+    title: Static IP placeholder
+    description: Shows the format for a static IP Kickstart network line.
+    recommended: false
+    risk: high
+    warning: Do not use this as-is. Replace the placeholder IP, gateway, DNS, hostname, and device values first.
+    requires: []
+    conflicts:
+      - dhcp_link
+      - dhcp_link_with_hostname_prompt
+      - dhcp_specific_device
+notes: DHCP on the active link is the best default because the PXE boot already proved that at least one network path works.
+tags:
+  - required
+  - network
+  - default
+
+templates/partials/070-network/dhcp-link.ks.j2
+
+# Network configuration
+network --bootproto=dhcp --device=link --activate --onboot=on
+
+templates/partials/070-network/dhcp-link-with-hostname-prompt.ks.j2
+
+# Network configuration generated during %pre
+%include /tmp/networkhost.txt
+%pre --interpreter=/bin/bash
+set -o pipefail
+NETWORK_HOST_FILE="/tmp/networkhost.txt"
+INSTALL_TTY="/dev/tty1"
+if [ -e "${INSTALL_TTY}" ]; then
+    exec < "${INSTALL_TTY}" > "${INSTALL_TTY}" 2> "${INSTALL_TTY}"
+fi
+echo
+echo "=========================================="
+echo "AeroLIT hostname prompt"
+echo "=========================================="
+echo
+echo "Enter the short hostname for this machine."
+echo "Do not include the domain name."
+echo
+read -r HOSTNAME_INPUT || HOSTNAME_INPUT=""
+HOSTNAME_INPUT="$(echo "${HOSTNAME_INPUT}" | tr -cd 'A-Za-z0-9-')"
+if [ -z "${HOSTNAME_INPUT}" ]; then
+    HOSTNAME_INPUT="localhost"
+fi
+echo "network --bootproto=dhcp --device=link --activate --onboot=on --hostname=${HOSTNAME_INPUT}" > "${NETWORK_HOST_FILE}"
+%end
+
+templates/partials/070-network/dhcp-specific-device.ks.j2
+
+# Network configuration for a specific device
+network --bootproto=dhcp --device={{ network_device | default('ens192') }} --activate --onboot=on
+
+templates/partials/070-network/static-ip-placeholder.ks.j2
+
+# Static IP placeholder
+# Replace these values before using this option in a real install.
+network --bootproto=static \
+  --device={{ network_device | default('link') }} \
+  --activate \
+  --onboot=on \
+  --ip={{ static_ip | default('192.0.2.50') }} \
+  --netmask={{ static_netmask | default('255.255.255.0') }} \
+  --gateway={{ static_gateway | default('192.0.2.1') }} \
+  --nameserver={{ static_nameserver | default('192.0.2.53') }} \
+  --hostname={{ static_hostname | default('aerolit-placeholder.localdomain') }}
+
+⸻
+
+templates/partials/080-auth/_meta.yml
+
+title: Root account
+order: 80
+required: true
+selection: one
+default: root_password
+description: Configures the root account for the installed system.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: root_password
+    file: root-password.ks.j2
+    title: Set encrypted root password
+    description: Sets the root password using the encrypted hash passed into the PXE content generator.
+    recommended: true
+    risk: medium
+    warning: Replace the default password hash before using this in a real environment.
+    requires: []
+    conflicts:
+      - root_password_locked
+  - id: root_password_locked
+    file: root-password-locked.ks.j2
+    title: Lock root account
+    description: Locks the root account so root cannot be used for direct login.
+    recommended: false
+    risk: high
+    warning: Only use this when another admin user, SSH key, or post-install access method is configured.
+    requires: []
+    conflicts:
+      - root_password
+notes: The generated status and index files should never expose the real root password hash.
+tags:
+  - required
+  - auth
+  - security
+
+templates/partials/080-auth/root-password.ks.j2
+
+# Root password
+rootpw --iscrypted {{ rootpw_hash }}
+
+templates/partials/080-auth/root-password-locked.ks.j2
+
+# Lock root account
+rootpw --lock
+
+⸻
+
+templates/partials/090-selinux/_meta.yml
+
+title: SELinux mode
+order: 90
+required: true
+selection: one
+default: enforcing
+description: Controls the SELinux security mode on the installed system.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: enforcing
+    file: enforcing.ks.j2
+    title: Enforcing
+    description: SELinux policy is enforced. This is the recommended secure default.
+    recommended: true
+    risk: low
+    warning: Some custom software may need proper SELinux labels or policy fixes.
+    requires: []
+    conflicts:
+      - permissive
+      - disabled
+  - id: permissive
+    file: permissive.ks.j2
+    title: Permissive
+    description: SELinux logs policy violations but does not block them.
+    recommended: false
+    risk: medium
+    warning: Useful for troubleshooting, but weaker than enforcing mode.
+    requires: []
+    conflicts:
+      - enforcing
+      - disabled
+  - id: disabled
+    file: disabled.ks.j2
+    title: Disabled
+    description: Disables SELinux.
+    recommended: false
+    risk: high
+    warning: Avoid this unless there is a documented exception.
+    requires: []
+    conflicts:
+      - enforcing
+      - permissive
+notes: Enforcing should be the AeroLIT default because the project is security and compliance minded.
+tags:
+  - required
+  - security
+  - stig
+  - default
+
+templates/partials/090-selinux/enforcing.ks.j2
+
+# SELinux configuration
+selinux --enforcing
+
+templates/partials/090-selinux/permissive.ks.j2
+
+# SELinux configuration
+selinux --permissive
+
+templates/partials/090-selinux/disabled.ks.j2
+
+# SELinux configuration
+selinux --disabled
+
+⸻
+
+templates/partials/100-firewall/_meta.yml
+
+title: Firewall
+order: 100
+required: true
+selection: one
+default: enable_ssh
+description: Configures the local firewall on the installed system.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: enable_ssh
+    file: enable-ssh.ks.j2
+    title: Enable firewall and allow SSH
+    description: Enables the firewall and allows inbound SSH so the system can be managed after installation.
+    recommended: true
+    risk: low
+    warning: Only SSH is opened by default.
+    requires:
+      - sshd_enabled
+    conflicts:
+      - disabled
+  - id: disabled
+    file: disabled.ks.j2
+    title: Disable firewall
+    description: Disables the local firewall.
+    recommended: false
+    risk: high
+    warning: Avoid this unless a separate network security control or exception exists.
+    requires: []
+    conflicts:
+      - enable_ssh
+notes: For PXE-installed systems, allowing SSH is useful because Ansible or other post-install automation usually connects over SSH.
+tags:
+  - required
+  - security
+  - firewall
+  - default
+
+templates/partials/100-firewall/enable-ssh.ks.j2
+
+# Firewall configuration
+firewall --enabled --service=ssh
+
+templates/partials/100-firewall/disabled.ks.j2
+
+# Firewall configuration
+firewall --disabled
+
+⸻
+
+templates/partials/110-services/_meta.yml
+
+title: Services
+order: 110
+required: true
+selection: fixed
+default: sshd_enabled
+description: Enables required system services after installation.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: sshd_enabled
+    file: sshd-enabled.ks.j2
+    title: Enable SSH service
+    description: Enables the SSH daemon so the system can be accessed remotely after installation.
+    recommended: true
+    risk: low
+    warning: Make sure the firewall policy also allows SSH if remote management is required.
+    requires: []
+    conflicts: []
+notes: This pairs with the firewall enable-ssh option.
+tags:
+  - required
+  - services
+  - ssh
+  - default
+
+templates/partials/110-services/sshd-enabled.ks.j2
+
+# Enable required services
+services --enabled=sshd
+
+⸻
+
+That finishes the non-storage system baseline. Next batch should be 120-storage, because that is the highest-risk part and the one most likely to need careful review before we wire everything into the actual templates/ks/*.ks.j2 files.
