@@ -1,0 +1,469 @@
+Start with these. I’m using your current numbered layout and the extra files visible in your screenshot, like cmdline.ks.j2, pxe-baseos-appstream.ks.j2, and the extra timezone options.
+
+Red Hat’s Kickstart docs describe Kickstart files as plain text installer instructions, and the commands used here are standard Kickstart commands: eula, text, graphical, cmdline, firstboot, url, repo, lang, keyboard, timezone, reboot, and shutdown.  ￼
+
+Batch 1 files
+
+templates/partials/000-rhel-version/_meta.yml
+
+title: RHEL version line
+order: 0
+required: true
+selection: fixed
+default: version_line
+description: Adds the Kickstart version header for the detected RHEL major version.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: version_line
+    file: version-line.ks.j2
+    title: RHEL version header
+    description: Writes the #version line using the detected OS major version.
+    recommended: true
+    risk: low
+    warning: ""
+    requires: []
+    conflicts: []
+notes: This is normally included automatically at the top of every generated Kickstart.
+tags:
+  - required
+  - installer
+  - default
+
+templates/partials/000-rhel-version/version-line.ks.j2
+
+#version=RHEL{{ os_major }}
+
+⸻
+
+templates/partials/010-eula/_meta.yml
+
+title: License agreement
+order: 10
+required: true
+selection: fixed
+default: agreed
+description: Accepts the Red Hat Enterprise Linux license agreement during installation.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: agreed
+    file: agreed.ks.j2
+    title: Accept EULA
+    description: Accepts the RHEL End User License Agreement so Initial Setup does not stop the first boot for license acceptance.
+    recommended: true
+    risk: low
+    warning: Only use this when your organization is allowed to accept the RHEL license for the system being installed.
+    requires: []
+    conflicts: []
+notes: This should stay enabled for automated PXE installs.
+tags:
+  - required
+  - installer
+  - default
+
+templates/partials/010-eula/agreed.ks.j2
+
+# License agreement
+eula --agreed
+
+⸻
+
+templates/partials/020-install-mode/_meta.yml
+
+title: Installer mode
+order: 20
+required: true
+selection: one
+default: text
+description: Chooses how the Red Hat installer interface runs during installation.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: text
+    file: text.ks.j2
+    title: Text installer
+    description: Runs the installer in text mode. This is usually best for PXE, VMs, labs, and remote installs.
+    recommended: true
+    risk: low
+    warning: Text mode has fewer interactive screens than graphical mode.
+    requires: []
+    conflicts:
+      - graphical
+      - cmdline
+  - id: graphical
+    file: graphical.ks.j2
+    title: Graphical installer
+    description: Runs the installer in graphical mode. This is more visual but less ideal for headless PXE workflows.
+    recommended: false
+    risk: low
+    warning: Graphical mode may require working graphics, console access, or VNC-style access.
+    requires: []
+    conflicts:
+      - text
+      - cmdline
+  - id: cmdline
+    file: cmdline.ks.j2
+    title: Command line installer
+    description: Runs the installer in the most minimal command-line mode.
+    recommended: false
+    risk: medium
+    warning: Use only for highly automated installs. Missing required Kickstart values can make troubleshooting harder.
+    requires: []
+    conflicts:
+      - text
+      - graphical
+notes: For most AeroLIT PXE profiles, text mode is the safest default.
+tags:
+  - required
+  - installer
+  - default
+
+templates/partials/020-install-mode/text.ks.j2
+
+# Use text install
+text
+
+templates/partials/020-install-mode/graphical.ks.j2
+
+# Use graphical install
+graphical
+
+templates/partials/020-install-mode/cmdline.ks.j2
+
+# Use command line install
+cmdline
+
+⸻
+
+templates/partials/030-reboot-behavior/_meta.yml
+
+title: Reboot behavior
+order: 30
+required: true
+selection: one
+default: reboot
+description: Chooses what the machine does after installation finishes.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: reboot
+    file: reboot.ks.j2
+    title: Reboot after install
+    description: Reboots the machine automatically after installation completes.
+    recommended: true
+    risk: low
+    warning: Make sure PXE boot order will not reinstall the machine in a loop.
+    requires: []
+    conflicts:
+      - shutdown
+  - id: shutdown
+    file: shutdown.ks.j2
+    title: Shut down after install
+    description: Shuts the machine down after installation completes.
+    recommended: false
+    risk: low
+    warning: Useful for golden tests or staged installs, but not ideal when post-install automation expects the machine to come online.
+    requires: []
+    conflicts:
+      - reboot
+notes: Reboot is the better default for PXE workflows that continue into Ansible or other post-install automation.
+tags:
+  - required
+  - installer
+  - default
+
+templates/partials/030-reboot-behavior/reboot.ks.j2
+
+# Reboot after installation
+reboot
+
+templates/partials/030-reboot-behavior/shutdown.ks.j2
+
+# Shut down after installation
+shutdown
+
+⸻
+
+templates/partials/040-firstboot/_meta.yml
+
+title: First boot setup
+order: 40
+required: true
+selection: one
+default: disabled
+description: Controls whether the Initial Setup application runs on first boot.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: disabled
+    file: disabled.ks.j2
+    title: Disable firstboot
+    description: Prevents Initial Setup from stopping the system on first boot.
+    recommended: true
+    risk: low
+    warning: Recommended for fully automated PXE installs.
+    requires: []
+    conflicts:
+      - enabled
+  - id: enabled
+    file: enabled.ks.j2
+    title: Enable firstboot
+    description: Allows Initial Setup to run when the system boots for the first time.
+    recommended: false
+    risk: medium
+    warning: This can pause automation until a user completes setup.
+    requires: []
+    conflicts:
+      - disabled
+notes: Disable firstboot for AeroLIT-managed systems unless there is a specific reason to require manual first-boot setup.
+tags:
+  - required
+  - installer
+  - default
+
+templates/partials/040-firstboot/disabled.ks.j2
+
+# Disable Initial Setup on first boot
+firstboot --disable
+
+templates/partials/040-firstboot/enabled.ks.j2
+
+# Enable Initial Setup on first boot
+firstboot --enable
+
+⸻
+
+templates/partials/050-install-source/_meta.yml
+
+title: Installation source
+order: 50
+required: true
+selection: one
+default: pxe_extracted_media
+description: Tells the installer where to get the RHEL installation content.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: pxe_extracted_media
+    file: pxe-extracted-media.ks.j2
+    title: PXE extracted ISO tree
+    description: Uses the detected AeroLIT PXE HTTP path as the installation source.
+    recommended: true
+    risk: low
+    warning: The matching extracted ISO tree must be served over HTTP and must include the expected boot and repo content.
+    requires: []
+    conflicts:
+      - pxe_baseos_appstream
+  - id: pxe_baseos_appstream
+    file: pxe-baseos-appstream.ks.j2
+    title: PXE BaseOS plus AppStream
+    description: Uses BaseOS as the main install source and AppStream as an additional repository for RHEL 8, 9, and 10 style media.
+    recommended: false
+    risk: medium
+    warning: Use this only when the extracted media has BaseOS and AppStream directories. Do not use for RHEL 7.
+    applies_to:
+      os:
+        - rhel8
+        - rhel9
+        - rhel10
+      profiles:
+        - minimal
+        - small_disk
+        - developer_workstation
+    requires: []
+    conflicts:
+      - pxe_extracted_media
+notes: The default pxe_extracted_media option matches the current AeroLIT generator model because repo_url points to the detected OS HTTP path.
+tags:
+  - required
+  - repository
+  - default
+
+templates/partials/050-install-source/pxe-extracted-media.ks.j2
+
+# Use PXE-served extracted installation media
+url --url="{{ repo_url }}"
+
+templates/partials/050-install-source/pxe-baseos-appstream.ks.j2
+
+# Use PXE-served BaseOS and AppStream repositories
+url --url="{{ repo_url }}/BaseOS"
+repo --name="AppStream" --baseurl="{{ repo_url }}/AppStream"
+
+⸻
+
+templates/partials/060-locale/_meta.yml
+
+title: Locale and timezone
+order: 60
+required: true
+selection: one
+default: us_chicago
+description: Sets the system language, keyboard layout, and timezone.
+applies_to:
+  os:
+    - rhel7
+    - rhel8
+    - rhel9
+    - rhel10
+  profiles:
+    - minimal
+    - small_disk
+    - developer_workstation
+options:
+  - id: us_chicago
+    file: us-chicago.ks.j2
+    title: US English, America/Chicago
+    description: Uses US English, US keyboard layout, and the America/Chicago timezone.
+    recommended: true
+    risk: low
+    warning: ""
+    requires: []
+    conflicts:
+      - us_central
+      - us_eastern
+      - us_mountain
+      - us_pacific
+  - id: us_central
+    file: us-central.ks.j2
+    title: US English, US/Central
+    description: Uses US English, US keyboard layout, and the legacy US/Central timezone alias.
+    recommended: false
+    risk: low
+    warning: America/Chicago is preferred for new templates.
+    requires: []
+    conflicts:
+      - us_chicago
+      - us_eastern
+      - us_mountain
+      - us_pacific
+  - id: us_eastern
+    file: us-eastern.ks.j2
+    title: US English, America/New_York
+    description: Uses US English, US keyboard layout, and the America/New_York timezone.
+    recommended: false
+    risk: low
+    warning: ""
+    requires: []
+    conflicts:
+      - us_chicago
+      - us_central
+      - us_mountain
+      - us_pacific
+  - id: us_mountain
+    file: us-mountain.ks.j2
+    title: US English, America/Denver
+    description: Uses US English, US keyboard layout, and the America/Denver timezone.
+    recommended: false
+    risk: low
+    warning: ""
+    requires: []
+    conflicts:
+      - us_chicago
+      - us_central
+      - us_eastern
+      - us_pacific
+  - id: us_pacific
+    file: us-pacific.ks.j2
+    title: US English, America/Los_Angeles
+    description: Uses US English, US keyboard layout, and the America/Los_Angeles timezone.
+    recommended: false
+    risk: low
+    warning: ""
+    requires: []
+    conflicts:
+      - us_chicago
+      - us_central
+      - us_eastern
+      - us_mountain
+notes: America/Chicago is the recommended default for the Fort Worth / Central Time use case.
+tags:
+  - required
+  - locale
+  - default
+
+templates/partials/060-locale/us-chicago.ks.j2
+
+# System language, keyboard, and timezone
+lang en_US.UTF-8
+keyboard --vckeymap=us --xlayouts='us'
+timezone America/Chicago --utc
+
+templates/partials/060-locale/us-central.ks.j2
+
+# System language, keyboard, and timezone
+lang en_US.UTF-8
+keyboard --vckeymap=us --xlayouts='us'
+timezone US/Central --utc
+
+templates/partials/060-locale/us-eastern.ks.j2
+
+# System language, keyboard, and timezone
+lang en_US.UTF-8
+keyboard --vckeymap=us --xlayouts='us'
+timezone America/New_York --utc
+
+templates/partials/060-locale/us-mountain.ks.j2
+
+# System language, keyboard, and timezone
+lang en_US.UTF-8
+keyboard --vckeymap=us --xlayouts='us'
+timezone America/Denver --utc
+
+templates/partials/060-locale/us-pacific.ks.j2
+
+# System language, keyboard, and timezone
+lang en_US.UTF-8
+keyboard --vckeymap=us --xlayouts='us'
+timezone America/Los_Angeles --utc
+
+That finishes Batch 1. Next I’d do 070-network through 110-services so we get the non-storage system basics done before touching disk layout.
