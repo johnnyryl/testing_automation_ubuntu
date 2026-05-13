@@ -1,0 +1,81 @@
+Yes. Here’s how I would fill it out for you based on what I know about you and AeroLIT.
+
+What you’ve done that made a difference
+
+Built AeroLIT to help teams stop treating secure Linux builds as one-off efforts.
+
+Created repeatable automation for RHEL provisioning, STIG compliance, patching, offline bundles, PXE, and Ansible workflows.
+
+Helped turn scattered scripts, manual processes, and tribal knowledge into reusable platform capabilities.
+
+Why you’re different
+
+I connect Linux administration, security compliance, DevSecOps, offline deployment, and platform engineering into one practical system.
+
+I understand both the technical details and the real-world constraints teams face in restricted or disconnected environments.
+
+I do not just automate tasks — I build repeatable workflows that other teams can trust, operate, and reuse.
+
+List your top 5 skills
+
+1. RHEL/Linux administration and provisioning
+2. Ansible automation and role/collection design
+3. GitLab CI/CD pipeline architecture
+4. STIG, OpenSCAP, SCC, and compliance automation
+5. Offline/disconnected deployment and platform integration
+
+List your top 5 strengths
+
+1. Turning complex problems into practical systems
+2. Connecting tools, teams, and workflows together
+3. Building repeatable processes instead of one-off fixes
+4. Learning quickly and pushing through unclear problems
+5. Thinking like both an engineer and a platform builder
+
+Why clients, customers, teams, or employers choose you
+
+Because I help teams move faster, reduce rework, and trust the systems they deploy.
+
+Because I can take messy infrastructure problems and turn them into repeatable automation.
+
+Because I understand secure Linux environments from provisioning through compliance, patching, validation, and long-term operations.
+
+What you’re currently working on
+
+I’m building AeroLIT, a secure Linux automation platform for provisioning, hardening, patching, validating, and operating RHEL environments.
+
+AeroLIT brings together Ansible, GitLab CI/CD, PXE provisioning, offline bundles, STIG automation, and repeatable deployment workflows.
+
+The goal is to help teams deploy secure Linux systems consistently, even in disconnected or restricted environments.
+
+Your area of specialty or expertise
+
+Secure Linux platform automation.
+
+More specifically: RHEL provisioning, compliance automation, DevSecOps pipelines, offline deployment, and repeatable infrastructure workflows.
+
+3 things you are passionate about
+
+1. Making secure Linux infrastructure easier for teams to build and trust
+2. Turning manual, fragile processes into repeatable automation
+3. Building platforms that help teams move faster without sacrificing security
+
+Something you are learning or want to learn
+
+How to grow AeroLIT from a strong internal automation project into a trusted platform that more teams can adopt.
+
+How to better align RHEL STIG automation, validation tools, and real-world remediation workflows.
+
+How to communicate the value of technical platform work clearly to leadership, experts, and future collaborators.
+
+Strong brand statement from all of this
+
+I build secure Linux automation platforms that help teams move faster and trust their builds.
+
+Stronger AeroLIT version
+
+I created AeroLIT to turn secure RHEL provisioning, compliance, patching, and offline deployment into repeatable platform capabilities.
+
+Best “tell me about yourself” version
+
+I build secure Linux automation platforms that help teams move faster and trust their builds. Right now, I’m doing that through AeroLIT, which brings together RHEL provisioning, STIG compliance, patching, PXE, offline deployment, Ansible, and GitLab workflows into a repeatable platform for secure Linux environments.
