@@ -1,0 +1,38 @@
+echo "README_UPDATER_TOKEN present: $([ -n "${README_UPDATER_TOKEN:-}" ] && echo yes || echo no)"
+echo "RELEASE_TOKEN present: $([ -n "${RELEASE_TOKEN:-}" ] && echo yes || echo no)"
+echo "CI_JOB_TOKEN present: $([ -n "${CI_JOB_TOKEN:-}" ] && echo yes || echo no)"
+echo "Selected auth header: ${TOKEN_HEADER_NAME}"
+
+if [ "${TOKEN_HEADER_NAME}" = "PRIVATE-TOKEN" ]; then
+  echo "Checking PRIVATE-TOKEN identity without printing token..."
+  curl --silent --show-error --fail \
+    --header "PRIVATE-TOKEN: ${TOKEN_HEADER_VALUE}" \
+    "${CI_API_V4_URL}/user" \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print("Token user:", d.get("username"), "|", d.get("name"))' \
+  || echo "PRIVATE-TOKEN failed /api/v4/user check"
+fi
+
+if [ "${TOKEN_HEADER_NAME}" = "PRIVATE-TOKEN" ]; then
+  echo "Checking token metadata..."
+  curl --silent --show-error --fail \
+    --header "PRIVATE-TOKEN: ${TOKEN_HEADER_VALUE}" \
+    "${CI_API_V4_URL}/personal_access_tokens/self" \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print("Token name:", d.get("name")); print("Active:", d.get("active")); print("Revoked:", d.get("revoked")); print("Expires:", d.get("expires_at")); print("Scopes:", ",".join(d.get("scopes", [])))' \
+  || echo "Could not read token metadata"
+fi
+
+ENCODED_PROJECT="$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["README_UPDATER_SOURCE_PROJECT"], safe=""))')"
+ENCODED_FILE="$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["README_UPDATER_SCRIPT_PATH"], safe=""))')"
+ENCODED_REF="$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["README_UPDATER_SOURCE_REF"], safe=""))')"
+
+SCRIPT_URL="https://${CI_SERVER_FQDN}/api/v4/projects/${ENCODED_PROJECT}/repository/files/${ENCODED_FILE}/raw?ref=${ENCODED_REF}"
+
+echo "Testing RELEASE_TOKEN access..."
+curl --silent --show-error --output /dev/null --write-out "RELEASE_TOKEN HTTP %{http_code}\n" \
+  --header "PRIVATE-TOKEN: ${RELEASE_TOKEN}" \
+  "${SCRIPT_URL}"
+
+echo "Testing CI_JOB_TOKEN access..."
+curl --silent --show-error --output /dev/null --write-out "CI_JOB_TOKEN HTTP %{http_code}\n" \
+  --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+  "${SCRIPT_URL}"
