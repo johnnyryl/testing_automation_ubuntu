@@ -1,0 +1,197 @@
+Yes. I’d create one templates/ks/*.ks.j2 per profile, and use small Jinja conditionals where RHEL 7 needs a different include than RHEL 8/9/10.
+
+Big rule: don’t include partials/170-post/empty.ks.j2 when you are also including real post scripts. empty is only for “no post actions.”
+
+Also, since these include sshd-enabled, make sure the selected package partials install openssh-server. Add openssh-clients too if you want the installed system to be able to run the ssh command outbound.
+
+⸻
+
+templates/ks/minimal.ks.j2
+
+{% include "partials/000-rhel-version/version-line.ks.j2" %}
+{% include "partials/010-eula/agreed.ks.j2" %}
+{% include "partials/020-install-mode/text.ks.j2" %}
+{% include "partials/030-reboot-behavior/reboot.ks.j2" %}
+{% include "partials/040-firstboot/firstboot-disabled.ks.j2" %}
+{% if os_major | int >= 8 %}
+{% include "partials/050-install-source/pxe-baseos-appstream.ks.j2" %}
+{% else %}
+{% include "partials/050-install-source/pxe-extracted-media.ks.j2" %}
+{% endif %}
+{% include "partials/060-language-keyboard/us-english.ks.j2" %}
+{% include "partials/070-timezone/us-central.ks.j2" %}
+{% include "partials/080-network/dhcp-link.ks.j2" %}
+{% include "partials/090-auth/root-password.ks.j2" %}
+{% include "partials/100-anaconda-policy/password-policies-default.ks.j2" %}
+{% include "partials/110-selinux/selinux-enforcing.ks.j2" %}
+{% include "partials/120-firewall/firewall-enable-ssh.ks.j2" %}
+{% include "partials/130-services/sshd-enabled.ks.j2" %}
+{% include "partials/140-storage/default-lvm.ks.j2" %}
+{% include "partials/150-packages/packages-minimal.ks.j2" %}
+{% include "partials/160-addons/kdump-enabled.ks.j2" %}
+{% include "partials/170-post/empty.ks.j2" %}
+
+⸻
+
+templates/ks/small-disk.ks.j2
+
+{% include "partials/000-rhel-version/version-line.ks.j2" %}
+{% include "partials/010-eula/agreed.ks.j2" %}
+{% include "partials/020-install-mode/text.ks.j2" %}
+{% include "partials/030-reboot-behavior/reboot.ks.j2" %}
+{% include "partials/040-firstboot/firstboot-disabled.ks.j2" %}
+{% if os_major | int >= 8 %}
+{% include "partials/050-install-source/pxe-baseos-appstream.ks.j2" %}
+{% else %}
+{% include "partials/050-install-source/pxe-extracted-media.ks.j2" %}
+{% endif %}
+{% include "partials/060-language-keyboard/us-english.ks.j2" %}
+{% include "partials/070-timezone/us-central.ks.j2" %}
+{% include "partials/080-network/dhcp-link.ks.j2" %}
+{% include "partials/090-auth/root-password.ks.j2" %}
+{% include "partials/100-anaconda-policy/password-policies-default.ks.j2" %}
+{% include "partials/110-selinux/selinux-enforcing.ks.j2" %}
+{% include "partials/120-firewall/firewall-enable-ssh.ks.j2" %}
+{% include "partials/130-services/sshd-enabled.ks.j2" %}
+{% include "partials/140-storage/small-disk-lvm.ks.j2" %}
+{% include "partials/150-packages/packages-minimal-plus-tools.ks.j2" %}
+{% include "partials/160-addons/kdump-disabled.ks.j2" %}
+{% include "partials/170-post/firstboot-marker.ks.j2" %}
+
+⸻
+
+templates/ks/developer-workstation.ks.j2
+
+For RHEL 8/9/10, this uses your real developer workstation package set. For RHEL 7, it safely falls back to minimal-plus-tools because your workstation/developer package partials are not really RHEL 7-friendly.
+
+{% include "partials/000-rhel-version/version-line.ks.j2" %}
+{% include "partials/010-eula/agreed.ks.j2" %}
+{% include "partials/020-install-mode/text.ks.j2" %}
+{% include "partials/030-reboot-behavior/reboot.ks.j2" %}
+{% include "partials/040-firstboot/firstboot-disabled.ks.j2" %}
+{% if os_major | int >= 8 %}
+{% include "partials/050-install-source/pxe-baseos-appstream.ks.j2" %}
+{% else %}
+{% include "partials/050-install-source/pxe-extracted-media.ks.j2" %}
+{% endif %}
+{% include "partials/060-language-keyboard/us-english.ks.j2" %}
+{% include "partials/070-timezone/us-central.ks.j2" %}
+{% include "partials/080-network/dhcp-link.ks.j2" %}
+{% include "partials/090-auth/root-password.ks.j2" %}
+{% include "partials/100-anaconda-policy/password-policies-default.ks.j2" %}
+{% include "partials/110-selinux/selinux-enforcing.ks.j2" %}
+{% include "partials/120-firewall/firewall-enable-ssh.ks.j2" %}
+{% include "partials/130-services/sshd-enabled.ks.j2" %}
+{% include "partials/140-storage/workstation-dynamic-lvm.ks.j2" %}
+{% if os_major | int >= 8 %}
+{% include "partials/150-packages/packages-developer-workstation.ks.j2" %}
+{% else %}
+{% include "partials/150-packages/packages-minimal-plus-tools.ks.j2" %}
+{% endif %}
+{% include "partials/160-addons/kdump-enabled.ks.j2" %}
+{% include "partials/170-post/firstboot-marker.ks.j2" %}
+{% include "partials/170-post/ansible-handoff-placeholder.ks.j2" %}
+{% if os_major | int >= 8 %}
+{% include "partials/170-post/workstation-light.ks.j2" %}
+{% endif %}
+
+⸻
+
+templates/ks/security-baseline.ks.j2
+
+This is the non-encrypted security-style build: enforcing SELinux, SSH/firewall enabled, password policy, separate LVM layout, minimal-plus tools, kdump, marker, and Ansible handoff.
+
+{% include "partials/000-rhel-version/version-line.ks.j2" %}
+{% include "partials/010-eula/agreed.ks.j2" %}
+{% include "partials/020-install-mode/text.ks.j2" %}
+{% include "partials/030-reboot-behavior/reboot.ks.j2" %}
+{% include "partials/040-firstboot/firstboot-disabled.ks.j2" %}
+{% if os_major | int >= 8 %}
+{% include "partials/050-install-source/pxe-baseos-appstream.ks.j2" %}
+{% else %}
+{% include "partials/050-install-source/pxe-extracted-media.ks.j2" %}
+{% endif %}
+{% include "partials/060-language-keyboard/us-english.ks.j2" %}
+{% include "partials/070-timezone/us-central.ks.j2" %}
+{% include "partials/080-network/dhcp-link.ks.j2" %}
+{% include "partials/090-auth/root-password.ks.j2" %}
+{% include "partials/100-anaconda-policy/password-policies-default.ks.j2" %}
+{% include "partials/110-selinux/selinux-enforcing.ks.j2" %}
+{% include "partials/120-firewall/firewall-enable-ssh.ks.j2" %}
+{% include "partials/130-services/sshd-enabled.ks.j2" %}
+{% include "partials/140-storage/workstation-dynamic-lvm.ks.j2" %}
+{% include "partials/150-packages/packages-minimal-plus-tools.ks.j2" %}
+{% include "partials/160-addons/kdump-enabled.ks.j2" %}
+{% include "partials/170-post/firstboot-marker.ks.j2" %}
+{% include "partials/170-post/ansible-handoff-placeholder.ks.j2" %}
+
+⸻
+
+templates/ks/security-luks.ks.j2
+
+This is the encrypted version. Same baseline idea, but with the LUKS dynamic storage layout.
+
+{% include "partials/000-rhel-version/version-line.ks.j2" %}
+{% include "partials/010-eula/agreed.ks.j2" %}
+{% include "partials/020-install-mode/text.ks.j2" %}
+{% include "partials/030-reboot-behavior/reboot.ks.j2" %}
+{% include "partials/040-firstboot/firstboot-disabled.ks.j2" %}
+{% if os_major | int >= 8 %}
+{% include "partials/050-install-source/pxe-baseos-appstream.ks.j2" %}
+{% else %}
+{% include "partials/050-install-source/pxe-extracted-media.ks.j2" %}
+{% endif %}
+{% include "partials/060-language-keyboard/us-english.ks.j2" %}
+{% include "partials/070-timezone/us-central.ks.j2" %}
+{% include "partials/080-network/dhcp-link.ks.j2" %}
+{% include "partials/090-auth/root-password.ks.j2" %}
+{% include "partials/100-anaconda-policy/password-policies-default.ks.j2" %}
+{% include "partials/110-selinux/selinux-enforcing.ks.j2" %}
+{% include "partials/120-firewall/firewall-enable-ssh.ks.j2" %}
+{% include "partials/130-services/sshd-enabled.ks.j2" %}
+{% include "partials/140-storage/luks-workstation-dynamic-lvm.ks.j2" %}
+{% include "partials/150-packages/packages-minimal-plus-tools.ks.j2" %}
+{% include "partials/160-addons/kdump-enabled.ks.j2" %}
+{% include "partials/170-post/firstboot-marker.ks.j2" %}
+{% include "partials/170-post/ansible-handoff-placeholder.ks.j2" %}
+
+⸻
+
+templates/ks/embedded-edge.ks.j2
+
+For this one I’d keep it small, non-graphical, and low-resource-friendly.
+
+{% include "partials/000-rhel-version/version-line.ks.j2" %}
+{% include "partials/010-eula/agreed.ks.j2" %}
+{% include "partials/020-install-mode/text.ks.j2" %}
+{% include "partials/030-reboot-behavior/reboot.ks.j2" %}
+{% include "partials/040-firstboot/firstboot-disabled.ks.j2" %}
+{% if os_major | int >= 8 %}
+{% include "partials/050-install-source/pxe-baseos-appstream.ks.j2" %}
+{% else %}
+{% include "partials/050-install-source/pxe-extracted-media.ks.j2" %}
+{% endif %}
+{% include "partials/060-language-keyboard/us-english.ks.j2" %}
+{% include "partials/070-timezone/us-central.ks.j2" %}
+{% include "partials/080-network/dhcp-link.ks.j2" %}
+{% include "partials/090-auth/root-password.ks.j2" %}
+{% include "partials/100-anaconda-policy/password-policies-default.ks.j2" %}
+{% include "partials/110-selinux/selinux-enforcing.ks.j2" %}
+{% include "partials/120-firewall/firewall-enable-ssh.ks.j2" %}
+{% include "partials/130-services/sshd-enabled.ks.j2" %}
+{% include "partials/140-storage/small-disk-lvm.ks.j2" %}
+{% include "partials/150-packages/packages-minimal-plus-tools.ks.j2" %}
+{% include "partials/160-addons/kdump-disabled.ks.j2" %}
+{% include "partials/170-post/firstboot-marker.ks.j2" %}
+{% include "partials/170-post/ansible-handoff-placeholder.ks.j2" %}
+
+Then make sure your profile YAML files reference the matching template names:
+
+10-developer-workstation.yml -> developer-workstation.ks.j2
+20-security-baseline.yml     -> security-baseline.ks.j2
+30-security-luks.yml         -> security-luks.ks.j2
+40-embedded-edge.yml         -> embedded-edge.ks.j2
+50-minimal.yml               -> minimal.ks.j2
+60-small-disk.yml            -> small-disk.ks.j2
+
+The RHEL 7 compatibility should mainly be handled by the conditional install-source and package includes. The workstation/developer GUI package sets should stay RHEL 8+ unless you later build a dedicated RHEL 7 workstation package partial.
