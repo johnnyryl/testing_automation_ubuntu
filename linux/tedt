@@ -1,4 +1,22 @@
 
+
+
+
+
+
+echo "DEBUG: rendered override template source:"
+sed -n '1,120p' "${OVERRIDE_ROOT}/templates/ks/rhel8-minimal.ks.j2"
+
+if grep -nE '\{%[[:space:]]*include[[:space:]]+partials/' "${OVERRIDE_ROOT}/templates/ks/rhel8-minimal.ks.j2"; then
+  echo "ERROR: unquoted Jinja include still exists in temporary override template"
+  exit 1
+fi
+
+
+
+
+
+
 #version=RHEL{{ os_major }}
 {% include "partials/000-rhel-version/version-line.ks.j2" %}
 {% include "partials/010-eula/agreed.ks.j2" %}
