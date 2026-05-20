@@ -4,6 +4,27 @@
 
 
 
+
+
+
+
+
+
+
+
+echo "[5/9] Confirm implemented profile boot targets are generated"
+container_sh "
+set -e
+
+grep -Eq 'inst\\.ks=.*security-baseline' '${HTML_ROOT}/boot.ipxe'
+grep -Eq 'inst\\.ks=.*security-luks' '${HTML_ROOT}/boot.ipxe'
+grep -Eq 'inst\\.ks=.*embedded-edge' '${HTML_ROOT}/boot.ipxe'
+"
+
+pass "implemented profile boot targets generated"
+
+
+
 echo "DEBUG: rendered override template source:"
 sed -n '1,120p' "${OVERRIDE_ROOT}/templates/ks/rhel8-minimal.ks.j2"
 
