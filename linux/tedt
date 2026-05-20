@@ -1,0 +1,24 @@
+podman run --rm --entrypoint /bin/bash registry.gitlab.us.lmco.com/lit/containers/pxe-content:test -lc '
+  /usr/local/bin/pxe-content-test all || true
+  STATUS=$(find / -name status.json -print 2>/dev/null | head -n 1)
+  echo "STATUS=$STATUS"
+  python3 - <<PY
+import json
+p = "$STATUS"
+with open(p) as f:
+    data = json.load(f)
+
+def walk(x, path=""):
+    if isinstance(x, dict):
+        if x.get("status") == "warning" or x.get("health") == "warning":
+            print("\\nWARNING AT", path)
+            print(json.dumps(x, indent=2))
+        for k, v in x.items():
+            walk(v, f"{path}.{k}" if path else k)
+    elif isinstance(x, list):
+        for i, v in enumerate(x):
+            walk(v, f"{path}[{i}]")
+
+walk(data)
+PY
+'
