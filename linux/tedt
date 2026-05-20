@@ -40,3 +40,98 @@ podman run --rm --entrypoint /bin/bash registry.gitlab.us.lmco.com/lit/container
   echo "Security LUKS placeholders:"
   grep -n "\${[A-Za-z_][A-Za-z0-9_]*" /tmp/pxe-basic/html/ks/rhel8-security-luks.ks || true
 '
+
+
+
+
+
+
+
+
+
+
+Put that logic in scripts/generate-pxe-content.py, right around the section in your screenshot where these are defined:
+
+UNRESOLVED_JINJA_BLOCK_RE = ...
+UNRESOLVED_JINJA_VARIABLE_RE = ...
+UNRESOLVED_SHELL_PLACEHOLDER_RE = ...
+
+Add this helper right after those regex definitions, around line 1959–1961, before BOOT_ARTIFACT_CHECK_PREFIXES:
+
+def content_without_kickstart_script_blocks(content: str) -> str:
+    kept_lines = []
+    inside_script = False
+    script_section_prefixes = (
+        "%pre",
+        "%post",
+        "%onerror",
+        "%traceback",
+    )
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(script_section_prefixes):
+            inside_script = True
+            kept_lines.append("")
+            continue
+        if inside_script and stripped == "%end":
+            inside_script = False
+            kept_lines.append("")
+            continue
+        if inside_script:
+            kept_lines.append("")
+            continue
+        kept_lines.append(line)
+    return "\n".join(kept_lines)
+
+Then go to the unresolved_checks loop around your screenshot line 2246:
+
+for check_name, pattern, message, status in unresolved_checks:
+    if pattern.search(content):
+        results.append(
+            validation_result(
+                ...
+            )
+        )
+
+Change it to this:
+
+for check_name, pattern, message, status in unresolved_checks:
+    check_content = content
+    if check_name == "unresolved_shell_placeholder":
+        check_content = content_without_kickstart_script_blocks(content)
+    if pattern.search(check_content):
+        results.append(
+            validation_result(
+                check_id=f"{check_name}:{kickstart_name}",
+                status=status,
+                message=f"Generated Kickstart {kickstart_name} {message}.",
+                path=str(path),
+                http_path=f"/ks/{kickstart_name}",
+            )
+        )
+    else:
+        results.append(
+            validation_result(
+                check_id=f"{check_name}:{kickstart_name}",
+                status="ok",
+                message=f"Generated Kickstart {kickstart_name} passed check {check_name}.",
+                path=str(path),
+                http_path=f"/ks/{kickstart_name}",
+            )
+        )
+
+The important part is this:
+
+if check_name == "unresolved_shell_placeholder":
+    check_content = content_without_kickstart_script_blocks(content)
+
+That means:
+
+${PRIMARY_DISK}
+${PART_CONFIG}
+${LUKS_PASSPHRASE}
+${DISK_LINES[0]}
+
+inside %pre, %post, %onerror, etc. will no longer be treated as suspicious.
+
+But this still keeps the check active outside script blocks, which is what you want. It would still catch a bad leftover placeholder somewhere in normal Kickstart syntax.
