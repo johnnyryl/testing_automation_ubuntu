@@ -22,3 +22,21 @@ def walk(x, path=""):
 walk(data)
 PY
 '
+
+
+
+podman run --rm --entrypoint /bin/bash registry.gitlab.us.lmco.com/lit/containers/pxe-content:test -lc '
+  /usr/local/bin/pxe-content-test all || true
+
+  echo
+  echo "Developer workstation placeholders:"
+  grep -n "\${[A-Za-z_][A-Za-z0-9_]*" /tmp/pxe-basic/html/ks/rhel8-developer-workstation.ks || true
+
+  echo
+  echo "Security baseline placeholders:"
+  grep -n "\${[A-Za-z_][A-Za-z0-9_]*" /tmp/pxe-basic/html/ks/rhel8-security-baseline.ks || true
+
+  echo
+  echo "Security LUKS placeholders:"
+  grep -n "\${[A-Za-z_][A-Za-z0-9_]*" /tmp/pxe-basic/html/ks/rhel8-security-luks.ks || true
+'
