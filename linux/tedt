@@ -1,3 +1,30 @@
+
+#version=RHEL{{ os_major }}
+{% include "partials/000-rhel-version/version-line.ks.j2" %}
+{% include "partials/010-eula/agreed.ks.j2" %}
+{% include "partials/020-install-mode/text.ks.j2" %}
+{% include "partials/030-reboot-behavior/reboot.ks.j2" %}
+{% include "partials/040-firstboot/firstboot-disabled.ks.j2" %}
+{% include "partials/050-install-source/pxe-baseos-appstream.ks.j2" %}
+
+{% include "partials/060-language-keyboard/us-english.ks.j2" %}
+{% include "partials/070-timezone/us-central.ks.j2" %}
+{% include "partials/080-network/dhcp-link.ks.j2" %}
+{% include "partials/090-auth/root-password.ks.j2" %}
+{% include "partials/100-anaconda-policy/password-policies-default.ks.j2" %}
+{% include "partials/110-selinux/selinux-enforcing.ks.j2" %}
+{% include "partials/120-firewall/firewall-enable-ssh.ks.j2" %}
+{% include "partials/130-services/sshd-enabled.ks.j2" %}
+{% include "partials/140-storage/default-lvm.ks.j2" %}
+{% include "partials/150-packages/packages-minimal.ks.j2" %}
+{% include "partials/160-addons/kdump-enabled.ks.j2" %}
+{% include "partials/170-post/empty.ks.j2" %}
+
+
+
+
+
+
 podman run --rm --entrypoint /bin/bash registry.gitlab.us.lmco.com/lit/containers/pxe-content:test -lc '
   /usr/local/bin/pxe-content-test all || true
   STATUS=$(find / -name status.json -print 2>/dev/null | head -n 1)
