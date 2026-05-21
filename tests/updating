@@ -1,4 +1,38 @@
 
+aerolitctl configure server \
+  --dry-run \
+  --mode full \
+  --interface ens160 \
+  --server-ip 192.168.98.141 \
+  --network 192.168.98.0/24 \
+  --dhcp-start 192.168.98.150 \
+  --dhcp-end 192.168.98.200 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.98.0/24 \
+  --target-mount-path /home/unix/sysadmin
+
+
+
+aerolitctl configure server \
+  --mode full \
+  --interface ens160 \
+  --server-ip 192.168.98.141 \
+  --network 192.168.98.0/24 \
+  --dhcp-start 192.168.98.150 \
+  --dhcp-end 192.168.98.200 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.98.0/24 \
+  --target-mount-path /home/unix/sysadmin
+
+
+
+
+
+
+
+
 python3 - <<'PY'
 from aerolitctl.server import run_configure_server
 
