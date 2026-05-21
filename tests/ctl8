@@ -1,0 +1,1085 @@
+"""Default paths for aerolitctl."""
+from pathlib import Path
+
+
+DEFAULT_BUNDLE_PATH = Path("/opt/aerolit/aerolit-bundle")
+
+CONFIG_DIR = Path("/etc/aerolit")
+CONFIG_FILE = CONFIG_DIR / "aerolitctl.yml"
+
+OVERRIDES_DIR = CONFIG_DIR / "overrides"
+OVERRIDE_KICKSTARTS_DIR = OVERRIDES_DIR / "kickstarts"
+
+STATE_DIR = Path("/var/lib/aerolit")
+STATE_FILE = STATE_DIR / "state.yml"
+RENDERED_DIR = STATE_DIR / "rendered"
+BACKUP_DIR = STATE_DIR / "backups"
+
+LOG_DIR = Path("/var/log/aerolit")
+
+
+def required_control_directories():
+    """Return non-bundle directories required by aerolitctl."""
+    return [
+        CONFIG_DIR,
+        OVERRIDES_DIR,
+        OVERRIDE_KICKSTARTS_DIR,
+        STATE_DIR,
+        RENDERED_DIR,
+        BACKUP_DIR,
+        LOG_DIR,
+    ]
+
+
+def collections_hub_path(bundle_path):
+    """Return collections-hub path for a bundle."""
+    return Path(bundle_path) / "collections-hub"
+
+
+def ansible_dir(bundle_path):
+    """Return active collections-hub Ansible directory."""
+    return collections_hub_path(bundle_path) / "ansible"
+
+
+def templates_dir(bundle_path):
+    """Return collections-hub templates directory."""
+    return collections_hub_path(bundle_path) / "templates"
+
+
+def ansible_cfg_file(bundle_path):
+    """Return active ansible.cfg path."""
+    return ansible_dir(bundle_path) / "ansible.cfg"
+
+
+def ansible_cfg_template_file(bundle_path):
+    """Return ansible.cfg template path."""
+    return ansible_dir(bundle_path) / "ansible_template.cfg"
+
+
+def ansible_inventory_file(bundle_path):
+    """Return active inventory path."""
+    return ansible_dir(bundle_path) / "inventory"
+
+
+def ansible_inventory_template_file(bundle_path):
+    """Return inventory template path."""
+    return ansible_dir(bundle_path) / "inventory_template"
+
+
+def ansible_group_vars_dir(bundle_path):
+    """Return active group_vars directory."""
+    return ansible_dir(bundle_path) / "group_vars"
+
+
+def ansible_group_vars_all_dir(bundle_path):
+    """Return active group_vars/all directory."""
+    return ansible_group_vars_dir(bundle_path) / "all"
+
+
+def ansible_group_vars_template_dir(bundle_path):
+    """Return group_vars template directory."""
+    return ansible_dir(bundle_path) / "group_vars_template"
+
+
+def generated_bootstrap_vars_file(bundle_path):
+    """Return generated bootstrap vars path inside active group_vars/all."""
+    return ansible_group_vars_all_dir(bundle_path) / "aerolit_bootstrap_generated.yml"
+
+
+def sync_preserve_file(bundle_path):
+    """Return collections-hub .sync-preserve path."""
+    return collections_hub_path(bundle_path) / ".sync-preserve"
+
+
+def gitlab_ci_file(bundle_path):
+    """Return collections-hub .gitlab-ci.yml path."""
+    return collections_hub_path(bundle_path) / ".gitlab-ci.yml"
+
+
+def provision_gitlab_template(bundle_path):
+    """Return provision workstation GitLab CI template path."""
+    return templates_dir(bundle_path) / "provision-workstation-config" / "gitlab-ci-template.yml"
+
+
+def scheduled_gitlab_template(bundle_path):
+    """Return scheduled network updater GitLab CI template path."""
+    return templates_dir(bundle_path) / "scheduled-network-updater" / "gitlab-ci-template.yml"
+
+
+def system_update_gitlab_template(bundle_path):
+    """Return system update GitLab CI template path."""
+    return templates_dir(bundle_path) / "system-update" / "gitlab-ci-template.yml"
+
+
+def stig_gitlab_template(bundle_path):
+    """Return STIG compliance GitLab CI template path."""
+    return templates_dir(bundle_path) / "stig-compliance" / "gitlab-ci-template.yml"
+
+
+def initialization_backup_root(bundle_path):
+    """Return collections-hub initialization backup root."""
+    return collections_hub_path(bundle_path) / ".initialization-backups"
+
+
+def bundle_derived_paths(bundle_path):
+    """Return standard paths derived from the bundle root."""
+    bundle_path = Path(bundle_path)
+
+    return {
+        "bundle": str(bundle_path),
+        "collections_hub": str(collections_hub_path(bundle_path)),
+        "repos": str(bundle_path / "repos"),
+        "files": str(bundle_path / "files"),
+        "extracted_isos": str(bundle_path / "extracted_isos"),
+        "bootstrap": str(bundle_path / "bootstrap.sh"),
+        "manifest": str(bundle_path / "aerolit-bundle.yml"),
+        "ansible": str(ansible_dir(bundle_path)),
+        "ansible_cfg": str(ansible_cfg_file(bundle_path)),
+        "ansible_inventory": str(ansible_inventory_file(bundle_path)),
+        "ansible_group_vars": str(ansible_group_vars_dir(bundle_path)),
+        "ansible_group_vars_all": str(ansible_group_vars_all_dir(bundle_path)),
+        "generated_bootstrap_vars": str(generated_bootstrap_vars_file(bundle_path)),
+        "sync_preserve": str(sync_preserve_file(bundle_path)),
+        "gitlab_ci": str(gitlab_ci_file(bundle_path)),
+        "initialization_backups": str(initialization_backup_root(bundle_path)),
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+"""Config creation and YAML helpers for aerolitctl."""
+from pathlib import Path
+
+from . import __version__
+from .compat import yaml_dump, yaml_load
+from .paths import (
+    CONFIG_FILE,
+    LOG_DIR,
+    OVERRIDE_KICKSTARTS_DIR,
+    RENDERED_DIR,
+    STATE_DIR,
+    ansible_cfg_file,
+    ansible_dir,
+    ansible_group_vars_all_dir,
+    ansible_group_vars_dir,
+    ansible_inventory_file,
+    bundle_derived_paths,
+    generated_bootstrap_vars_file,
+    gitlab_ci_file,
+    initialization_backup_root,
+    sync_preserve_file,
+)
+
+
+def default_config(bundle_path):
+    """Build default aerolitctl config."""
+    bundle_path = Path(bundle_path)
+    paths = bundle_derived_paths(bundle_path)
+
+    return {
+        "version": 1,
+        "aerolitctl": {
+            "version": __version__,
+        },
+        "paths": {
+            **paths,
+            "config": str(CONFIG_FILE),
+            "state": str(STATE_DIR),
+            "logs": str(LOG_DIR),
+            "rendered": str(RENDERED_DIR),
+            "override_kickstarts": str(OVERRIDE_KICKSTARTS_DIR),
+        },
+        "server": {
+            "interface": None,
+            "ip_address": None,
+            "prefix": None,
+            "gateway": None,
+            "dns": [],
+            "configure_interface": False,
+            "nfs": {
+                "enabled": True,
+                "export_path": str(bundle_path),
+                "allowed_clients": None,
+            },
+            "pxe_http": {
+                "bind_address": "0.0.0.0",
+                "port": 18080,
+            },
+        },
+        "repos": {
+            "enabled": True,
+            "mode": "local",
+        },
+        "pxe": {
+            "enabled": True,
+            "default_profile": None,
+            "menu_timeout_seconds": 10,
+            "watcher_interval_seconds": 15,
+            "custom_kickstart_dir": str(OVERRIDE_KICKSTARTS_DIR),
+        },
+        "ansible": {
+            "enabled": True,
+            "root": str(ansible_dir(bundle_path)),
+            "config_path": str(ansible_cfg_file(bundle_path)),
+            "inventory_path": str(ansible_inventory_file(bundle_path)),
+            "group_vars_path": str(ansible_group_vars_dir(bundle_path)),
+            "group_vars_all_path": str(ansible_group_vars_all_dir(bundle_path)),
+            "generated_vars_path": str(generated_bootstrap_vars_file(bundle_path)),
+            "playbook_dir": str(ansible_dir(bundle_path)),
+        },
+        "sync": {
+            "preserve_file": str(sync_preserve_file(bundle_path)),
+            "initialization_backup_root": str(initialization_backup_root(bundle_path)),
+        },
+        "ci": {
+            "gitlab_ci_file": str(gitlab_ci_file(bundle_path)),
+        },
+    }
+
+
+def dump_yaml(data):
+    """Return YAML text."""
+    return yaml_dump(data)
+
+
+def load_config(path=CONFIG_FILE):
+    """Load aerolitctl config."""
+    path = Path(path)
+
+    if not path.exists():
+        raise FileNotFoundError(
+            "{} does not exist. Run: aerolitctl configure init".format(path)
+        )
+
+    with path.open("r") as handle:
+        return yaml_load(handle) or {}
+
+
+def config_text(bundle_path):
+    """Return default config YAML text."""
+    return dump_yaml(default_config(bundle_path))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+"""Full AeroLIT initialization workflow."""
+from pathlib import Path
+
+from .config import config_text
+from .files import (
+    InitReport,
+    copy_path,
+    ensure_directory,
+    fragment_without_first_and_last_line,
+    fragment_without_first_line,
+    fragment_without_last_line,
+    timestamp,
+    write_text_file,
+)
+from .paths import (
+    BACKUP_DIR,
+    CONFIG_FILE,
+    DEFAULT_BUNDLE_PATH,
+    STATE_FILE,
+    ansible_cfg_file,
+    ansible_cfg_template_file,
+    ansible_dir,
+    ansible_group_vars_dir,
+    ansible_group_vars_template_dir,
+    ansible_inventory_file,
+    ansible_inventory_template_file,
+    collections_hub_path,
+    generated_bootstrap_vars_file,
+    gitlab_ci_file,
+    initialization_backup_root,
+    provision_gitlab_template,
+    required_control_directories,
+    scheduled_gitlab_template,
+    stig_gitlab_template,
+    sync_preserve_file,
+    system_update_gitlab_template,
+)
+from .state import state_text
+
+
+GENERATED_BOOTSTRAP_VARS_CONTENT = """---
+# Generated AeroLIT bootstrap variables
+# Created by aerolitctl configure init.
+# Later configure commands may update this file.
+aerolit_generated_by: aerolitctl
+aerolit_generated_reason: configure init
+"""
+
+SYNC_PRESERVE_CONTENT = """# Paths listed here are preserved during scheduled sync.
+# These are rsync exclude patterns, not .gitignore syntax.
+# Use exact file paths for files.
+# Use trailing / for directories.
+# Blank lines and lines beginning with # are ignored.
+
+# Core network-specific files
+.gitlab-ci.yml
+ansible/ansible.cfg
+ansible/inventory
+ansible/group_vars/
+
+# Add any additional local-only files or folders below.
+# Examples:
+# ansible/site_local_playbook.yml
+# ansible/network_local/
+# docs/local/
+"""
+
+
+def resolve_bundle_path(bundle_path=None, non_interactive=False):
+    """Resolve bundle path from arg, prompt, or default."""
+    if bundle_path:
+        return Path(bundle_path)
+
+    if non_interactive:
+        return DEFAULT_BUNDLE_PATH
+
+    prompt = "AeroLIT bundle path [{}]: ".format(DEFAULT_BUNDLE_PATH)
+    value = input(prompt).strip()
+
+    if not value:
+        return DEFAULT_BUNDLE_PATH
+
+    return Path(value)
+
+
+def validate_basic_bundle_layout(
+    bundle_path,
+    report,
+    skip_ansible_files=False,
+    skip_ci_file=False,
+):
+    """Validate paths needed for initialization."""
+    bundle_path = Path(bundle_path)
+    collections_hub = collections_hub_path(bundle_path)
+    active_ansible_dir = ansible_dir(bundle_path)
+
+    if not bundle_path.exists():
+        report.add("errors", "Bundle path does not exist: {}".format(bundle_path))
+        return False
+
+    if not collections_hub.exists():
+        report.add(
+            "errors",
+            "collections-hub path does not exist: {}".format(collections_hub),
+        )
+        return False
+
+    if not active_ansible_dir.exists():
+        report.add(
+            "errors",
+            "collections-hub Ansible path does not exist: {}".format(
+                active_ansible_dir
+            ),
+        )
+        return False
+
+    expected_bundle_paths = [
+        bundle_path / "repos",
+        bundle_path / "files",
+        bundle_path / "extracted_isos",
+    ]
+
+    for path in expected_bundle_paths:
+        if not path.exists():
+            report.add("warnings", "Expected bundle path not found: {}".format(path))
+
+    manifest = bundle_path / "aerolit-bundle.yml"
+    if not manifest.exists():
+        report.add("warnings", "Bundle manifest not found yet: {}".format(manifest))
+
+    bootstrap = bundle_path / "bootstrap.sh"
+    if not bootstrap.exists():
+        report.add(
+            "warnings",
+            "Compatibility bootstrap.sh not found: {}".format(bootstrap),
+        )
+
+    if not skip_ansible_files:
+        required_ansible_templates = [
+            ansible_cfg_template_file(bundle_path),
+            ansible_inventory_template_file(bundle_path),
+            ansible_group_vars_template_dir(bundle_path),
+        ]
+
+        for template in required_ansible_templates:
+            if not template.exists():
+                report.add(
+                    "errors",
+                    "Required Ansible template path not found: {}".format(template),
+                )
+
+    if not skip_ci_file:
+        required_ci_templates = [
+            provision_gitlab_template(bundle_path),
+            scheduled_gitlab_template(bundle_path),
+            system_update_gitlab_template(bundle_path),
+            stig_gitlab_template(bundle_path),
+        ]
+
+        for template in required_ci_templates:
+            if not template.exists():
+                report.add(
+                    "errors",
+                    "Required GitLab CI template path not found: {}".format(template),
+                )
+
+    return len(report.errors) == 0
+
+
+def initialize_collections_hub_ansible(
+    bundle_path,
+    report,
+    backup_root,
+    no_backup=False,
+    dry_run=False,
+):
+    """Initialize active collections-hub Ansible files from templates."""
+    collections_hub = collections_hub_path(bundle_path)
+
+    copy_path(
+        ansible_inventory_template_file(bundle_path),
+        ansible_inventory_file(bundle_path),
+        report,
+        overwrite=True,
+        backup=True,
+        dry_run=dry_run,
+        backup_root=backup_root,
+        base_path=collections_hub,
+        no_backup=no_backup,
+    )
+
+    copy_path(
+        ansible_group_vars_template_dir(bundle_path),
+        ansible_group_vars_dir(bundle_path),
+        report,
+        overwrite=True,
+        backup=True,
+        dry_run=dry_run,
+        backup_root=backup_root,
+        base_path=collections_hub,
+        no_backup=no_backup,
+    )
+
+    copy_path(
+        ansible_cfg_template_file(bundle_path),
+        ansible_cfg_file(bundle_path),
+        report,
+        overwrite=True,
+        backup=True,
+        dry_run=dry_run,
+        backup_root=backup_root,
+        base_path=collections_hub,
+        no_backup=no_backup,
+    )
+
+    write_text_file(
+        generated_bootstrap_vars_file(bundle_path),
+        GENERATED_BOOTSTRAP_VARS_CONTENT,
+        report,
+        overwrite=True,
+        backup=True,
+        dry_run=dry_run,
+        backup_root=backup_root,
+        base_path=collections_hub,
+        no_backup=no_backup,
+    )
+
+
+def build_gitlab_ci_content(bundle_path):
+    """Build root .gitlab-ci.yml content from template fragments."""
+    return "".join(
+        [
+            fragment_without_last_line(provision_gitlab_template(bundle_path)),
+            fragment_without_first_and_last_line(scheduled_gitlab_template(bundle_path)),
+            fragment_without_first_and_last_line(
+                system_update_gitlab_template(bundle_path)
+            ),
+            fragment_without_first_line(stig_gitlab_template(bundle_path)),
+        ]
+    )
+
+
+def initialize_gitlab_ci(
+    bundle_path,
+    report,
+    backup_root,
+    no_backup=False,
+    dry_run=False,
+):
+    """Generate collections-hub .gitlab-ci.yml from template fragments."""
+    collections_hub = collections_hub_path(bundle_path)
+    content = build_gitlab_ci_content(bundle_path)
+
+    write_text_file(
+        gitlab_ci_file(bundle_path),
+        content,
+        report,
+        overwrite=True,
+        backup=True,
+        dry_run=dry_run,
+        backup_root=backup_root,
+        base_path=collections_hub,
+        no_backup=no_backup,
+    )
+
+
+def initialize_sync_preserve(
+    bundle_path,
+    report,
+    backup_root,
+    force=False,
+    no_backup=False,
+    dry_run=False,
+):
+    """Create collections-hub .sync-preserve."""
+    collections_hub = collections_hub_path(bundle_path)
+
+    write_text_file(
+        sync_preserve_file(bundle_path),
+        SYNC_PRESERVE_CONTENT,
+        report,
+        overwrite=force,
+        backup=True,
+        dry_run=dry_run,
+        backup_root=backup_root,
+        base_path=collections_hub,
+        no_backup=no_backup,
+    )
+
+
+def run_configure_init(
+    bundle_path=None,
+    force=False,
+    dry_run=False,
+    non_interactive=False,
+    verbose=False,
+    no_backup=False,
+    skip_preserve_file=False,
+    skip_ci_file=False,
+    skip_ansible_files=False,
+):
+    """Run full AeroLIT initialization."""
+    report = InitReport(verbose=verbose)
+
+    resolved_bundle_path = resolve_bundle_path(
+        bundle_path=bundle_path,
+        non_interactive=non_interactive,
+    )
+
+    run_timestamp = timestamp()
+    collections_hub = collections_hub_path(resolved_bundle_path)
+    project_backup_root = initialization_backup_root(resolved_bundle_path) / run_timestamp
+    control_backup_root = BACKUP_DIR / run_timestamp
+
+    print("Initializing AeroLIT environment in: {}".format(collections_hub))
+    print("Backups enabled: {}".format(not no_backup))
+    print("Skip preserve file: {}".format(skip_preserve_file))
+    print("Skip CI file: {}".format(skip_ci_file))
+    print("Skip Ansible files: {}".format(skip_ansible_files))
+    print("")
+
+    for directory in required_control_directories():
+        ensure_directory(directory, report, dry_run=dry_run)
+
+    layout_ok = validate_basic_bundle_layout(
+        resolved_bundle_path,
+        report,
+        skip_ansible_files=skip_ansible_files,
+        skip_ci_file=skip_ci_file,
+    )
+
+    write_text_file(
+        CONFIG_FILE,
+        config_text(resolved_bundle_path),
+        report,
+        overwrite=force,
+        backup=True,
+        dry_run=dry_run,
+        backup_root=control_backup_root,
+        no_backup=no_backup,
+    )
+
+    write_text_file(
+        STATE_FILE,
+        state_text(),
+        report,
+        overwrite=force,
+        backup=True,
+        dry_run=dry_run,
+        backup_root=control_backup_root,
+        no_backup=no_backup,
+    )
+
+    if layout_ok:
+        if skip_ansible_files:
+            report.add("skipped", "Ansible file initialization")
+        else:
+            initialize_collections_hub_ansible(
+                resolved_bundle_path,
+                report,
+                backup_root=project_backup_root,
+                no_backup=no_backup,
+                dry_run=dry_run,
+            )
+
+        if skip_ci_file:
+            report.add("skipped", ".gitlab-ci.yml generation")
+        else:
+            initialize_gitlab_ci(
+                resolved_bundle_path,
+                report,
+                backup_root=project_backup_root,
+                no_backup=no_backup,
+                dry_run=dry_run,
+            )
+
+        if skip_preserve_file:
+            report.add("skipped", ".sync-preserve creation/update")
+        else:
+            initialize_sync_preserve(
+                resolved_bundle_path,
+                report,
+                backup_root=project_backup_root,
+                force=force,
+                no_backup=no_backup,
+                dry_run=dry_run,
+            )
+    else:
+        report.add(
+            "warnings",
+            "Skipping collections-hub initialization because required bundle paths/templates are missing.",
+        )
+
+    print("")
+    print("AeroLIT initialization complete.")
+    print("")
+    print("Configured bundle path:")
+    print("  {}".format(resolved_bundle_path))
+    print("")
+    print("Primary config:")
+    print("  {}".format(CONFIG_FILE))
+    print("")
+    print("Runtime state:")
+    print("  {}".format(STATE_FILE))
+    print("")
+    print("Active Ansible directory:")
+    print("  {}".format(ansible_dir(resolved_bundle_path)))
+    print("")
+    print("Generated bootstrap vars:")
+    print("  {}".format(generated_bootstrap_vars_file(resolved_bundle_path)))
+    print("")
+    print("Preserve manifest:")
+    print("  {}".format(sync_preserve_file(resolved_bundle_path)))
+
+    if no_backup:
+        print("")
+        print("Backup creation was disabled with --no-backup.")
+    else:
+        print("")
+        print("Initialization backups:")
+        print("  {}".format(project_backup_root))
+
+    report.print_summary()
+
+    return 1 if report.errors else 0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+"""Environment diagnostics for aerolitctl."""
+import os
+import shutil
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+from .compat import yaml
+from .config import load_config
+from .paths import (
+    CONFIG_FILE,
+    STATE_FILE,
+    ansible_cfg_file,
+    ansible_dir,
+    ansible_group_vars_dir,
+    ansible_group_vars_template_dir,
+    ansible_inventory_file,
+    ansible_inventory_template_file,
+    collections_hub_path,
+    generated_bootstrap_vars_file,
+    gitlab_ci_file,
+    provision_gitlab_template,
+    scheduled_gitlab_template,
+    stig_gitlab_template,
+    sync_preserve_file,
+    system_update_gitlab_template,
+    templates_dir,
+)
+
+
+class DoctorReport(object):
+    """Collect doctor results."""
+
+    def __init__(self):
+        self.ok = []
+        self.warnings = []
+        self.failures = []
+
+    def add_ok(self, message):
+        self.ok.append(message)
+        print("[OK] {}".format(message))
+
+    def add_warning(self, message):
+        self.warnings.append(message)
+        print("[WARN] {}".format(message))
+
+    def add_failure(self, message):
+        self.failures.append(message)
+        print("[FAIL] {}".format(message))
+
+    def print_summary(self):
+        print("")
+        print("Summary:")
+        print("  OK: {}".format(len(self.ok)))
+        print("  Warnings: {}".format(len(self.warnings)))
+        print("  Failures: {}".format(len(self.failures)))
+
+
+def command_exists(command):
+    """Return True when command is available."""
+    return shutil.which(command) is not None
+
+
+def read_os_release():
+    """Read /etc/os-release into a dict."""
+    values = {}
+
+    try:
+        with open("/etc/os-release", "r") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+
+                key, value = line.split("=", 1)
+                values[key] = value.strip().strip('"')
+    except IOError:
+        pass
+
+    return values
+
+
+def check_command(report, command, required=True):
+    """Check a command exists."""
+    if command_exists(command):
+        report.add_ok("Command available: {}".format(command))
+        return True
+
+    if required:
+        report.add_failure("Required command missing: {}".format(command))
+    else:
+        report.add_warning("Optional command missing: {}".format(command))
+
+    return False
+
+
+def check_path(report, label, path, required=True, directory=False):
+    """Check file or directory path."""
+    path = Path(path)
+
+    if directory:
+        exists = path.is_dir()
+        kind = "directory"
+    else:
+        exists = path.exists()
+        kind = "path"
+
+    if exists:
+        report.add_ok("{} {} found: {}".format(label, kind, path))
+        return True
+
+    if required:
+        report.add_failure("{} {} missing: {}".format(label, kind, path))
+    else:
+        report.add_warning("{} {} not found: {}".format(label, kind, path))
+
+    return False
+
+
+def check_tcp_port_available(report, host, port):
+    """Check whether a TCP port can be bound."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    try:
+        sock.bind((host, int(port)))
+        report.add_ok("TCP port available: {}:{}".format(host, port))
+        return True
+    except socket.error:
+        report.add_warning("TCP port may already be in use: {}:{}".format(host, port))
+        return False
+    finally:
+        sock.close()
+
+
+def check_selinux(report):
+    """Check SELinux status when getenforce exists."""
+    if not command_exists("getenforce"):
+        report.add_warning("SELinux status unknown: getenforce command not found")
+        return
+
+    try:
+        output = subprocess.check_output(
+            ["getenforce"],
+            universal_newlines=True,
+            stderr=subprocess.STDOUT,
+        ).strip()
+    except Exception as exc:
+        report.add_warning("SELinux status check failed: {}".format(exc))
+        return
+
+    if output.lower() == "enforcing":
+        report.add_warning(
+            "SELinux is Enforcing. Some PXE/container bind mounts may require labels or policy adjustments."
+        )
+    else:
+        report.add_ok("SELinux status: {}".format(output))
+
+
+def check_firewalld(report):
+    """Check firewalld status when available."""
+    if not command_exists("systemctl"):
+        report.add_warning("firewalld status unknown: systemctl command not found")
+        return
+
+    try:
+        rc = subprocess.call(
+            ["systemctl", "is-active", "--quiet", "firewalld"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        report.add_warning("firewalld status check failed: {}".format(exc))
+        return
+
+    if rc == 0:
+        report.add_ok("firewalld status: running")
+    else:
+        report.add_warning("firewalld status: not active")
+
+
+def get_bundle_path_from_config(report):
+    """Load configured bundle path."""
+    try:
+        config = load_config()
+    except Exception as exc:
+        report.add_failure("Unable to load config {}: {}".format(CONFIG_FILE, exc))
+        return None, {}
+
+    paths = config.get("paths", {})
+    bundle_path = paths.get("bundle")
+
+    if not bundle_path:
+        report.add_failure("Configured bundle path missing from {}".format(CONFIG_FILE))
+        return None, config
+
+    report.add_ok("Configured bundle path: {}".format(bundle_path))
+    return Path(bundle_path), config
+
+
+def run_doctor(args=None):
+    """Run AeroLIT diagnostics."""
+    report = DoctorReport()
+
+    print("AeroLIT Doctor")
+    print("Running checks...")
+    print("")
+    print("AeroLIT Doctor")
+    print("")
+
+    os_release = read_os_release()
+    pretty_name = os_release.get("PRETTY_NAME")
+
+    if pretty_name:
+        report.add_ok("Operating system: {}".format(pretty_name))
+    else:
+        report.add_warning("Operating system could not be determined from /etc/os-release")
+
+    if os.geteuid() == 0:
+        report.add_ok("Running as root")
+    else:
+        report.add_warning("Not running as root. Some configure/deploy commands may require sudo/root.")
+
+    report.add_ok("Python runtime: {}".format(sys.version.split()[0]))
+
+    if yaml is None:
+        report.add_failure("Python YAML support missing. Install python3-pyyaml.")
+    else:
+        report.add_ok("Python YAML support available")
+
+    check_command(report, "python3", required=True)
+    check_command(report, "dnf", required=False)
+    check_command(report, "yum", required=False)
+    check_command(report, "ansible", required=False)
+    check_command(report, "ansible-playbook", required=False)
+    check_command(report, "podman", required=False)
+    check_command(report, "rsync", required=False)
+
+    check_path(report, "Primary config", CONFIG_FILE, required=True)
+    check_path(report, "Runtime state", STATE_FILE, required=False)
+
+    bundle_path, config = get_bundle_path_from_config(report)
+
+    if bundle_path is not None:
+        collections_hub = collections_hub_path(bundle_path)
+
+        check_path(report, "Bundle root", bundle_path, required=True, directory=True)
+        check_path(report, "collections-hub", collections_hub, required=True, directory=True)
+        check_path(report, "collections-hub Ansible", ansible_dir(bundle_path), required=True, directory=True)
+        check_path(report, "collections-hub templates", templates_dir(bundle_path), required=True, directory=True)
+
+        check_path(report, "Repos directory", bundle_path / "repos", required=False, directory=True)
+        check_path(report, "Files directory", bundle_path / "files", required=False, directory=True)
+        check_path(report, "Extracted ISOs directory", bundle_path / "extracted_isos", required=False, directory=True)
+
+        check_path(report, "Ansible inventory template", ansible_inventory_template_file(bundle_path), required=True)
+        check_path(report, "Ansible group vars template", ansible_group_vars_template_dir(bundle_path), required=True, directory=True)
+        check_path(report, "Ansible config template", ansible_cfg_file(bundle_path).with_name("ansible_template.cfg"), required=True)
+
+        check_path(report, "Provision GitLab CI template", provision_gitlab_template(bundle_path), required=True)
+        check_path(report, "Scheduled updater GitLab CI template", scheduled_gitlab_template(bundle_path), required=True)
+        check_path(report, "System update GitLab CI template", system_update_gitlab_template(bundle_path), required=True)
+        check_path(report, "STIG GitLab CI template", stig_gitlab_template(bundle_path), required=True)
+
+        check_path(report, "Compatibility bootstrap.sh", bundle_path / "bootstrap.sh", required=False)
+        check_path(report, "collections-hub .sync-preserve", sync_preserve_file(bundle_path), required=False)
+        check_path(report, "collections-hub .gitlab-ci.yml", gitlab_ci_file(bundle_path), required=False)
+
+        check_path(report, "Active ansible.cfg", ansible_cfg_file(bundle_path), required=False)
+        check_path(report, "Active inventory", ansible_inventory_file(bundle_path), required=False)
+        check_path(report, "Active group_vars", ansible_group_vars_dir(bundle_path), required=False, directory=True)
+        check_path(report, "Generated bootstrap vars", generated_bootstrap_vars_file(bundle_path), required=False)
+
+        manifest = bundle_path / "aerolit-bundle.yml"
+        check_path(report, "Bundle manifest", manifest, required=False)
+
+        server_config = config.get("server", {})
+        pxe_http = server_config.get("pxe_http", {})
+        bind_address = pxe_http.get("bind_address", "0.0.0.0")
+        port = pxe_http.get("port", 18080)
+
+        check_tcp_port_available(report, bind_address, port)
+
+        try:
+            bundle_usage = shutil.disk_usage(str(bundle_path))
+            report.add_ok(
+                "Bundle path free space: {:.1f} GiB free under {}".format(
+                    bundle_usage.free / 1024.0 / 1024.0 / 1024.0,
+                    bundle_path,
+                )
+            )
+        except Exception as exc:
+            report.add_warning("Could not check bundle path free space: {}".format(exc))
+
+    try:
+        state_usage = shutil.disk_usage("/var/lib/aerolit")
+        report.add_ok(
+            "State path free space: {:.1f} GiB free under /var/lib/aerolit".format(
+                state_usage.free / 1024.0 / 1024.0 / 1024.0
+            )
+        )
+    except Exception as exc:
+        report.add_warning("Could not check state path free space: {}".format(exc))
+
+    try:
+        log_usage = shutil.disk_usage("/var/log/aerolit")
+        report.add_ok(
+            "Log path free space: {:.1f} GiB free under /var/log/aerolit".format(
+                log_usage.free / 1024.0 / 1024.0 / 1024.0
+            )
+        )
+    except Exception as exc:
+        report.add_warning("Could not check log path free space: {}".format(exc))
+
+    check_firewalld(report)
+    check_selinux(report)
+
+    report.print_summary()
+
+    return 1 if report.failures elsem 0
+
+
+
+
+
