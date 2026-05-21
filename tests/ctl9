@@ -1,0 +1,1593 @@
+cat > src/aerolitctl/server.py <<'PY'
+"""Server/network/NFS configuration planning for aerolitctl.
+
+This module is the safe "configure" side of the old network helper,
+setup_nfs_bundle.sh, and bootstrap controller NFS/group-vars generation logic.
+
+It does not apply system changes. It does not run nmcli, firewall-cmd,
+systemctl, exportfs, or ansible-playbook.
+"""
+
+import ipaddress
+import shutil
+import subprocess
+from pathlib import Path
+
+from .compat import yaml_dump
+from .config import dump_yaml, get_bundle_path, load_config, save_config
+from .files import backup_existing, timestamp
+from .paths import (
+    CONFIG_FILE,
+    collections_hub_path,
+    generated_bootstrap_vars_file,
+    initialization_backup_root,
+)
+
+
+DEFAULT_MODE = "full"
+DEFAULT_HTTP_PORT = 18080
+DEFAULT_BIND_ADDRESS = "0.0.0.0"
+
+DEFAULT_TARGET_MOUNT_PATH = "/home/unix/sysadmin"
+DEFAULT_MOUNT_MODE = "0755"
+DEFAULT_MOUNT_OWNER = "root"
+DEFAULT_MOUNT_GROUP = "root"
+DEFAULT_NFS_EXPORTS_FILE = "/etc/exports.d/aerolit-bundle.exports"
+
+MIN_RECOMMENDED_USABLE_HOSTS = 20
+
+DANGEROUS_EXPORT_PATHS = (
+    "/",
+    "/root",
+    "/etc",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/boot",
+    "/var",
+    "/var/log",
+)
+
+VIRTUAL_INTERFACE_PREFIXES = (
+    "br",
+    "cni",
+    "docker",
+    "dummy",
+    "flannel",
+    "lo",
+    "podman",
+    "tap",
+    "tun",
+    "veth",
+    "virbr",
+)
+
+
+class ServerConfigReport(object):
+    """Collect configure server actions."""
+
+    def __init__(self, verbose=False):
+        self.verbose = verbose
+        self.created = []
+        self.updated = []
+        self.existing = []
+        self.backed_up = []
+        self.warnings = []
+        self.errors = []
+        self.dry_run = []
+
+    def add(self, category, message):
+        getattr(self, category).append(message)
+
+    def print_summary(self):
+        """Print action summary."""
+        print("")
+        print("AeroLIT server configuration summary")
+        print("")
+
+        sections = [
+            ("Created", self.created),
+            ("Updated", self.updated),
+            ("Already current / skipped", self.existing),
+            ("Backed up", self.backed_up),
+            ("Dry-run actions", self.dry_run),
+            ("Warnings", self.warnings),
+            ("Errors", self.errors),
+        ]
+
+        for title, values in sections:
+            if not values:
+                continue
+
+            print("{}:".format(title))
+            for value in values:
+                print("  - {}".format(value))
+            print("")
+
+
+def run_command(command):
+    """Run a command and return rc, stdout, stderr."""
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+        stdout, stderr = process.communicate()
+        return process.returncode, stdout.strip(), stderr.strip()
+    except OSError as exc:
+        return 127, "", str(exc)
+
+
+def command_exists(command):
+    """Return True if command exists."""
+    return shutil.which(command) is not None
+
+
+def is_probably_virtual_interface(name):
+    """Return True for common virtual/container interfaces."""
+    for prefix in VIRTUAL_INTERFACE_PREFIXES:
+        if name == prefix or name.startswith(prefix):
+            return True
+
+    return False
+
+
+def discover_interfaces():
+    """Discover network interfaces from /sys/class/net."""
+    interfaces = []
+    net_dir = Path("/sys/class/net")
+
+    if not net_dir.exists():
+        return interfaces
+
+    for item in sorted(net_dir.iterdir()):
+        name = item.name
+
+        if name == "lo":
+            continue
+
+        operstate = "unknown"
+        state_path = item / "operstate"
+
+        if state_path.exists():
+            try:
+                operstate = state_path.read_text().strip()
+            except IOError:
+                operstate = "unknown"
+
+        interfaces.append(
+            {
+                "name": name,
+                "state": operstate,
+                "virtual": is_probably_virtual_interface(name),
+            }
+        )
+
+    return interfaces
+
+
+def default_route_interface():
+    """Return default route interface if iproute2 is available."""
+    if not command_exists("ip"):
+        return None
+
+    rc, stdout, stderr = run_command(["ip", "route", "show", "default"])
+    if rc != 0 or not stdout:
+        return None
+
+    for line in stdout.splitlines():
+        parts = line.split()
+        if "dev" in parts:
+            index = parts.index("dev")
+            if index + 1 < len(parts):
+                return parts[index + 1]
+
+    return None
+
+
+def interface_ipv4_network(interface):
+    """Return first IPv4 interface network if discoverable."""
+    if not interface or not command_exists("ip"):
+        return None
+
+    rc, stdout, stderr = run_command(["ip", "-4", "addr", "show", "dev", interface])
+    if rc != 0 or not stdout:
+        return None
+
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("inet "):
+            continue
+
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+
+        try:
+            iface = ipaddress.ip_interface(parts[1])
+            return iface.network
+        except ValueError:
+            continue
+
+    return None
+
+
+def parse_ipv4_address(value, label):
+    """Parse and validate IPv4 address."""
+    try:
+        return ipaddress.IPv4Address(str(value))
+    except ValueError:
+        raise ValueError("{} must be a valid IPv4 address: {}".format(label, value))
+
+
+def parse_ipv4_network(value, label):
+    """Parse and validate IPv4 network."""
+    try:
+        return ipaddress.IPv4Network(str(value), strict=False)
+    except ValueError:
+        raise ValueError("{} must be a valid IPv4 CIDR network: {}".format(label, value))
+
+
+def parse_prefix(value):
+    """Parse CIDR prefix length."""
+    try:
+        prefix = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("Prefix must be a number from 1 to 32")
+
+    if prefix < 1 or prefix > 32:
+        raise ValueError("Prefix must be a number from 1 to 32")
+
+    return prefix
+
+
+def validate_absolute_path(value, label):
+    """Validate absolute path."""
+    if not value:
+        raise ValueError("{} is required".format(label))
+
+    path = Path(value)
+
+    if not path.is_absolute():
+        raise ValueError("{} must be an absolute path: {}".format(label, value))
+
+    return str(path)
+
+
+def normalize_mode(mode):
+    """Normalize configure server mode."""
+    mode = str(mode or DEFAULT_MODE).strip().lower()
+
+    if mode in ("1", "full"):
+        return "full"
+
+    if mode in ("2", "pxe", "pxe-only", "pxe_only"):
+        return "pxe"
+
+    if mode in ("3", "controller", "nfs", "controller-nfs", "controller_nfs"):
+        return "controller"
+
+    raise ValueError("Mode must be one of: full, pxe, controller")
+
+
+def parse_dns_servers(value):
+    """Parse comma-separated DNS server list."""
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        raw_values = value
+    else:
+        raw_values = str(value).replace(" ", ",").split(",")
+
+    dns_servers = []
+    seen = set()
+
+    for raw in raw_values:
+        raw = str(raw).strip()
+        if not raw:
+            continue
+
+        ip = str(parse_ipv4_address(raw, "DNS server"))
+        if ip not in seen:
+            dns_servers.append(ip)
+            seen.add(ip)
+
+    return dns_servers
+
+
+def parse_clients(value, allow_all_clients=False):
+    """Parse NFS allowed clients value."""
+    if allow_all_clients:
+        return "*"
+
+    if not value:
+        raise ValueError(
+            "NFS allowed clients is required unless allow_all_clients is true"
+        )
+
+    value = str(value).strip()
+
+    if value in ("*", "all", "ALL"):
+        raise ValueError(
+            "Use allow_all_clients=true instead of allowed_clients={}".format(value)
+        )
+
+    if value == "0.0.0.0/0":
+        raise ValueError(
+            "Refusing 0.0.0.0/0 unless allow_all_clients is explicitly true"
+        )
+
+    if "/" in value:
+        parse_ipv4_network(value, "NFS allowed clients")
+        return value
+
+    parse_ipv4_address(value, "NFS allowed client")
+    return value
+
+
+def gateway_value(value, network=None, server_ip=None):
+    """Normalize and validate gateway value."""
+    if value is None:
+        return None
+
+    value = str(value).strip()
+
+    if value.lower() in ("", "none", "no", "false", "null"):
+        return None
+
+    gateway = parse_ipv4_address(value, "Gateway")
+
+    if server_ip is not None and gateway == server_ip:
+        raise ValueError("Gateway cannot be the same as the server IP")
+
+    if network is not None and gateway not in network:
+        raise ValueError("Gateway must be inside the selected network")
+
+    return str(gateway)
+
+
+def validate_dhcp_range(start, end, network, server_ip=None, gateway=None):
+    """Validate DHCP range."""
+    if not start and not end:
+        return None, None
+
+    if not start or not end:
+        raise ValueError("Both DHCP start and DHCP end are required")
+
+    start_ip = parse_ipv4_address(start, "DHCP start")
+    end_ip = parse_ipv4_address(end, "DHCP end")
+
+    if start_ip not in network:
+        raise ValueError("DHCP start must be inside {}".format(network))
+
+    if end_ip not in network:
+        raise ValueError("DHCP end must be inside {}".format(network))
+
+    if int(start_ip) > int(end_ip):
+        raise ValueError("DHCP start must be less than or equal to DHCP end")
+
+    if server_ip is not None and start_ip <= server_ip <= end_ip:
+        raise ValueError("DHCP range cannot include the server IP")
+
+    if gateway is not None and gateway != "none":
+        gateway_ip = parse_ipv4_address(gateway, "Gateway")
+        if start_ip <= gateway_ip <= end_ip:
+            raise ValueError("DHCP range cannot include the gateway IP")
+
+    return str(start_ip), str(end_ip)
+
+
+def network_usable_host_count(network):
+    """Return usable host count without expanding huge networks."""
+    if network.version != 4:
+        return 0
+
+    if network.prefixlen >= 31:
+        return 0
+
+    return max(int(network.num_addresses) - 2, 0)
+
+
+def suggested_dhcp_range(network, server_ip=None, gateway=None):
+    """Suggest DHCP range inside a network without expanding huge networks."""
+    usable_hosts = network_usable_host_count(network)
+
+    if usable_hosts < MIN_RECOMMENDED_USABLE_HOSTS:
+        return None, None
+
+    first_host = int(network.network_address) + 1
+    last_host = int(network.broadcast_address) - 1
+
+    excluded = set()
+
+    if server_ip is not None:
+        excluded.add(int(server_ip))
+
+    if gateway is not None:
+        try:
+            excluded.add(int(parse_ipv4_address(gateway, "Gateway")))
+        except ValueError:
+            pass
+
+    start_int = min(first_host + 99, last_host)
+    while start_int in excluded and start_int < last_host:
+        start_int += 1
+
+    end_int = min(start_int + 99, last_host)
+    while end_int in excluded and end_int > start_int:
+        end_int -= 1
+
+    if start_int > end_int:
+        return None, None
+
+    return str(ipaddress.IPv4Address(start_int)), str(ipaddress.IPv4Address(end_int))
+
+
+def collect_plan_warnings(plan):
+    """Return warnings for risky or unusual server plan choices."""
+    warnings = []
+
+    network_value = plan.get("network")
+    if network_value:
+        network = parse_ipv4_network(network_value, "Provisioning network")
+
+        if not network.is_private:
+            warnings.append(
+                "Provisioning network {} is not RFC1918/private. "
+                "AeroLIT PXE/provisioning networks should usually be isolated/private.".format(
+                    network
+                )
+            )
+
+        usable_hosts = network_usable_host_count(network)
+        if usable_hosts < MIN_RECOMMENDED_USABLE_HOSTS:
+            warnings.append(
+                "Provisioning network {} has only {} usable hosts. "
+                "PXE/DHCP lab networks usually need more space.".format(
+                    network,
+                    usable_hosts,
+                )
+            )
+
+    nfs = plan.get("nfs", {})
+    export_path = nfs.get("export_path")
+
+    if export_path:
+        export_path_obj = Path(export_path)
+
+        if export_path_obj == Path("/"):
+            warnings.append("Exporting / over NFS is unsafe and should not be used.")
+        else:
+            for dangerous in DANGEROUS_EXPORT_PATHS:
+                dangerous_path = Path(dangerous)
+
+                if dangerous_path == Path("/"):
+                    continue
+
+                if export_path_obj == dangerous_path or dangerous_path in export_path_obj.parents:
+                    warnings.append(
+                        "NFS export path {} is under a sensitive system path ({}). "
+                        "Use a dedicated bundle path such as /opt/aerolit/aerolit-bundle.".format(
+                            export_path,
+                            dangerous,
+                        )
+                    )
+                    break
+
+        if not export_path_obj.exists() and not nfs.get("create_export_path", False):
+            warnings.append(
+                "NFS export path {} does not exist, and create_export_path is false. "
+                "A later deploy step may fail unless the path is created first.".format(
+                    export_path
+                )
+            )
+
+    if nfs.get("allow_all_clients", False):
+        warnings.append(
+            "NFS allow_all_clients is enabled. This should only be used in isolated labs."
+        )
+
+    interface = plan.get("interface")
+    if interface and is_probably_virtual_interface(interface):
+        warnings.append(
+            "Interface {} looks like a virtual/container interface.".format(interface)
+        )
+
+    return warnings
+
+
+def yes_no_prompt(prompt, default=False):
+    """Ask a yes/no question."""
+    suffix = "[Y/n]" if default else "[y/N]"
+
+    while True:
+        value = input("{} {} ".format(prompt, suffix)).strip().lower()
+
+        if not value:
+            return default
+
+        if value in ("y", "yes"):
+            return True
+
+        if value in ("n", "no"):
+            return False
+
+        print("Please answer yes or no.")
+
+
+def text_prompt(prompt, default=None, allow_empty=False):
+    """Ask for text input."""
+    if default is None:
+        rendered = "{}: ".format(prompt)
+    else:
+        rendered = "{} [{}]: ".format(prompt, default)
+
+    while True:
+        value = input(rendered).strip()
+
+        if value:
+            return value
+
+        if default is not None:
+            return default
+
+        if allow_empty:
+            return ""
+
+        print("A value is required.")
+
+
+def choose_mode(current=None):
+    """Prompt for configuration mode."""
+    default = current or DEFAULT_MODE
+
+    print("")
+    print("AeroLIT server configuration mode")
+    print("  1) full         PXE server + Ansible controller/NFS")
+    print("  2) pxe          PXE server only")
+    print("  3) controller   Ansible controller/NFS only")
+    print("")
+
+    while True:
+        value = text_prompt("Select mode", default=default)
+
+        try:
+            return normalize_mode(value)
+        except ValueError:
+            print("Choose full, pxe, or controller.")
+
+
+def choose_interface(current=None):
+    """Prompt for interface."""
+    interfaces = discover_interfaces()
+    default_iface = current or default_route_interface()
+
+    print("")
+    print("Detected network interfaces:")
+
+    if interfaces:
+        for idx, iface in enumerate(interfaces, 1):
+            flags = []
+            if iface.get("name") == default_iface:
+                flags.append("default-route")
+            if iface.get("virtual"):
+                flags.append("likely-virtual")
+            flags.append("state={}".format(iface.get("state", "unknown")))
+            print("  {}) {} ({})".format(idx, iface.get("name"), ", ".join(flags)))
+    else:
+        print("  No interfaces detected from /sys/class/net.")
+
+    print("")
+    print("Use the interface connected to the PXE/provisioning network.")
+    print("Avoid docker/podman/virbr/veth/container bridge interfaces.")
+
+    while True:
+        value = text_prompt("Provisioning interface", default=default_iface)
+
+        if value:
+            for iface in interfaces:
+                if iface.get("name") == value and iface.get("virtual"):
+                    if not yes_no_prompt(
+                        "Interface {} looks virtual. Use it anyway?".format(value),
+                        default=False,
+                    ):
+                        value = None
+                    break
+
+        if value:
+            return value
+
+
+def choose_network(current_network=None, interface=None):
+    """Prompt for provisioning network."""
+    detected_network = interface_ipv4_network(interface)
+
+    print("")
+    print("Provisioning network")
+    print("  1) Plan an isolated lab/provisioning subnet")
+    print("  2) Use the current interface subnet")
+    print("  3) Enter a custom subnet")
+    print("")
+
+    default_choice = "1"
+
+    if current_network:
+        default_choice = str(current_network)
+    elif detected_network:
+        default_choice = "2"
+
+    while True:
+        choice = text_prompt("Select network option", default=default_choice)
+
+        if choice == "1":
+            value = text_prompt("Lab/provisioning subnet", default="192.168.98.0/24")
+            return parse_ipv4_network(value, "Provisioning network")
+
+        if choice == "2":
+            if not detected_network:
+                print("No IPv4 network detected for interface {}.".format(interface))
+                continue
+            return detected_network
+
+        if choice == "3" or "/" in choice:
+            value = choice if "/" in choice else text_prompt("Custom subnet")
+            return parse_ipv4_network(value, "Provisioning network")
+
+        try:
+            return parse_ipv4_network(choice, "Provisioning network")
+        except ValueError:
+            print("Choose 1, 2, 3, or enter a CIDR network like 192.168.98.0/24.")
+
+
+def choose_server_ip(current=None, network=None):
+    """Prompt for server IP."""
+    default = current
+
+    if not default and network is not None:
+        hosts = list(network.hosts())
+        if hosts:
+            default = str(hosts[10] if len(hosts) > 10 else hosts[0])
+
+    while True:
+        value = text_prompt("AeroLIT server IP", default=default)
+        ip = parse_ipv4_address(value, "AeroLIT server IP")
+
+        if network is not None and ip not in network:
+            print("Server IP must be inside {}.".format(network))
+            continue
+
+        return str(ip)
+
+
+def choose_gateway(current=None, network=None, server_ip=None):
+    """Prompt for gateway."""
+    default = current
+    if default is None:
+        default = "none"
+
+    while True:
+        value = text_prompt("Gateway IP or 'none'", default=default)
+        try:
+            return gateway_value(value, network=network, server_ip=server_ip)
+        except ValueError as exc:
+            print(str(exc))
+
+
+def choose_dns(current=None):
+    """Prompt for DNS servers."""
+    if current:
+        default = ",".join(current)
+    else:
+        default = ""
+
+    while True:
+        value = text_prompt(
+            "DNS servers comma-separated or blank",
+            default=default,
+            allow_empty=True,
+        )
+        try:
+            return parse_dns_servers(value)
+        except ValueError as exc:
+            print(str(exc))
+
+
+def choose_dhcp_range(
+    current_start=None,
+    current_end=None,
+    network=None,
+    server_ip=None,
+    gateway=None,
+):
+    """Prompt for DHCP range."""
+    suggested_start, suggested_end = suggested_dhcp_range(
+        network,
+        server_ip=server_ip,
+        gateway=gateway,
+    )
+
+    default_start = current_start or suggested_start
+    default_end = current_end or suggested_end
+
+    print("")
+    print("PXE DHCP range")
+    print("Use a range inside the provisioning network that does not include")
+    print("the server IP or gateway.")
+
+    while True:
+        start = text_prompt("DHCP start", default=default_start)
+        end = text_prompt("DHCP end", default=default_end)
+
+        try:
+            return validate_dhcp_range(
+                start,
+                end,
+                network,
+                server_ip=server_ip,
+                gateway=gateway,
+            )
+        except ValueError as exc:
+            print(str(exc))
+
+
+def choose_nfs_settings(config, bundle_path, server_ip, network):
+    """Prompt for NFS settings."""
+    server = config.get("server", {})
+    current_nfs = server.get("nfs", {})
+
+    print("")
+    print("NFS/controller settings")
+
+    nfs_enabled = yes_no_prompt(
+        "Enable NFS/controller settings?",
+        default=current_nfs.get("enabled", True),
+    )
+
+    if not nfs_enabled:
+        return {
+            "enabled": False,
+            "server_ip": server_ip,
+            "export_path": str(bundle_path),
+            "allowed_clients": None,
+            "allow_all_clients": False,
+            "create_export_path": False,
+            "exports_file": current_nfs.get("exports_file") or DEFAULT_NFS_EXPORTS_FILE,
+            "target_mount_path": DEFAULT_TARGET_MOUNT_PATH,
+            "mount_mode": DEFAULT_MOUNT_MODE,
+            "mount_owner": DEFAULT_MOUNT_OWNER,
+            "mount_group": DEFAULT_MOUNT_GROUP,
+        }
+
+    export_path = text_prompt(
+        "NFS export path",
+        default=current_nfs.get("export_path") or str(bundle_path),
+    )
+    export_path = validate_absolute_path(export_path, "NFS export path")
+
+    create_export_path = yes_no_prompt(
+        "Allow deploy step to create export path if missing?",
+        default=current_nfs.get("create_export_path", False),
+    )
+
+    exports_file = text_prompt(
+        "NFS exports file for later deploy",
+        default=current_nfs.get("exports_file") or DEFAULT_NFS_EXPORTS_FILE,
+    )
+    exports_file = validate_absolute_path(exports_file, "NFS exports file")
+
+    allow_all_clients = yes_no_prompt(
+        "Allow all NFS clients? This is not recommended.",
+        default=current_nfs.get("allow_all_clients", False),
+    )
+
+    default_clients = current_nfs.get("allowed_clients")
+    if not default_clients and network is not None:
+        default_clients = str(network)
+
+    if allow_all_clients:
+        allowed_clients = "*"
+    else:
+        while True:
+            value = text_prompt("NFS allowed clients IP/CIDR", default=default_clients)
+            try:
+                allowed_clients = parse_clients(
+                    value,
+                    allow_all_clients=allow_all_clients,
+                )
+                break
+            except ValueError as exc:
+                print(str(exc))
+
+    target_mount_path = text_prompt(
+        "Target/client mount path for Ansible",
+        default=current_nfs.get("target_mount_path") or DEFAULT_TARGET_MOUNT_PATH,
+    )
+    target_mount_path = validate_absolute_path(
+        target_mount_path,
+        "Target/client mount path",
+    )
+
+    mount_mode = text_prompt(
+        "Target/client mount directory mode",
+        default=current_nfs.get("mount_mode") or DEFAULT_MOUNT_MODE,
+    )
+
+    mount_owner = text_prompt(
+        "Target/client mount owner",
+        default=current_nfs.get("mount_owner") or DEFAULT_MOUNT_OWNER,
+    )
+
+    mount_group = text_prompt(
+        "Target/client mount group",
+        default=current_nfs.get("mount_group") or DEFAULT_MOUNT_GROUP,
+    )
+
+    return {
+        "enabled": True,
+        "server_ip": server_ip,
+        "export_path": export_path,
+        "allowed_clients": allowed_clients,
+        "allow_all_clients": allow_all_clients,
+        "create_export_path": create_export_path,
+        "exports_file": exports_file,
+        "target_mount_path": target_mount_path,
+        "mount_mode": mount_mode,
+        "mount_owner": mount_owner,
+        "mount_group": mount_group,
+    }
+
+
+def build_firewall_intent(plan, manage=True):
+    """Build firewall intent for later deploy without applying it."""
+    services = []
+    ports = []
+
+    if plan.get("controller_enabled") and plan.get("nfs", {}).get("enabled", False):
+        services.extend(["nfs", "mountd", "rpc-bind"])
+
+    if plan.get("pxe_enabled"):
+        ports.append("{}/tcp".format(plan.get("pxe_http_port", DEFAULT_HTTP_PORT)))
+
+    return {
+        "manage": bool(manage),
+        "services": services,
+        "ports": ports,
+    }
+
+
+def current_server_config(config):
+    """Return server config dict with defaults."""
+    server = config.setdefault("server", {})
+    server.setdefault("interface", None)
+    server.setdefault("ip_address", None)
+    server.setdefault("prefix", None)
+    server.setdefault("gateway", None)
+    server.setdefault("dns", [])
+    server.setdefault("configure_interface", False)
+    server.setdefault("mode", DEFAULT_MODE)
+
+    server.setdefault(
+        "pxe_http",
+        {
+            "bind_address": DEFAULT_BIND_ADDRESS,
+            "port": DEFAULT_HTTP_PORT,
+        },
+    )
+
+    server.setdefault(
+        "firewall",
+        {
+            "manage": True,
+            "services": [],
+            "ports": [],
+        },
+    )
+
+    server.setdefault(
+        "nfs",
+        {
+            "enabled": True,
+            "server_ip": None,
+            "export_path": None,
+            "allowed_clients": None,
+            "allow_all_clients": False,
+            "create_export_path": False,
+            "exports_file": DEFAULT_NFS_EXPORTS_FILE,
+            "target_mount_path": DEFAULT_TARGET_MOUNT_PATH,
+            "mount_mode": DEFAULT_MOUNT_MODE,
+            "mount_owner": DEFAULT_MOUNT_OWNER,
+            "mount_group": DEFAULT_MOUNT_GROUP,
+        },
+    )
+
+    return server
+
+
+def update_config_with_plan(config, plan):
+    """Update aerolitctl config with server plan."""
+    server = current_server_config(config)
+
+    server["mode"] = plan["mode"]
+    server["interface"] = plan["interface"]
+    server["ip_address"] = plan["server_ip"]
+    server["prefix"] = plan["prefix"]
+    server["gateway"] = plan["gateway"]
+    server["dns"] = plan["dns_servers"]
+    server["configure_interface"] = plan["configure_interface"]
+
+    server["pxe_http"] = {
+        "bind_address": plan["pxe_http_bind_address"],
+        "port": plan["pxe_http_port"],
+    }
+
+    server["nfs"] = plan["nfs"]
+    server["firewall"] = plan["firewall"]
+
+    pxe = config.setdefault("pxe", {})
+    pxe["enabled"] = plan["pxe_enabled"]
+    pxe["interface"] = plan["interface"]
+    pxe["server_ip"] = plan["server_ip"]
+    pxe["dhcp_start"] = plan.get("dhcp_start")
+    pxe["dhcp_end"] = plan.get("dhcp_end")
+    pxe["dhcp_netmask"] = plan.get("dhcp_netmask")
+    pxe["gateway"] = plan.get("gateway")
+    pxe["dns_servers"] = plan.get("dns_servers", [])
+
+    return config
+
+
+def build_generated_vars(plan):
+    """Build generated Ansible vars using existing AeroLIT conventions."""
+    nfs = plan.get("nfs", {})
+
+    data = {
+        "aerolit_generated_by": "aerolitctl",
+        "aerolit_generated_reason": "configure server",
+        "group_vars_defaults_manage_nfs_mount_defaults": False,
+        "group_vars_defaults_manage_scalar_values": False,
+        "group_vars_defaults_manage_extra_blocks": False,
+        "aerolit_server_mode": plan.get("mode"),
+        "aerolit_server_interface": plan.get("interface"),
+        "aerolit_server_ip_address": plan.get("server_ip"),
+        "aerolit_server_prefix": plan.get("prefix"),
+        "aerolit_server_gateway": plan.get("gateway"),
+        "aerolit_server_dns": plan.get("dns_servers", []),
+        "aerolit_configure_interface": plan.get("configure_interface", False),
+        "pxe_server_ip": plan.get("server_ip"),
+        "pxe_interface": plan.get("interface"),
+        "pxe_http_port": plan.get("pxe_http_port"),
+        "pxe_http_bind_address": plan.get("pxe_http_bind_address"),
+        "pxe_content_host_port": plan.get("pxe_http_port"),
+        "pxe_dhcp_start": plan.get("dhcp_start"),
+        "pxe_dhcp_end": plan.get("dhcp_end"),
+        "pxe_dhcp_netmask": plan.get("dhcp_netmask"),
+        "pxe_gateway": plan.get("gateway"),
+        "pxe_dns_servers": plan.get("dns_servers", []),
+        "aerolit_firewall_manage": plan.get("firewall", {}).get("manage", True),
+        "aerolit_firewall_services": plan.get("firewall", {}).get("services", []),
+        "aerolit_firewall_ports": plan.get("firewall", {}).get("ports", []),
+    }
+
+    if nfs.get("enabled", True):
+        server_ip = nfs.get("server_ip") or plan.get("server_ip")
+        export_path = nfs.get("export_path")
+        target_mount_path = nfs.get("target_mount_path")
+        src = "{}:{}".format(server_ip, export_path)
+
+        data["path_for_ansible"] = target_mount_path
+        data["aerolit_nfs_server_ip"] = server_ip
+        data["aerolit_nfs_export_path"] = export_path
+        data["aerolit_nfs_allowed_clients"] = nfs.get("allowed_clients")
+        data["aerolit_nfs_allow_all_clients"] = bool(
+            nfs.get("allow_all_clients", False)
+        )
+        data["aerolit_nfs_create_export_path"] = bool(
+            nfs.get("create_export_path", False)
+        )
+        data["aerolit_nfs_exports_file"] = (
+            nfs.get("exports_file") or DEFAULT_NFS_EXPORTS_FILE
+        )
+
+        data["aerolit_bootstrap_nfs_mounts"] = [
+            {
+                "path": target_mount_path,
+                "mode": str(nfs.get("mount_mode") or DEFAULT_MOUNT_MODE),
+                "owner": str(nfs.get("mount_owner") or DEFAULT_MOUNT_OWNER),
+                "group": str(nfs.get("mount_group") or DEFAULT_MOUNT_GROUP),
+                "src": src,
+            }
+        ]
+        data["nfs_server_exports"] = [
+            {
+                "path": export_path,
+                "clients": nfs.get("allowed_clients"),
+                "allow_all_clients": bool(nfs.get("allow_all_clients", False)),
+                "create_path": bool(nfs.get("create_export_path", False)),
+                "exports_file": nfs.get("exports_file") or DEFAULT_NFS_EXPORTS_FILE,
+                "options": [
+                    "rw",
+                    "sync",
+                    "no_subtree_check",
+                ],
+            }
+        ]
+    else:
+        data["path_for_ansible"] = DEFAULT_TARGET_MOUNT_PATH
+        data["aerolit_bootstrap_nfs_mounts"] = []
+        data["nfs_server_exports"] = []
+
+    return data
+
+
+def generated_vars_text(plan):
+    """Return generated vars YAML text."""
+    return yaml_dump(build_generated_vars(plan))
+
+
+def write_text_if_changed(
+    path,
+    content,
+    report,
+    backup_root=None,
+    base_path=None,
+    dry_run=False,
+):
+    """Write file only if content changed."""
+    path = Path(path)
+    old_content = None
+
+    if path.exists():
+        try:
+            old_content = path.read_text()
+        except IOError:
+            old_content = None
+
+    if old_content == content:
+        report.add("existing", "{} unchanged".format(path))
+        return False
+
+    if dry_run:
+        action = "Would update" if path.exists() else "Would create"
+        report.add("dry_run", "{} {}".format(action, path))
+        return True
+
+    if path.exists():
+        backup_existing(
+            path,
+            report,
+            dry_run=False,
+            backup_root=backup_root,
+            base_path=base_path,
+            no_backup=False,
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+
+    if old_content is None:
+        report.add("created", str(path))
+    else:
+        report.add("updated", str(path))
+
+    return True
+
+
+def save_config_if_changed(config, report, dry_run=False):
+    """Save /etc/aerolit/aerolitctl.yml only when content changes."""
+    path = Path(CONFIG_FILE)
+    new_content = dump_yaml(config)
+
+    old_content = None
+    if path.exists():
+        try:
+            old_content = path.read_text()
+        except IOError:
+            old_content = None
+
+    if old_content == new_content:
+        report.add("existing", "{} unchanged".format(path))
+        return None
+
+    if dry_run:
+        action = "Would update" if path.exists() else "Would create"
+        report.add("dry_run", "{} {}".format(action, path))
+        return None
+
+    backup_path = save_config(config, backup=True)
+
+    if backup_path:
+        report.add("backed_up", "{} -> {}".format(path, backup_path))
+        report.add("updated", str(path))
+    else:
+        report.add("created", str(path))
+
+    return backup_path
+
+
+def build_plan_from_values(
+    config,
+    bundle_path,
+    mode=None,
+    interface=None,
+    server_ip=None,
+    network=None,
+    prefix=None,
+    gateway=None,
+    dns_servers=None,
+    dhcp_start=None,
+    dhcp_end=None,
+    pxe_http_port=None,
+    pxe_http_bind_address=None,
+    configure_interface=None,
+    nfs_enabled=None,
+    nfs_export_path=None,
+    nfs_allowed_clients=None,
+    nfs_allow_all_clients=None,
+    nfs_create_export_path=None,
+    nfs_exports_file=None,
+    target_mount_path=None,
+    mount_mode=None,
+    mount_owner=None,
+    mount_group=None,
+    firewall_manage=None,
+):
+    """Build and validate a non-interactive server plan."""
+    server = current_server_config(config)
+    current_nfs = server.get("nfs", {})
+    current_firewall = server.get("firewall", {})
+
+    if configure_interface is None:
+        configure_interface = server.get("configure_interface", False)
+
+    if nfs_enabled is None:
+        nfs_enabled = current_nfs.get("enabled", True)
+
+    if nfs_allow_all_clients is None:
+        nfs_allow_all_clients = current_nfs.get("allow_all_clients", False)
+
+    if nfs_create_export_path is None:
+        nfs_create_export_path = current_nfs.get("create_export_path", False)
+
+    if firewall_manage is None:
+        firewall_manage = current_firewall.get("manage", True)
+
+    mode = normalize_mode(mode or server.get("mode") or DEFAULT_MODE)
+
+    pxe_enabled = mode in ("full", "pxe")
+    controller_enabled = mode in ("full", "controller")
+
+    interface = interface or server.get("interface") or default_route_interface()
+
+    if not interface:
+        raise ValueError("Interface is required")
+
+    if network:
+        network_obj = parse_ipv4_network(network, "Provisioning network")
+    else:
+        detected_network = interface_ipv4_network(interface)
+        if detected_network is not None:
+            network_obj = detected_network
+        elif prefix and server_ip:
+            network_obj = parse_ipv4_network(
+                "{}/{}".format(server_ip, prefix),
+                "Provisioning network",
+            )
+        else:
+            network_obj = parse_ipv4_network("192.168.98.0/24", "Provisioning network")
+
+    server_ip = server_ip or server.get("ip_address")
+
+    if not server_ip:
+        usable_hosts = network_usable_host_count(network_obj)
+        if usable_hosts < 1:
+            raise ValueError("Provisioning network has no usable host addresses")
+
+        server_ip_int = int(network_obj.network_address) + min(10, usable_hosts)
+        server_ip = str(ipaddress.IPv4Address(server_ip_int))
+
+    server_ip_obj = parse_ipv4_address(server_ip, "AeroLIT server IP")
+
+    if server_ip_obj not in network_obj:
+        raise ValueError("AeroLIT server IP must be inside {}".format(network_obj))
+
+    prefix = prefix or network_obj.prefixlen
+    prefix = parse_prefix(prefix)
+
+    gateway = gateway_value(
+        gateway if gateway is not None else server.get("gateway"),
+        network=network_obj,
+        server_ip=server_ip_obj,
+    )
+
+    dns_servers = parse_dns_servers(
+        dns_servers if dns_servers is not None else server.get("dns", [])
+    )
+
+    if pxe_enabled:
+        dhcp_start, dhcp_end = validate_dhcp_range(
+            dhcp_start or config.get("pxe", {}).get("dhcp_start"),
+            dhcp_end or config.get("pxe", {}).get("dhcp_end"),
+            network_obj,
+            server_ip=server_ip_obj,
+            gateway=gateway,
+        )
+
+        if not dhcp_start or not dhcp_end:
+            dhcp_start, dhcp_end = suggested_dhcp_range(
+                network_obj,
+                server_ip=server_ip_obj,
+                gateway=gateway,
+            )
+    else:
+        dhcp_start = None
+        dhcp_end = None
+
+    nfs = {
+        "enabled": bool(controller_enabled and nfs_enabled),
+        "server_ip": str(server_ip_obj),
+        "export_path": validate_absolute_path(
+            nfs_export_path or current_nfs.get("export_path") or str(bundle_path),
+            "NFS export path",
+        ),
+        "allowed_clients": None,
+        "allow_all_clients": bool(nfs_allow_all_clients),
+        "create_export_path": bool(nfs_create_export_path),
+        "exports_file": validate_absolute_path(
+            nfs_exports_file
+            or current_nfs.get("exports_file")
+            or DEFAULT_NFS_EXPORTS_FILE,
+            "NFS exports file",
+        ),
+        "target_mount_path": validate_absolute_path(
+            target_mount_path
+            or current_nfs.get("target_mount_path")
+            or DEFAULT_TARGET_MOUNT_PATH,
+            "Target/client mount path",
+        ),
+        "mount_mode": mount_mode or current_nfs.get("mount_mode") or DEFAULT_MOUNT_MODE,
+        "mount_owner": mount_owner or current_nfs.get("mount_owner") or DEFAULT_MOUNT_OWNER,
+        "mount_group": mount_group or current_nfs.get("mount_group") or DEFAULT_MOUNT_GROUP,
+    }
+
+    if nfs["enabled"]:
+        default_clients = (
+            nfs_allowed_clients
+            or current_nfs.get("allowed_clients")
+            or str(network_obj)
+        )
+        nfs["allowed_clients"] = parse_clients(
+            default_clients,
+            allow_all_clients=nfs["allow_all_clients"],
+        )
+
+    pxe_http = server.get("pxe_http", {})
+    pxe_http_port = int(pxe_http_port or pxe_http.get("port") or DEFAULT_HTTP_PORT)
+
+    if pxe_http_port < 1 or pxe_http_port > 65535:
+        raise ValueError("PXE HTTP port must be between 1 and 65535")
+
+    pxe_http_bind_address = (
+        pxe_http_bind_address
+        or pxe_http.get("bind_address")
+        or DEFAULT_BIND_ADDRESS
+    )
+
+    if pxe_http_bind_address != "0.0.0.0":
+        parse_ipv4_address(pxe_http_bind_address, "PXE HTTP bind address")
+
+    plan = {
+        "mode": mode,
+        "pxe_enabled": pxe_enabled,
+        "controller_enabled": controller_enabled,
+        "interface": interface,
+        "network": str(network_obj),
+        "server_ip": str(server_ip_obj),
+        "prefix": prefix,
+        "gateway": gateway,
+        "dns_servers": dns_servers,
+        "dhcp_start": dhcp_start,
+        "dhcp_end": dhcp_end,
+        "dhcp_netmask": str(network_obj.netmask),
+        "pxe_http_port": pxe_http_port,
+        "pxe_http_bind_address": pxe_http_bind_address,
+        "configure_interface": bool(configure_interface),
+        "nfs": nfs,
+    }
+
+    plan["firewall"] = build_firewall_intent(plan, manage=firewall_manage)
+
+    return plan
+
+
+def build_guided_plan(config, bundle_path):
+    """Build server plan interactively."""
+    server = current_server_config(config)
+
+    mode = choose_mode(current=server.get("mode"))
+    pxe_enabled = mode in ("full", "pxe")
+    controller_enabled = mode in ("full", "controller")
+
+    interface = choose_interface(current=server.get("interface"))
+    network = choose_network(current_network=None, interface=interface)
+    server_ip = choose_server_ip(current=server.get("ip_address"), network=network)
+    server_ip_obj = parse_ipv4_address(server_ip, "AeroLIT server IP")
+
+    gateway = choose_gateway(
+        current=server.get("gateway"),
+        network=network,
+        server_ip=server_ip_obj,
+    )
+
+    dns_servers = choose_dns(current=server.get("dns", []))
+
+    if pxe_enabled:
+        dhcp_start, dhcp_end = choose_dhcp_range(
+            current_start=config.get("pxe", {}).get("dhcp_start"),
+            current_end=config.get("pxe", {}).get("dhcp_end"),
+            network=network,
+            server_ip=server_ip_obj,
+            gateway=gateway,
+        )
+    else:
+        dhcp_start = None
+        dhcp_end = None
+
+    pxe_http = server.get("pxe_http", {})
+    pxe_http_port = int(
+        text_prompt(
+            "PXE HTTP port",
+            default=pxe_http.get("port", DEFAULT_HTTP_PORT),
+        )
+    )
+
+    pxe_http_bind_address = text_prompt(
+        "PXE HTTP bind address",
+        default=pxe_http.get("bind_address", DEFAULT_BIND_ADDRESS),
+    )
+
+    configure_interface = yes_no_prompt(
+        "Should a later deploy step configure this interface?",
+        default=server.get("configure_interface", False),
+    )
+
+    if controller_enabled:
+        nfs = choose_nfs_settings(config, bundle_path, server_ip, network)
+    else:
+        nfs = {
+            "enabled": False,
+            "server_ip": server_ip,
+            "export_path": str(bundle_path),
+            "allowed_clients": None,
+            "allow_all_clients": False,
+            "create_export_path": False,
+            "exports_file": DEFAULT_NFS_EXPORTS_FILE,
+            "target_mount_path": DEFAULT_TARGET_MOUNT_PATH,
+            "mount_mode": DEFAULT_MOUNT_MODE,
+            "mount_owner": DEFAULT_MOUNT_OWNER,
+            "mount_group": DEFAULT_MOUNT_GROUP,
+        }
+
+    firewall_manage = yes_no_prompt(
+        "Should a later deploy step manage required firewall rules?",
+        default=server.get("firewall", {}).get("manage", True),
+    )
+
+    plan = {
+        "mode": mode,
+        "pxe_enabled": pxe_enabled,
+        "controller_enabled": controller_enabled,
+        "interface": interface,
+        "network": str(network),
+        "server_ip": server_ip,
+        "prefix": network.prefixlen,
+        "gateway": gateway,
+        "dns_servers": dns_servers,
+        "dhcp_start": dhcp_start,
+        "dhcp_end": dhcp_end,
+        "dhcp_netmask": str(network.netmask),
+        "pxe_http_port": pxe_http_port,
+        "pxe_http_bind_address": pxe_http_bind_address,
+        "configure_interface": configure_interface,
+        "nfs": nfs,
+    }
+
+    plan["firewall"] = build_firewall_intent(plan, manage=firewall_manage)
+
+    return plan
+
+
+def print_plan(plan, bundle_path):
+    """Print server plan."""
+    print("")
+    print("AeroLIT server plan")
+    print("")
+    print("Mode: {}".format(plan.get("mode")))
+    print("Bundle path: {}".format(bundle_path))
+    print("")
+    print("Network:")
+    print("  Interface: {}".format(plan.get("interface")))
+    print("  Network: {}".format(plan.get("network")))
+    print("  Server IP: {}".format(plan.get("server_ip")))
+    print("  Prefix: {}".format(plan.get("prefix")))
+    print("  Gateway: {}".format(plan.get("gateway") or "none"))
+    print("  DNS: {}".format(", ".join(plan.get("dns_servers") or []) or "none"))
+    print("  Later deploy configures interface: {}".format(plan.get("configure_interface")))
+    print("")
+    print("PXE:")
+    print("  Enabled: {}".format(plan.get("pxe_enabled")))
+    print("  HTTP bind: {}".format(plan.get("pxe_http_bind_address")))
+    print("  HTTP port: {}".format(plan.get("pxe_http_port")))
+    print("  DHCP start: {}".format(plan.get("dhcp_start")))
+    print("  DHCP end: {}".format(plan.get("dhcp_end")))
+    print("  DHCP netmask: {}".format(plan.get("dhcp_netmask")))
+    print("")
+
+    nfs = plan.get("nfs", {})
+    print("NFS/controller:")
+    print("  Enabled: {}".format(nfs.get("enabled")))
+    print("  Server IP: {}".format(nfs.get("server_ip")))
+    print("  Export path: {}".format(nfs.get("export_path")))
+    print("  Exports file: {}".format(nfs.get("exports_file")))
+    print("  Allowed clients: {}".format(nfs.get("allowed_clients")))
+    print("  Allow all clients: {}".format(nfs.get("allow_all_clients")))
+    print("  Deploy may create export path: {}".format(nfs.get("create_export_path")))
+    print("  Target/client mount path: {}".format(nfs.get("target_mount_path")))
+    print("")
+
+    firewall = plan.get("firewall", {})
+    print("Firewall intent for later deploy:")
+    print("  Manage firewall: {}".format(firewall.get("manage")))
+    print("  Services: {}".format(", ".join(firewall.get("services") or []) or "none"))
+    print("  Ports: {}".format(", ".join(firewall.get("ports") or []) or "none"))
+    print("")
+
+
+def run_configure_server(
+    guided=False,
+    dry_run=False,
+    show=False,
+    mode=None,
+    interface=None,
+    server_ip=None,
+    network=None,
+    prefix=None,
+    gateway=None,
+    dns_servers=None,
+    dhcp_start=None,
+    dhcp_end=None,
+    pxe_http_port=None,
+    pxe_http_bind_address=None,
+    configure_interface=None,
+    nfs_enabled=None,
+    nfs_export_path=None,
+    nfs_allowed_clients=None,
+    nfs_allow_all_clients=None,
+    nfs_create_export_path=None,
+    nfs_exports_file=None,
+    target_mount_path=None,
+    mount_mode=None,
+    mount_owner=None,
+    mount_group=None,
+    firewall_manage=None,
+):
+    """Configure AeroLIT server values and generated Ansible vars."""
+    report = ServerConfigReport()
+
+    config = load_config()
+    bundle_path_value = get_bundle_path(config)
+
+    if not bundle_path_value:
+        raise RuntimeError(
+            "No bundle path is configured. Run: aerolitctl configure init"
+        )
+
+    bundle_path = Path(bundle_path_value)
+    generated_vars_path = generated_bootstrap_vars_file(bundle_path)
+    backup_root = initialization_backup_root(bundle_path) / timestamp()
+    collections_hub = collections_hub_path(bundle_path)
+
+    if show:
+        server = current_server_config(config)
+        plan = build_plan_from_values(
+            config,
+            bundle_path,
+            mode=server.get("mode"),
+            interface=server.get("interface"),
+            server_ip=server.get("ip_address"),
+            prefix=server.get("prefix"),
+            gateway=server.get("gateway"),
+            dns_servers=server.get("dns", []),
+            dhcp_start=config.get("pxe", {}).get("dhcp_start"),
+            dhcp_end=config.get("pxe", {}).get("dhcp_end"),
+            pxe_http_port=server.get("pxe_http", {}).get("port"),
+            pxe_http_bind_address=server.get("pxe_http", {}).get("bind_address"),
+            configure_interface=server.get("configure_interface", False),
+            nfs_enabled=server.get("nfs", {}).get("enabled", True),
+            nfs_export_path=server.get("nfs", {}).get("export_path"),
+            nfs_allowed_clients=server.get("nfs", {}).get("allowed_clients"),
+            nfs_allow_all_clients=server.get("nfs", {}).get("allow_all_clients", False),
+            nfs_create_export_path=server.get("nfs", {}).get(
+                "create_export_path",
+                False,
+            ),
+            nfs_exports_file=server.get("nfs", {}).get("exports_file"),
+            target_mount_path=server.get("nfs", {}).get("target_mount_path"),
+            mount_mode=server.get("nfs", {}).get("mount_mode"),
+            mount_owner=server.get("nfs", {}).get("mount_owner"),
+            mount_group=server.get("nfs", {}).get("mount_group"),
+            firewall_manage=server.get("firewall", {}).get("manage", True),
+        )
+        print_plan(plan, bundle_path)
+        print("Generated vars path:")
+        print("  {}".format(generated_vars_path))
+        return 0
+
+    if guided:
+        plan = build_guided_plan(config, bundle_path)
+    else:
+        plan = build_plan_from_values(
+            config,
+            bundle_path,
+            mode=mode,
+            interface=interface,
+            server_ip=server_ip,
+            network=network,
+            prefix=prefix,
+            gateway=gateway,
+            dns_servers=dns_servers,
+            dhcp_start=dhcp_start,
+            dhcp_end=dhcp_end,
+            pxe_http_port=pxe_http_port,
+            pxe_http_bind_address=pxe_http_bind_address,
+            configure_interface=configure_interface,
+            nfs_enabled=nfs_enabled,
+            nfs_export_path=nfs_export_path,
+            nfs_allowed_clients=nfs_allowed_clients,
+            nfs_allow_all_clients=nfs_allow_all_clients,
+            nfs_create_export_path=nfs_create_export_path,
+            nfs_exports_file=nfs_exports_file,
+            target_mount_path=target_mount_path,
+            mount_mode=mount_mode,
+            mount_owner=mount_owner,
+            mount_group=mount_group,
+            firewall_manage=firewall_manage,
+        )
+
+    print_plan(plan, bundle_path)
+
+    for warning in collect_plan_warnings(plan):
+        report.add("warnings", warning)
+
+    config = update_config_with_plan(config, plan)
+    generated_text = generated_vars_text(plan)
+
+    save_config_if_changed(config, report, dry_run=dry_run)
+
+    write_text_if_changed(
+        generated_vars_path,
+        generated_text,
+        report,
+        backup_root=backup_root,
+        base_path=collections_hub,
+        dry_run=dry_run,
+    )
+
+    print("Generated vars path:")
+    print("  {}".format(generated_vars_path))
+    print("")
+
+    if dry_run:
+        print("Dry run complete. No files were changed.")
+    else:
+        print("Server configuration saved.")
+        print("")
+        print("No system services were changed.")
+        print("A later deploy command will apply network/NFS/PXE service changes.")
+
+    report.print_summary()
+
+    return 1 if report.errors else 0
+PY
