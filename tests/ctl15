@@ -1,0 +1,84 @@
+Nice — then the next step should be locking this slice down before adding more features.
+
+I would do it in this order:
+
+1. Run final sanity tests
+
+From the repo root:
+
+python3 -m py_compile src/aerolitctl/server.py src/aerolitctl/cli.py
+
+Then test the CLI wiring:
+
+aerolitctl configure server --help
+aerolitctl configure server --show
+aerolitctl configure server --dry-run \
+  --mode full \
+  --interface ens160 \
+  --server-ip 192.168.98.141 \
+  --network 192.168.98.0/24 \
+  --dhcp-start 192.168.98.150 \
+  --dhcp-end 192.168.98.200 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.98.0/24 \
+  --target-mount-path /home/unix/sysadmin
+
+Then confirm the real generated file still looks right:
+
+cat /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolit_bootstrap_generated.yml
+
+And config:
+
+cat /etc/aerolit/aerolitctl.yml
+
+2. Commit this as one clean slice
+
+This commit should be something like:
+
+git status
+git diff --stat
+git add src/aerolitctl/server.py src/aerolitctl/cli.py
+git commit -m "Add configure server CLI and guided planning"
+
+Maybe include the path/config/doctor files too if those are part of this same MR:
+
+git add src/aerolitctl/config.py src/aerolitctl/doctor.py src/aerolitctl/initialize.py src/aerolitctl/paths.py src/aerolitctl/server.py src/aerolitctl/cli.py
+git commit -m "Add generated bootstrap vars under group_vars/all"
+
+But I would not mix unrelated future deploy logic into this commit.
+
+3. Next real feature slice
+
+After this, the next logical slice is probably:
+
+aerolitctl deploy server
+
+or whatever command name you want, meaning:
+
+configure server = write safe plan only
+deploy server    = apply the plan
+
+That deploy/apply command would eventually handle the stuff we intentionally did not let configure server do:
+
+nmcli/interface IP setup
+firewalld rules
+NFS package/service/export setup
+PXE HTTP/container/service setup
+maybe restarting/reloading services
+
+So the clean architecture becomes:
+
+aerolitctl configure server
+  writes:
+    /etc/aerolit/aerolitctl.yml
+    collections-hub/ansible/group_vars/all/aerolit_bootstrap_generated.yml
+aerolitctl deploy server
+  reads those values and applies system changes
+
+I would make the next task not “make deploy server perfect.” I would start with a tiny safe skeleton:
+
+aerolitctl deploy server --dry-run
+aerolitctl deploy server --show-plan
+
+Then add one apply area at a time: NFS first, firewall second, interface third, PXE last.
