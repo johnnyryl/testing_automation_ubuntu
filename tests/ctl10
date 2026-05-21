@@ -1,0 +1,359 @@
+Yes — this is the right next slice. For this part, I would touch only src/aerolitctl/cli.py, plus one small backend cleanup in server.py so boolean CLI flags do not accidentally reset saved config when omitted.
+
+1. Small server.py cleanup first
+
+This makes CLI booleans safer.
+
+In run_configure_server(...), change these defaults:
+
+configure_interface=False,
+nfs_enabled=True,
+nfs_allow_all_clients=False,
+nfs_create_export_path=False,
+firewall_manage=True,
+
+to:
+
+configure_interface=None,
+nfs_enabled=None,
+nfs_allow_all_clients=None,
+nfs_create_export_path=None,
+firewall_manage=None,
+
+Then in build_plan_from_values(...), change the same defaults:
+
+configure_interface=False,
+nfs_enabled=True,
+nfs_allow_all_clients=False,
+nfs_create_export_path=False,
+firewall_manage=True,
+
+to:
+
+configure_interface=None,
+nfs_enabled=None,
+nfs_allow_all_clients=None,
+nfs_create_export_path=None,
+firewall_manage=None,
+
+Then inside build_plan_from_values(...), right after this line:
+
+current_nfs = server.get("nfs", {})
+
+add this:
+
+if configure_interface is None:
+    configure_interface = server.get("configure_interface", False)
+if nfs_enabled is None:
+    nfs_enabled = current_nfs.get("enabled", True)
+if nfs_allow_all_clients is None:
+    nfs_allow_all_clients = current_nfs.get("allow_all_clients", False)
+if nfs_create_export_path is None:
+    nfs_create_export_path = current_nfs.get("create_export_path", False)
+if firewall_manage is None:
+    firewall_manage = server.get("firewall", {}).get("manage", True)
+
+That prevents this kind of problem:
+
+aerolitctl configure server --mode full --interface ens160
+
+from accidentally turning off existing configure_interface, NFS, or firewall choices just because you did not pass every flag again.
+
+⸻
+
+2. Add the CLI import
+
+In src/aerolitctl/cli.py, near the other imports, add:
+
+from .server import run_configure_server
+
+If your CLI currently imports command handlers inside functions to avoid startup errors, then do not add it at the top. Instead, add the import inside the configure server dispatch block. But top-level import should be fine now since you already tested server.py imports cleanly.
+
+⸻
+
+3. Add a helper to register the server parser
+
+Somewhere above main(), add this function:
+
+def add_configure_server_parser(configure_subparsers):
+    """Add aerolitctl configure server parser."""
+    server_parser = configure_subparsers.add_parser(
+        "server",
+        help="Configure AeroLIT server, PXE, network, and NFS settings",
+    )
+    server_parser.add_argument(
+        "--guided",
+        action="store_true",
+        help="Walk through server/PXE/NFS configuration interactively",
+    )
+    server_parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Show the current server plan without changing files",
+    )
+    server_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change without writing files",
+    )
+    server_parser.add_argument(
+        "--mode",
+        choices=("full", "pxe", "controller"),
+        help="Configuration mode: full, pxe, or controller",
+    )
+    server_parser.add_argument(
+        "--interface",
+        help="Provisioning/PXE interface, for example ens160",
+    )
+    server_parser.add_argument(
+        "--server-ip",
+        dest="server_ip",
+        help="AeroLIT server IP on the provisioning network",
+    )
+    server_parser.add_argument(
+        "--network",
+        help="Provisioning network CIDR, for example 192.168.98.0/24",
+    )
+    server_parser.add_argument(
+        "--prefix",
+        type=int,
+        help="CIDR prefix length, for example 24",
+    )
+    server_parser.add_argument(
+        "--gateway",
+        help="PXE gateway IP, or 'none'",
+    )
+    server_parser.add_argument(
+        "--dns",
+        dest="dns_servers",
+        help="Comma-separated DNS servers, for example 192.168.98.1,8.8.8.8",
+    )
+    server_parser.add_argument(
+        "--dhcp-start",
+        dest="dhcp_start",
+        help="PXE DHCP range start IP",
+    )
+    server_parser.add_argument(
+        "--dhcp-end",
+        dest="dhcp_end",
+        help="PXE DHCP range end IP",
+    )
+    server_parser.add_argument(
+        "--pxe-http-port",
+        dest="pxe_http_port",
+        type=int,
+        help="PXE HTTP content port",
+    )
+    server_parser.add_argument(
+        "--pxe-http-bind-address",
+        dest="pxe_http_bind_address",
+        help="PXE HTTP bind address, default usually 0.0.0.0",
+    )
+    server_parser.add_argument(
+        "--configure-interface",
+        dest="configure_interface",
+        action="store_true",
+        default=None,
+        help="Store intent for deploy to configure the selected interface",
+    )
+    server_parser.add_argument(
+        "--no-configure-interface",
+        dest="configure_interface",
+        action="store_false",
+        help="Store intent for deploy not to configure the selected interface",
+    )
+    server_parser.add_argument(
+        "--nfs-enabled",
+        dest="nfs_enabled",
+        action="store_true",
+        default=None,
+        help="Enable NFS/controller generated settings",
+    )
+    server_parser.add_argument(
+        "--no-nfs",
+        dest="nfs_enabled",
+        action="store_false",
+        help="Disable NFS/controller generated settings",
+    )
+    server_parser.add_argument(
+        "--nfs-export-path",
+        dest="nfs_export_path",
+        help="Path to export over NFS",
+    )
+    server_parser.add_argument(
+        "--nfs-allow-clients",
+        "--nfs-allowed-clients",
+        dest="nfs_allowed_clients",
+        help="NFS allowed client IP or CIDR, for example 192.168.98.0/24",
+    )
+    server_parser.add_argument(
+        "--nfs-allow-all-clients",
+        dest="nfs_allow_all_clients",
+        action="store_true",
+        default=None,
+        help="Allow all NFS clients. Only use for isolated labs.",
+    )
+    server_parser.add_argument(
+        "--no-nfs-allow-all-clients",
+        dest="nfs_allow_all_clients",
+        action="store_false",
+        help="Disable allow-all NFS clients",
+    )
+    server_parser.add_argument(
+        "--nfs-create-export-path",
+        dest="nfs_create_export_path",
+        action="store_true",
+        default=None,
+        help="Store intent for deploy to create the NFS export path if missing",
+    )
+    server_parser.add_argument(
+        "--no-nfs-create-export-path",
+        dest="nfs_create_export_path",
+        action="store_false",
+        help="Store intent for deploy not to create the NFS export path",
+    )
+    server_parser.add_argument(
+        "--nfs-exports-file",
+        dest="nfs_exports_file",
+        help="NFS exports file path for later deploy",
+    )
+    server_parser.add_argument(
+        "--target-mount-path",
+        dest="target_mount_path",
+        help="Client mount path used by Ansible, for example /home/unix/sysadmin",
+    )
+    server_parser.add_argument(
+        "--mount-mode",
+        dest="mount_mode",
+        help="Client mount directory mode, for example 0755",
+    )
+    server_parser.add_argument(
+        "--mount-owner",
+        dest="mount_owner",
+        help="Client mount directory owner",
+    )
+    server_parser.add_argument(
+        "--mount-group",
+        dest="mount_group",
+        help="Client mount directory group",
+    )
+    server_parser.add_argument(
+        "--firewall-manage",
+        dest="firewall_manage",
+        action="store_true",
+        default=None,
+        help="Store intent for deploy to manage required firewall rules",
+    )
+    server_parser.add_argument(
+        "--no-firewall-manage",
+        dest="firewall_manage",
+        action="store_false",
+        help="Store intent for deploy not to manage firewall rules",
+    )
+    return server_parser
+
+⸻
+
+4. Call that helper where configure subcommands are created
+
+Find where cli.py creates the configure parser/subparsers. It will look roughly like this:
+
+configure_parser = subparsers.add_parser("configure", ...)
+configure_subparsers = configure_parser.add_subparsers(...)
+
+Right after the existing configure init parser is added, add:
+
+add_configure_server_parser(configure_subparsers)
+
+The exact surrounding code might differ, but the placement should be:
+
+configure
+  init
+  server   <-- add here
+
+⸻
+
+5. Add dispatch for configure server
+
+Find the part of main() that handles configure commands. It probably has something like:
+
+if args.command == "configure":
+    if args.configure_command == "init":
+        ...
+
+Add this branch:
+
+    if args.configure_command == "server":
+        return run_configure_server(
+            guided=args.guided,
+            dry_run=args.dry_run,
+            show=args.show,
+            mode=args.mode,
+            interface=args.interface,
+            server_ip=args.server_ip,
+            network=args.network,
+            prefix=args.prefix,
+            gateway=args.gateway,
+            dns_servers=args.dns_servers,
+            dhcp_start=args.dhcp_start,
+            dhcp_end=args.dhcp_end,
+            pxe_http_port=args.pxe_http_port,
+            pxe_http_bind_address=args.pxe_http_bind_address,
+            configure_interface=args.configure_interface,
+            nfs_enabled=args.nfs_enabled,
+            nfs_export_path=args.nfs_export_path,
+            nfs_allowed_clients=args.nfs_allowed_clients,
+            nfs_allow_all_clients=args.nfs_allow_all_clients,
+            nfs_create_export_path=args.nfs_create_export_path,
+            nfs_exports_file=args.nfs_exports_file,
+            target_mount_path=args.target_mount_path,
+            mount_mode=args.mount_mode,
+            mount_owner=args.mount_owner,
+            mount_group=args.mount_group,
+            firewall_manage=args.firewall_manage,
+        )
+
+Make sure this goes before any generic “unknown configure command” handling.
+
+⸻
+
+6. Test it
+
+Run:
+
+python3 -m py_compile src/aerolitctl/server.py src/aerolitctl/cli.py
+
+Then:
+
+aerolitctl configure server --help
+
+Then dry-run:
+
+aerolitctl configure server \
+  --dry-run \
+  --mode full \
+  --interface ens160 \
+  --server-ip 192.168.98.141 \
+  --network 192.168.98.0/24 \
+  --dhcp-start 192.168.98.150 \
+  --dhcp-end 192.168.98.200 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.98.0/24 \
+  --target-mount-path /home/unix/sysadmin
+
+Then real write after the dry-run looks right:
+
+aerolitctl configure server \
+  --mode full \
+  --interface ens160 \
+  --server-ip 192.168.98.141 \
+  --network 192.168.98.0/24 \
+  --dhcp-start 192.168.98.150 \
+  --dhcp-end 192.168.98.200 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.98.0/24 \
+  --target-mount-path /home/unix/sysadmin
+
+That should wire the backend you already tested into the real aerolitctl configure server command.
