@@ -1,3 +1,38 @@
+
+aerolitctl version
+aerolitctl path show
+aerolitctl path set /opt/aerolit/aerolit-bundle
+
+aerolitctl configure init
+aerolitctl configure server
+aerolitctl configure ansible
+aerolitctl configure pxe
+
+aerolitctl generate kickstart
+aerolitctl generate playbook
+
+aerolitctl bundle show
+aerolitctl bundle validate
+aerolitctl doctor
+aerolitctl status
+
+aerolitctl deploy server
+aerolitctl deploy repos
+aerolitctl deploy pxe
+aerolitctl deploy ansible
+aerolitctl deploy all
+
+aerolitctl logs
+aerolitctl backup config
+aerolitctl export answers
+aerolitctl import answers <file>
+
+aerolitctl ui
+
+
+
+
+
 AEROLIT_BUNDLE_ITEMS_FILE="${CI_PROJECT_DIR}/.aerolit_bundle_items.yml"
 AEROLIT_BUNDLE_BUILDER="${CI_PROJECT_DIR}/.aerolit_dynamic_bundle_builder.py"
 export AEROLIT_BUNDLE_ITEMS_FILE
