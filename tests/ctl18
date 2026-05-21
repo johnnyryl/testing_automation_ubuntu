@@ -1,0 +1,90 @@
+Recommended smoke tests for aerolitctl deploy server
+
+1. Syntax check
+python3 -m py_compile src/aerolitctl/server.py src/aerolitctl/deploy_server.py src/aerolitctl/cli.py
+
+2. CLI help wiring
+sudo aerolitctl deploy server --help
+
+Expected:
+- Shows deploy server options
+- Confirms the CLI set_defaults(func=cmd_deploy_server) wiring is working
+
+3. Show current saved plan
+sudo aerolitctl deploy server --show
+
+Expected:
+- Prints AeroLIT deploy server plan
+- Does not change files or services
+- Shows generated vars path
+- Shows PXE enabled/disabled based on saved mode
+- Shows NFS enabled/disabled based on saved mode
+
+4. Full dry run
+sudo aerolitctl deploy server --dry-run
+
+Expected:
+- Does not change files or services
+- Shows interface action if configure_interface is true
+- Shows NFS actions if NFS is enabled
+- Shows firewall actions if firewall.manage is true and firewalld is active
+- Shows ansible-playbook commands for pxe_server.yml and ansible_controller.yml when mode is full
+
+5. Skip everything dry run
+sudo aerolitctl deploy server --dry-run --skip-interface --skip-nfs --skip-firewall --skip-pxe --skip-controller
+
+Expected:
+- No system-change commands
+- Summary lists skipped items
+
+6. PXE-only path
+sudo aerolitctl configure server --guided
+# choose PXE server only
+sudo aerolitctl deploy server --show
+sudo aerolitctl deploy server --dry-run
+
+Expected:
+- PXE enabled is true
+- Controller enabled is false
+- NFS enabled is false
+- PXE playbook would run
+- Controller playbook skipped
+- NFS skipped or disabled
+
+7. Controller-only path
+sudo aerolitctl configure server --guided
+# choose Ansible controller/NFS only
+sudo aerolitctl deploy server --show
+sudo aerolitctl deploy server --dry-run
+
+Expected:
+- PXE enabled is false
+- Controller enabled is true
+- NFS enabled is true
+- NFS actions shown
+- Controller playbook would run
+- PXE playbook skipped
+- PXE DHCP values not required
+
+8. Missing export path safety
+sudo aerolitctl configure server --guided
+# choose an export path that does not exist and answer no to create missing export path
+sudo aerolitctl deploy server --dry-run
+
+Expected:
+- Fails clearly telling you the export path does not exist and to reconfigure or create it manually
+
+9. Generated vars check
+cat /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolit_bootstrap_generated.yml
+
+Expected important keys:
+- pxe_server_ip
+- pxe_interface
+- pxe_dhcp_start
+- pxe_dhcp_end
+- pxe_http_port
+- aerolit_nfs_server_ip
+- aerolit_nfs_export_path
+- aerolit_nfs_allowed_clients
+- aerolit_bootstrap_nfs_mounts
+- nfs_server_exports
