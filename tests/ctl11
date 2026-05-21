@@ -1,0 +1,68 @@
+Correct — do not use that if args.configure_command == "server": ... block in your current cli.py.
+
+Your cli.py is using this pattern:
+
+return args.func(args)
+
+That means each parser/subparser gets its own function through set_defaults(func=...).
+
+So for configure server, use this instead:
+
+1. Keep/add this function
+
+Put it near your other cmd_* functions, before add_configure_server_parser(...):
+
+def cmd_configure_server(args):
+    """Run aerolitctl configure server."""
+    return run_configure_server(
+        guided=args.guided,
+        dry_run=args.dry_run,
+        show=args.show,
+        mode=args.mode,
+        interface=args.interface,
+        server_ip=args.server_ip,
+        network=args.network,
+        prefix=args.prefix,
+        gateway=args.gateway,
+        dns_servers=args.dns_servers,
+        dhcp_start=args.dhcp_start,
+        dhcp_end=args.dhcp_end,
+        pxe_http_port=args.pxe_http_port,
+        pxe_http_bind_address=args.pxe_http_bind_address,
+        configure_interface=args.configure_interface,
+        nfs_enabled=args.nfs_enabled,
+        nfs_export_path=args.nfs_export_path,
+        nfs_allowed_clients=args.nfs_allowed_clients,
+        nfs_allow_all_clients=args.nfs_allow_all_clients,
+        nfs_create_export_path=args.nfs_create_export_path,
+        nfs_exports_file=args.nfs_exports_file,
+        target_mount_path=args.target_mount_path,
+        mount_mode=args.mount_mode,
+        mount_owner=args.mount_owner,
+        mount_group=args.mount_group,
+        firewall_manage=args.firewall_manage,
+    )
+
+2. At the bottom of add_configure_server_parser(...), add:
+
+server_parser.set_defaults(func=cmd_configure_server)
+return server_parser
+
+So the end should look like this:
+
+    server_parser.add_argument(
+        "--no-firewall-manage",
+        dest="firewall_manage",
+        action="store_false",
+        help="Store intent for deploy not to manage firewall rules",
+    )
+    server_parser.set_defaults(func=cmd_configure_server)
+    return server_parser
+
+3. In build_parser(), keep this call:
+
+add_configure_server_parser(configure_subparsers)
+
+Put it after the init_parser.set_defaults(func=cmd_configure_init) section and before the path_parser = ... section.
+
+So no, do not add the if args.configure_command == "server" block. That would be for a different CLI structure than the one your file is using.
