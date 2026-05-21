@@ -1,3 +1,167 @@
+
+cat > src/aerolitctl/compat.py <<'EOF'
+"""Compatibility helpers for older RHEL/Python package versions."""
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+
+def require_yaml():
+    """Fail with a useful message if PyYAML is missing."""
+    if yaml is None:
+        raise RuntimeError(
+            "Missing Python YAML support. Install it with: dnf install -y python3-pyyaml"
+        )
+
+
+def yaml_dump(data):
+    """Return YAML text with compatibility for older PyYAML versions."""
+    require_yaml()
+
+    try:
+        return yaml.safe_dump(
+            data,
+            default_flow_style=False,
+            sort_keys=False,
+        )
+    except TypeError:
+        return yaml.safe_dump(
+            data,
+            default_flow_style=False,
+        )
+
+
+def yaml_load(handle):
+    """Load YAML with a single wrapper so compatibility fixes stay centralized."""
+    require_yaml()
+    return yaml.safe_load(handle)
+EOF
+
+
+
+
+
+
+
+
+
+
+"""Config creation and YAML helpers for aerolitctl."""
+
+from pathlib import Path
+
+from . import __version__
+from .compat import yaml_dump, yaml_load
+from .paths import (
+    ANSIBLE_CFG_FILE,
+    ANSIBLE_GROUP_VARS_FILE,
+    ANSIBLE_INVENTORY_FILE,
+    CONFIG_FILE,
+    GENERATED_BOOTSTRAP_VARS_FILE,
+    LOG_DIR,
+    OVERRIDE_KICKSTARTS_DIR,
+    OVERRIDE_PLAYBOOKS_DIR,
+    RENDERED_DIR,
+    STATE_DIR,
+    bundle_derived_paths,
+)
+
+
+def default_config(bundle_path):
+    """Build default aerolitctl config."""
+    bundle_path = Path(bundle_path)
+    paths = bundle_derived_paths(bundle_path)
+
+    return {
+        "version": 1,
+        "aerolitctl": {
+            "version": __version__,
+        },
+        "paths": {
+            **paths,
+            "config": str(CONFIG_FILE),
+            "state": str(STATE_DIR),
+            "logs": str(LOG_DIR),
+            "rendered": str(RENDERED_DIR),
+            "override_kickstarts": str(OVERRIDE_KICKSTARTS_DIR),
+            "override_playbooks": str(OVERRIDE_PLAYBOOKS_DIR),
+            "generated_bootstrap_vars": str(GENERATED_BOOTSTRAP_VARS_FILE),
+        },
+        "server": {
+            "interface": None,
+            "ip_address": None,
+            "prefix": None,
+            "gateway": None,
+            "dns": [],
+            "configure_interface": False,
+            "nfs": {
+                "enabled": True,
+                "export_path": str(bundle_path),
+                "allowed_clients": None,
+            },
+            "pxe_http": {
+                "bind_address": "0.0.0.0",
+                "port": 18080,
+            },
+        },
+        "repos": {
+            "enabled": True,
+            "mode": "local",
+        },
+        "pxe": {
+            "enabled": True,
+            "default_profile": None,
+            "menu_timeout_seconds": 10,
+            "watcher_interval_seconds": 15,
+            "custom_kickstart_dir": str(OVERRIDE_KICKSTARTS_DIR),
+        },
+        "ansible": {
+            "enabled": True,
+            "config_path": str(ANSIBLE_CFG_FILE),
+            "inventory_path": str(ANSIBLE_INVENTORY_FILE),
+            "group_vars_path": str(ANSIBLE_GROUP_VARS_FILE),
+            "generated_vars_path": str(GENERATED_BOOTSTRAP_VARS_FILE),
+            "custom_playbook_dir": str(OVERRIDE_PLAYBOOKS_DIR),
+        },
+    }
+
+
+def dump_yaml(data):
+    """Return YAML text."""
+    return yaml_dump(data)
+
+
+def load_config(path=CONFIG_FILE):
+    """Load aerolitctl config."""
+    path = Path(path)
+
+    if not path.exists():
+        raise FileNotFoundError(
+            "{} does not exist. Run: aerolitctl configure init".format(path)
+        )
+
+    with path.open("r") as handle:
+        return yaml_load(handle) or {}
+
+
+def config_text(bundle_path):
+    """Return default config YAML text."""
+    return dump_yaml(default_config(bundle_path))
+
+
+
+
+
+
+
+
+
+
+
+
+
 ../execution_environments/requirements-25.yml
 
 
