@@ -1,0 +1,88 @@
+Add this import near the other aerolitctl imports in src/aerolitctl/cli.py:
+
+from .deploy_server import run_deploy_server
+
+
+Add this wrapper function near the other cmd_* functions:
+
+def cmd_deploy_server(args):
+    """Apply saved server/network/NFS/PXE/controller configuration."""
+    return run_deploy_server(
+        dry_run=args.dry_run,
+        show=args.show,
+        skip_interface=args.skip_interface,
+        skip_nfs=args.skip_nfs,
+        skip_firewall=args.skip_firewall,
+        skip_pxe=args.skip_pxe,
+        skip_controller=args.skip_controller,
+        verbose=args.verbose,
+    )
+
+
+Add this helper near the other add_*_parser helpers:
+
+def add_deploy_parser(subparsers):
+    """Add deploy command parser."""
+    deploy_parser = subparsers.add_parser(
+        "deploy",
+        help="Apply saved AeroLIT configuration.",
+    )
+    deploy_subparsers = deploy_parser.add_subparsers(dest="deploy_command")
+
+    server_parser = deploy_subparsers.add_parser(
+        "server",
+        help="Apply saved server/network/NFS/PXE/controller configuration.",
+    )
+    server_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would happen without changing files or services.",
+    )
+    server_parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Show the saved deploy plan without changing anything.",
+    )
+    server_parser.add_argument(
+        "--skip-interface",
+        action="store_true",
+        help="Do not apply NetworkManager interface IP changes.",
+    )
+    server_parser.add_argument(
+        "--skip-nfs",
+        action="store_true",
+        help="Do not create/update NFS exports, permissions, or NFS services.",
+    )
+    server_parser.add_argument(
+        "--skip-firewall",
+        action="store_true",
+        help="Do not apply firewalld changes.",
+    )
+    server_parser.add_argument(
+        "--skip-pxe",
+        action="store_true",
+        help="Do not run the PXE server playbook.",
+    )
+    server_parser.add_argument(
+        "--skip-controller",
+        action="store_true",
+        help="Do not run the Ansible controller playbook.",
+    )
+
+    # Do not add another --verbose here. cli.py already has a top-level
+    # --verbose option, and cmd_deploy_server reads args.verbose from there.
+    server_parser.set_defaults(func=cmd_deploy_server)
+
+
+Inside build_parser(), put this near the other top-level parser additions:
+
+    add_deploy_parser(subparsers)
+
+
+Then run:
+
+python3 -m py_compile src/aerolitctl/server.py src/aerolitctl/deploy_server.py src/aerolitctl/cli.py
+aerolitctl deploy server --show
+aerolitctl deploy server --dry-run
+aerolitctl --verbose deploy server --dry-run
+aerolitctl deploy server --dry-run --skip-interface --skip-nfs --skip-firewall --skip-pxe --skip-controller
