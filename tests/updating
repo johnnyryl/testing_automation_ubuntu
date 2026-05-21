@@ -1,4 +1,24 @@
 
+python3 - <<'PY'
+from aerolitctl.server import run_configure_server
+
+run_configure_server(
+    dry_run=True,
+    mode="full",
+    interface="ens160",
+    server_ip="192.168.98.141",
+    network="192.168.98.0/24",
+    gateway="none",
+    dns_servers="",
+    dhcp_start="192.168.98.100",
+    dhcp_end="192.168.98.200",
+    nfs_export_path="/opt/aerolit/aerolit-bundle",
+    nfs_allowed_clients="192.168.98.0/24",
+    target_mount_path="/home/unix/sysadmin",
+)
+PY
+
+
 aerolitctl version
 aerolitctl path show
 aerolitctl path set /opt/aerolit/aerolit-bundle
