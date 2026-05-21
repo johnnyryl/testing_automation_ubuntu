@@ -915,7 +915,7 @@ def update_config_with_plan(config, plan):
     server["ip_address"] = plan["server_ip"]
     server["prefix"] = plan["prefix"]
     server["gateway"] = plan["gateway"]
-    server["dns"] = plan["dns_servers"]
+    server["dns"] = list(plan.get("dns_servers") or [])
     server["configure_interface"] = plan["configure_interface"]
 
     server["pxe_http"] = {
@@ -934,7 +934,7 @@ def update_config_with_plan(config, plan):
     pxe["dhcp_end"] = plan.get("dhcp_end")
     pxe["dhcp_netmask"] = plan.get("dhcp_netmask")
     pxe["gateway"] = plan.get("gateway")
-    pxe["dns_servers"] = plan.get("dns_servers", [])
+    pxe["dns_servers"] = list(plan.get("dns_servers") or [])
 
     return config
 
@@ -954,7 +954,7 @@ def build_generated_vars(plan):
         "aerolit_server_ip_address": plan.get("server_ip"),
         "aerolit_server_prefix": plan.get("prefix"),
         "aerolit_server_gateway": plan.get("gateway"),
-        "aerolit_server_dns": plan.get("dns_servers", []),
+        "aerolit_server_dns": list(plan.get("dns_servers") or []),
         "aerolit_configure_interface": plan.get("configure_interface", False),
         "pxe_server_ip": plan.get("server_ip"),
         "pxe_interface": plan.get("interface"),
@@ -965,7 +965,7 @@ def build_generated_vars(plan):
         "pxe_dhcp_end": plan.get("dhcp_end"),
         "pxe_dhcp_netmask": plan.get("dhcp_netmask"),
         "pxe_gateway": plan.get("gateway"),
-        "pxe_dns_servers": plan.get("dns_servers", []),
+        "pxe_dns_servers": list(plan.get("dns_servers") or []),
         "aerolit_firewall_manage": plan.get("firewall", {}).get("manage", True),
         "aerolit_firewall_services": plan.get("firewall", {}).get("services", []),
         "aerolit_firewall_ports": plan.get("firewall", {}).get("ports", []),
@@ -1152,7 +1152,7 @@ def build_plan_from_values(
         nfs_create_export_path = current_nfs.get("create_export_path", False)
 
     if firewall_manage is None:
-        firewall_manage = current_firewall.get("manage", True)
+        firewall_manage = server.get("firewall", {}).get("manage", True)
 
     mode = normalize_mode(mode or server.get("mode") or DEFAULT_MODE)
 
