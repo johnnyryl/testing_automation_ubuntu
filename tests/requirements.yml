@@ -2,7 +2,23 @@
 
 
 
+cat > setup.py <<'EOF'
+from setuptools import setup, find_packages
 
+setup(
+    name="aerolitctl",
+    version="0.1.0",
+    description="Command and control interface for AeroLIT bundles.",
+    packages=find_packages(where="src"),
+    package_dir={"": "src"},
+    entry_points={
+        "console_scripts": [
+            "aerolitctl=aerolitctl.cli:main",
+        ],
+    },
+    python_requires=">=3.6",
+)
+EOF
 
 
 
