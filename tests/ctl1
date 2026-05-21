@@ -1,0 +1,724 @@
+Yes. We should start from the beginning and not fill every empty file yet.
+
+Since this is a test environment, we’ll let the default behavior write to the real locations:
+
+/etc/aerolit
+/var/lib/aerolit
+/var/log/aerolit
+/opt/aerolit/aerolit-bundle
+
+We’ll still include --dry-run because that was part of the old initialization idea and it is useful, but you do not have to use it.
+
+For this first pass, only populate these files:
+
+pyproject.toml
+src/aerolitctl/__init__.py
+src/aerolitctl/paths.py
+src/aerolitctl/files.py
+src/aerolitctl/config.py
+src/aerolitctl/state.py
+src/aerolitctl/initialize.py
+src/aerolitctl/cli.py
+
+Leave these empty for now:
+
+ansible.py
+bundle.py
+deploy.py
+doctor.py
+generate.py
+pxe.py
+repos.py
+server.py
+shell.py
+
+This first slice gives us:
+
+aerolitctl version
+aerolitctl configure init
+
+Then we test. After that, we add path show/set, then bundle validation, then doctor.
+
+⸻
+
+1. pyproject.toml
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "aerolitctl"
+version = "0.1.0"
+description = "Command and control interface for AeroLIT bundles."
+readme = "README.md"
+requires-python = ">=3.6"
+[project.scripts]
+aerolitctl = "aerolitctl.cli:main"
+[tool.setuptools.packages.find]
+where = ["src"]
+
+⸻
+
+2. src/aerolitctl/__init__.py
+
+"""AeroLIT command and control interface."""
+__version__ = "0.1.0"
+
+⸻
+
+3. src/aerolitctl/paths.py
+
+"""Default paths for aerolitctl."""
+from pathlib import Path
+DEFAULT_BUNDLE_PATH = Path("/opt/aerolit/aerolit-bundle")
+CONFIG_DIR = Path("/etc/aerolit")
+CONFIG_FILE = CONFIG_DIR / "aerolitctl.yml"
+ANSIBLE_CONFIG_DIR = CONFIG_DIR / "ansible"
+ANSIBLE_GROUP_VARS_DIR = ANSIBLE_CONFIG_DIR / "group_vars"
+ANSIBLE_INVENTORY_FILE = ANSIBLE_CONFIG_DIR / "inventory"
+ANSIBLE_CFG_FILE = ANSIBLE_CONFIG_DIR / "ansible.cfg"
+ANSIBLE_GROUP_VARS_FILE = ANSIBLE_GROUP_VARS_DIR / "all.yml"
+OVERRIDES_DIR = CONFIG_DIR / "overrides"
+OVERRIDE_KICKSTARTS_DIR = OVERRIDES_DIR / "kickstarts"
+OVERRIDE_PLAYBOOKS_DIR = OVERRIDES_DIR / "playbooks"
+GENERATED_DIR = CONFIG_DIR / "generated"
+GENERATED_BOOTSTRAP_VARS_FILE = GENERATED_DIR / "aerolit_bootstrap_generated.yml"
+SYNC_PRESERVE_FILE = CONFIG_DIR / "sync-preserve"
+STATE_DIR = Path("/var/lib/aerolit")
+STATE_FILE = STATE_DIR / "state.yml"
+RENDERED_DIR = STATE_DIR / "rendered"
+BACKUP_DIR = STATE_DIR / "backups"
+LOG_DIR = Path("/var/log/aerolit")
+def required_directories():
+    """Return directories required by initial AeroLIT setup."""
+    return [
+        CONFIG_DIR,
+        ANSIBLE_CONFIG_DIR,
+        ANSIBLE_GROUP_VARS_DIR,
+        OVERRIDES_DIR,
+        OVERRIDE_KICKSTARTS_DIR,
+        OVERRIDE_PLAYBOOKS_DIR,
+        GENERATED_DIR,
+        STATE_DIR,
+        RENDERED_DIR,
+        BACKUP_DIR,
+        LOG_DIR,
+    ]
+def bundle_derived_paths(bundle_path):
+    """Return standard paths derived from the bundle root."""
+    bundle_path = Path(bundle_path)
+    return {
+        "bundle": str(bundle_path),
+        "collections_hub": str(bundle_path / "collections-hub"),
+        "repos": str(bundle_path / "repos"),
+        "files": str(bundle_path / "files"),
+        "extracted_isos": str(bundle_path / "extracted_isos"),
+        "bootstrap": str(bundle_path / "bootstrap.sh"),
+        "manifest": str(bundle_path / "aerolit-bundle.yml"),
+    }
+
+⸻
+
+4. src/aerolitctl/files.py
+
+"""Safe file and directory helpers for aerolitctl."""
+import shutil
+from datetime import datetime
+from pathlib import Path
+from .paths import BACKUP_DIR
+class InitReport(object):
+    """Collect actions taken during initialization."""
+    def __init__(self, verbose=False):
+        self.verbose = verbose
+        self.created = []
+        self.updated = []
+        self.existing = []
+        self.backed_up = []
+        self.warnings = []
+        self.errors = []
+        self.dry_run = []
+    def add(self, category, message):
+        getattr(self, category).append(message)
+    def print_summary(self):
+        print("")
+        print("AeroLIT initialization summary")
+        print("")
+        sections = [
+            ("Created", self.created),
+            ("Updated", self.updated),
+            ("Already existed", self.existing),
+            ("Backed up", self.backed_up),
+            ("Dry-run actions", self.dry_run),
+            ("Warnings", self.warnings),
+            ("Errors", self.errors),
+        ]
+        for title, values in sections:
+            if not values:
+                continue
+            print("{}:".format(title))
+            for value in values:
+                print("  - {}".format(value))
+            print("")
+def timestamp():
+    """Return filesystem-safe UTC timestamp."""
+    return datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+def ensure_directory(path, report, dry_run=False):
+    """Create a directory if needed."""
+    path = Path(path)
+    if path.exists():
+        if path.is_dir():
+            report.add("existing", str(path))
+            return
+        report.add("errors", "{} exists but is not a directory".format(path))
+        return
+    if dry_run:
+        report.add("dry_run", "Would create directory {}".format(path))
+        return
+    path.mkdir(parents=True, exist_ok=True)
+    report.add("created", str(path))
+def backup_existing(path, report, dry_run=False):
+    """Back up an existing file or directory under /var/lib/aerolit/backups."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    backup_name = "{}.{}".format(str(path).lstrip("/").replace("/", "_"), timestamp())
+    backup_path = BACKUP_DIR / backup_name
+    if dry_run:
+        report.add("dry_run", "Would back up {} to {}".format(path, backup_path))
+        return backup_path
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    if path.is_dir():
+        shutil.copytree(str(path), str(backup_path))
+    else:
+        shutil.copy2(str(path), str(backup_path))
+    report.add("backed_up", "{} -> {}".format(path, backup_path))
+    return backup_path
+def write_text_file(path, content, report, overwrite=False, backup=True, dry_run=False):
+    """Write a text file safely."""
+    path = Path(path)
+    if path.exists() and not overwrite:
+        report.add("existing", str(path))
+        return False
+    if path.exists() and backup:
+        backup_existing(path, report, dry_run=dry_run)
+    if dry_run:
+        action = "Would update" if path.exists() else "Would create"
+        report.add("dry_run", "{} file {}".format(action, path))
+        return True
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    if path.exists() and overwrite:
+        report.add("updated", str(path))
+    else:
+        report.add("created", str(path))
+    return True
+
+⸻
+
+5. src/aerolitctl/config.py
+
+"""Config creation and YAML helpers for aerolitctl."""
+from pathlib import Path
+from . import __version__
+from .paths import (
+    ANSIBLE_CFG_FILE,
+    ANSIBLE_GROUP_VARS_FILE,
+    ANSIBLE_INVENTORY_FILE,
+    CONFIG_FILE,
+    GENERATED_BOOTSTRAP_VARS_FILE,
+    LOG_DIR,
+    OVERRIDE_KICKSTARTS_DIR,
+    OVERRIDE_PLAYBOOKS_DIR,
+    RENDERED_DIR,
+    STATE_DIR,
+    bundle_derived_paths,
+)
+try:
+    import yaml
+except ImportError:
+    yaml = None
+def require_yaml():
+    """Fail with a useful message if PyYAML is missing."""
+    if yaml is None:
+        raise RuntimeError(
+            "Missing Python YAML support. Install it with: dnf install -y python3-pyyaml"
+        )
+def default_config(bundle_path):
+    """Build default aerolitctl config."""
+    paths = bundle_derived_paths(bundle_path)
+    return {
+        "version": 1,
+        "aerolitctl": {
+            "version": __version__,
+        },
+        "paths": {
+            **paths,
+            "config": str(CONFIG_FILE),
+            "state": str(STATE_DIR),
+            "logs": str(LOG_DIR),
+            "rendered": str(RENDERED_DIR),
+            "override_kickstarts": str(OVERRIDE_KICKSTARTS_DIR),
+            "override_playbooks": str(OVERRIDE_PLAYBOOKS_DIR),
+            "generated_bootstrap_vars": str(GENERATED_BOOTSTRAP_VARS_FILE),
+        },
+        "server": {
+            "interface": None,
+            "ip_address": None,
+            "prefix": None,
+            "gateway": None,
+            "dns": [],
+            "configure_interface": False,
+            "nfs": {
+                "enabled": True,
+                "export_path": str(bundle_path),
+                "allowed_clients": None,
+            },
+            "pxe_http": {
+                "bind_address": "0.0.0.0",
+                "port": 18080,
+            },
+        },
+        "repos": {
+            "enabled": True,
+            "mode": "local",
+        },
+        "pxe": {
+            "enabled": True,
+            "default_profile": None,
+            "menu_timeout_seconds": 10,
+            "watcher_interval_seconds": 15,
+            "custom_kickstart_dir": str(OVERRIDE_KICKSTARTS_DIR),
+        },
+        "ansible": {
+            "enabled": True,
+            "config_path": str(ANSIBLE_CFG_FILE),
+            "inventory_path": str(ANSIBLE_INVENTORY_FILE),
+            "group_vars_path": str(ANSIBLE_GROUP_VARS_FILE),
+            "generated_vars_path": str(GENERATED_BOOTSTRAP_VARS_FILE),
+            "custom_playbook_dir": str(OVERRIDE_PLAYBOOKS_DIR),
+        },
+    }
+def dump_yaml(data):
+    """Return YAML text."""
+    require_yaml()
+    return yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
+def load_config(path=CONFIG_FILE):
+    """Load aerolitctl config."""
+    require_yaml()
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(
+            "{} does not exist. Run: aerolitctl configure init".format(path)
+        )
+    with path.open("r") as handle:
+        return yaml.safe_load(handle) or {}
+def config_text(bundle_path):
+    """Return default config YAML text."""
+    return dump_yaml(default_config(bundle_path))
+
+⸻
+
+6. src/aerolitctl/state.py
+
+"""Runtime state handling for aerolitctl."""
+from datetime import datetime
+from . import __version__
+from .config import dump_yaml
+def default_state():
+    """Return initial AeroLIT runtime state."""
+    now = datetime.utcnow().isoformat() + "Z"
+    return {
+        "version": 1,
+        "aerolitctl": {
+            "version": __version__,
+        },
+        "initialized": {
+            "status": "initialized",
+            "initialized_at": now,
+        },
+        "last_command": {
+            "command": "configure init",
+            "status": "success",
+            "completed_at": now,
+        },
+    }
+def state_text():
+    """Return initial state YAML text."""
+    return dump_yaml(default_state())
+
+⸻
+
+7. src/aerolitctl/initialize.py
+
+"""Full AeroLIT initialization workflow."""
+from pathlib import Path
+from .config import config_text
+from .files import InitReport, ensure_directory, write_text_file
+from .paths import (
+    ANSIBLE_CFG_FILE,
+    ANSIBLE_GROUP_VARS_FILE,
+    ANSIBLE_INVENTORY_FILE,
+    CONFIG_FILE,
+    DEFAULT_BUNDLE_PATH,
+    GENERATED_BOOTSTRAP_VARS_FILE,
+    STATE_FILE,
+    SYNC_PRESERVE_FILE,
+    required_directories,
+)
+from .state import state_text
+ANSIBLE_INVENTORY_CONTENT = """# AeroLIT inventory
+# This file is created by aerolitctl configure init.
+# Update host/group entries as needed for your environment.
+[localhost]
+localhost ansible_connection=local
+"""
+ANSIBLE_GROUP_VARS_CONTENT = """---
+# AeroLIT Ansible group variables
+# This file is created by aerolitctl configure init.
+# Site-specific values can be added here.
+aerolit_managed: true
+"""
+ANSIBLE_CFG_CONTENT = """[defaults]
+inventory = /etc/aerolit/ansible/inventory
+roles_path = /opt/aerolit/aerolit-bundle/collections-hub/roles:/etc/aerolit/overrides/roles
+collections_paths = /opt/aerolit/aerolit-bundle/collections-hub/collections
+host_key_checking = False
+retry_files_enabled = False
+stdout_callback = yaml
+"""
+GENERATED_BOOTSTRAP_VARS_CONTENT = """---
+# Generated AeroLIT bootstrap variables
+# Created by aerolitctl configure init.
+# Later configure commands may update this file.
+aerolit_generated_by: aerolitctl
+aerolit_generated_reason: configure init
+"""
+SYNC_PRESERVE_CONTENT = """# AeroLIT preserve manifest
+# Created by aerolitctl configure init.
+#
+# Paths listed here are preserved during future sync/update workflows.
+# These are rsync exclude-style patterns, not .gitignore syntax.
+# Use exact file paths for files.
+# Use trailing / for directories.
+# Blank lines and lines beginning with # are ignored.
+# AeroLIT control/config content
+/etc/aerolit/
+/var/lib/aerolit/
+/var/log/aerolit/
+# User-owned overrides and generated content
+/etc/aerolit/overrides/
+/etc/aerolit/generated/
+/etc/aerolit/ansible/
+# Legacy/local content patterns, used if sync tooling operates inside a bundle/repo
+.gitlab-ci.yml
+ansible/ansible.cfg
+ansible/inventory
+ansible/group_vars/
+ansible/playbooks/site_local.yml
+ansible/network_local/
+docs/local/
+"""
+def resolve_bundle_path(bundle_path=None, non_interactive=False):
+    """Resolve bundle path from arg, prompt, or default."""
+    if bundle_path:
+        return Path(bundle_path)
+    if non_interactive:
+        return DEFAULT_BUNDLE_PATH
+    prompt = "AeroLIT bundle path [{}]: ".format(DEFAULT_BUNDLE_PATH)
+    value = input(prompt).strip()
+    if not value:
+        return DEFAULT_BUNDLE_PATH
+    return Path(value)
+def validate_basic_bundle_layout(bundle_path, report):
+    """Warn about obvious bundle layout problems."""
+    bundle_path = Path(bundle_path)
+    if not bundle_path.exists():
+        report.add(
+            "warnings",
+            "Bundle path does not exist yet: {}".format(bundle_path),
+        )
+        return
+    expected = [
+        bundle_path / "collections-hub",
+        bundle_path / "repos",
+        bundle_path / "files",
+        bundle_path / "extracted_isos",
+    ]
+    for path in expected:
+        if not path.exists():
+            report.add("warnings", "Expected bundle path not found: {}".format(path))
+    manifest = bundle_path / "aerolit-bundle.yml"
+    if not manifest.exists():
+        report.add(
+            "warnings",
+            "Bundle manifest not found yet: {}".format(manifest),
+        )
+    bootstrap = bundle_path / "bootstrap.sh"
+    if not bootstrap.exists():
+        report.add(
+            "warnings",
+            "Compatibility bootstrap.sh not found: {}".format(bootstrap),
+        )
+def maybe_create_bundle_preserve_file(bundle_path, report, force=False, dry_run=False):
+    """Create a bundle-local .sync-preserve if the bundle exists."""
+    bundle_path = Path(bundle_path)
+    if not bundle_path.exists():
+        report.add(
+            "warnings",
+            "Skipping bundle-local .sync-preserve because bundle path does not exist: {}".format(
+                bundle_path
+            ),
+        )
+        return
+    preserve_file = bundle_path / ".sync-preserve"
+    write_text_file(
+        preserve_file,
+        SYNC_PRESERVE_CONTENT,
+        report,
+        overwrite=force,
+        backup=True,
+        dry_run=dry_run,
+    )
+def run_configure_init(
+    bundle_path=None,
+    force=False,
+    dry_run=False,
+    non_interactive=False,
+    verbose=False,
+):
+    """Run full AeroLIT initialization."""
+    report = InitReport(verbose=verbose)
+    resolved_bundle_path = resolve_bundle_path(
+        bundle_path=bundle_path,
+        non_interactive=non_interactive,
+    )
+    for directory in required_directories():
+        ensure_directory(directory, report, dry_run=dry_run)
+    write_text_file(
+        CONFIG_FILE,
+        config_text(resolved_bundle_path),
+        report,
+        overwrite=force,
+        backup=True,
+        dry_run=dry_run,
+    )
+    write_text_file(
+        STATE_FILE,
+        state_text(),
+        report,
+        overwrite=force,
+        backup=True,
+        dry_run=dry_run,
+    )
+    write_text_file(
+        SYNC_PRESERVE_FILE,
+        SYNC_PRESERVE_CONTENT,
+        report,
+        overwrite=force,
+        backup=True,
+        dry_run=dry_run,
+    )
+    maybe_create_bundle_preserve_file(
+        resolved_bundle_path,
+        report,
+        force=force,
+        dry_run=dry_run,
+    )
+    write_text_file(
+        ANSIBLE_INVENTORY_FILE,
+        ANSIBLE_INVENTORY_CONTENT,
+        report,
+        overwrite=force,
+        backup=True,
+        dry_run=dry_run,
+    )
+    write_text_file(
+        ANSIBLE_GROUP_VARS_FILE,
+        ANSIBLE_GROUP_VARS_CONTENT,
+        report,
+        overwrite=force,
+        backup=True,
+        dry_run=dry_run,
+    )
+    write_text_file(
+        ANSIBLE_CFG_FILE,
+        ANSIBLE_CFG_CONTENT,
+        report,
+        overwrite=force,
+        backup=True,
+        dry_run=dry_run,
+    )
+    write_text_file(
+        GENERATED_BOOTSTRAP_VARS_FILE,
+        GENERATED_BOOTSTRAP_VARS_CONTENT,
+        report,
+        overwrite=force,
+        backup=True,
+        dry_run=dry_run,
+    )
+    validate_basic_bundle_layout(resolved_bundle_path, report)
+    print("AeroLIT initialization complete.")
+    print("")
+    print("Configured bundle path:")
+    print("  {}".format(resolved_bundle_path))
+    print("")
+    print("Primary config:")
+    print("  {}".format(CONFIG_FILE))
+    print("")
+    print("Runtime state:")
+    print("  {}".format(STATE_FILE))
+    report.print_summary()
+    return 1 if report.errors else 0
+
+⸻
+
+8. src/aerolitctl/cli.py
+
+"""CLI entry point for aerolitctl."""
+import argparse
+import sys
+from . import __version__
+from .initialize import run_configure_init
+def cmd_version(args):
+    print("aerolitctl {}".format(__version__))
+    return 0
+def cmd_configure_init(args):
+    return run_configure_init(
+        bundle_path=args.bundle,
+        force=args.force,
+        dry_run=args.dry_run,
+        non_interactive=args.non_interactive,
+        verbose=args.verbose,
+    )
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="aerolitctl",
+        description="Command and control interface for AeroLIT bundles.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show more detailed output.",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+    version_parser = subparsers.add_parser(
+        "version",
+        help="Show aerolitctl version.",
+    )
+    version_parser.set_defaults(func=cmd_version)
+    configure_parser = subparsers.add_parser(
+        "configure",
+        help="Configure AeroLIT.",
+    )
+    configure_subparsers = configure_parser.add_subparsers(dest="configure_command")
+    init_parser = configure_subparsers.add_parser(
+        "init",
+        help="Fully initialize AeroLIT configuration, state, preserves, and starter files.",
+    )
+    init_parser.add_argument(
+        "--bundle",
+        default=None,
+        help="Path to AeroLIT bundle. Defaults to /opt/aerolit/aerolit-bundle.",
+    )
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite managed files after backing up existing files.",
+    )
+    init_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would happen without making changes.",
+    )
+    init_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Do not prompt. Use defaults unless options are provided.",
+    )
+    init_parser.set_defaults(func=cmd_configure_init)
+    return parser
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not hasattr(args, "func"):
+        parser.print_help()
+        return 2
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        print("")
+        print("Cancelled.", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        print("ERROR: {}".format(exc), file=sys.stderr)
+        return 1
+if __name__ == "__main__":
+    sys.exit(main())
+
+⸻
+
+Test this first
+
+Install YAML support if needed:
+
+sudo dnf install -y python3-pyyaml
+
+From the project root:
+
+python3 -m pip install --user -e .
+
+Then test:
+
+aerolitctl version
+
+Then run init for real:
+
+sudo aerolitctl configure init --non-interactive
+
+Or if your bundle is somewhere else:
+
+sudo aerolitctl configure init --bundle /path/to/aerolit-bundle --non-interactive
+
+Then check what it created:
+
+sudo find /etc/aerolit -maxdepth 4 -type f -o -type d
+sudo find /var/lib/aerolit -maxdepth 3 -type f -o -type d
+sudo find /var/log/aerolit -maxdepth 1 -type d
+
+And view the main config:
+
+sudo cat /etc/aerolit/aerolitctl.yml
+
+⸻
+
+What we are intentionally not doing yet
+
+For this slice, we are not adding these yet:
+
+path show
+path set
+bundle show
+bundle validate
+doctor
+deploy
+server prompts
+PXE generation
+playbook generation
+RPM spec
+man page
+completion
+
+The next step after this works should be:
+
+aerolitctl path show
+aerolitctl path set /path
+
+Then after that:
+
+aerolitctl bundle validate
+
+Then after that:
+
+aerolitctl doctor
+
+We’ll keep building it in this order so we do not lose track.
