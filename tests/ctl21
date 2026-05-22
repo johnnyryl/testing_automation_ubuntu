@@ -1,0 +1,112 @@
+Yes, I like that better. Keep --force meaning “overwrite managed init files,” but make interactive runs warn clearly before doing it.
+
+I would not change what --force does. I would add a confirmation gate when:
+
+--force is used
+and
+--non-interactive is not used
+
+For --non-interactive --force, I would let it proceed, because non-interactive is often used for automation and cannot answer prompts.
+
+Add this to initialize.py
+
+Put this after SYNC_PRESERVE_CONTENT and before resolve_bundle_path():
+
+def confirm_force_overwrite(bundle_path, non_interactive=False):
+    """Confirm destructive init overwrite behavior when --force is used."""
+    if non_interactive:
+        print("WARNING: --force used with --non-interactive.")
+        print("Existing managed init files may be overwritten after backup.")
+        return True
+    collections_hub = collections_hub_path(bundle_path)
+    print("")
+    print("WARNING: --force can overwrite existing managed initialization files.")
+    print("")
+    print("Files/directories that may be replaced after backup include:")
+    print("  - {}".format(CONFIG_FILE))
+    print("  - {}".format(STATE_FILE))
+    print("  - {}".format(sync_preserve_file(bundle_path)))
+    print("  - {}".format(gitlab_ci_file(bundle_path)))
+    print("  - {}".format(ansible_cfg_file(bundle_path)))
+    print("  - {}".format(ansible_inventory_file(bundle_path)))
+    print("  - {}".format(ansible_group_vars_dir(bundle_path)))
+    print("  - {}".format(generated_bootstrap_vars_file(bundle_path)))
+    print("")
+    print("This may replace local inventory entries, group_vars changes,")
+    print("generated bootstrap vars, or saved aerolitctl configuration values.")
+    print("")
+    print("Backups will be created under:")
+    print("  - {}".format(initialization_backup_root(bundle_path)))
+    print("  - {}".format(BACKUP_DIR))
+    print("")
+    print("Active bundle:")
+    print("  {}".format(collections_hub))
+    print("")
+    while True:
+        value = input("Continue with --force overwrite? [y/N]: ").strip().lower()
+        if not value:
+            return False
+        if value in ("y", "yes"):
+            return True
+        if value in ("n", "no"):
+            return False
+        print("Please answer yes or no.")
+
+Then update run_configure_init()
+
+Find this section:
+
+print("Initializing AeroLIT environment in: {}".format(collections_hub))
+print("Backups enabled: {}".format(not no_backup))
+print("Force overwrite: {}".format(force))
+print("Skip preserve file: {}".format(skip_preserve_file))
+print("Skip CI file: {}".format(skip_ci_file))
+print("Skip Ansible files: {}".format(skip_ansible_files))
+print("")
+
+Directly after it, add:
+
+if force:
+    if not confirm_force_overwrite(
+        resolved_bundle_path,
+        non_interactive=non_interactive,
+    ):
+        print("")
+        print("Cancelled. No initialization changes were made.")
+        report.add("skipped", "Force overwrite cancelled by user")
+        report.print_summary()
+        return 130
+
+So the flow becomes:
+
+print("Initializing AeroLIT environment in: {}".format(collections_hub))
+print("Backups enabled: {}".format(not no_backup))
+print("Force overwrite: {}".format(force))
+print("Skip preserve file: {}".format(skip_preserve_file))
+print("Skip CI file: {}".format(skip_ci_file))
+print("Skip Ansible files: {}".format(skip_ansible_files))
+print("")
+if force:
+    if not confirm_force_overwrite(
+        resolved_bundle_path,
+        non_interactive=non_interactive,
+    ):
+        print("")
+        print("Cancelled. No initialization changes were made.")
+        report.add("skipped", "Force overwrite cancelled by user")
+        report.print_summary()
+        return 130
+for directory in required_control_directories():
+    ensure_directory(directory, report, dry_run=dry_run)
+
+That gives you the best behavior:
+
+aerolitctl configure init --force
+
+warns and asks before touching anything.
+
+aerolitctl configure init --force --non-interactive
+
+continues without prompting, but prints a warning.
+
+No CLI change is required for this version.
