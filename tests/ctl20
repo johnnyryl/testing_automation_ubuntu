@@ -1,0 +1,87 @@
+Yes — for status.py, you only need 3 changes in src/aerolitctl/cli.py.
+
+1. Add this import at the top
+
+Put it with your other local imports, right under the server import is fine:
+
+from .status import run_status
+
+So the top of cli.py should look like this:
+
+from . import __version__
+from .bundle import show_bundle, validate_bundle
+from .config import get_bundle_path, load_config, set_bundle_path
+from .doctor import run_doctor
+from .initialize import run_configure_init
+from .server import run_configure_server
+from .status import run_status
+
+⸻
+
+2. Add this command function
+
+Put this near your other cmd_* functions. I would put it right after cmd_doctor(args).
+
+def cmd_status(args):
+    """Show AeroLIT status."""
+    return run_status(verbose=args.verbose)
+
+So that area should look like this:
+
+def cmd_doctor(args):
+    """Run doctor checks."""
+    return run_doctor()
+def cmd_status(args):
+    """Show AeroLIT status."""
+    return run_status(verbose=args.verbose)
+
+⸻
+
+3. Add the parser entry inside build_parser()
+
+Inside build_parser(), find this section:
+
+doctor_parser = subparsers.add_parser(
+    "doctor",
+    help="Run AeroLIT health checks.",
+)
+doctor_parser.set_defaults(func=cmd_doctor)
+
+Directly after that, add:
+
+status_parser = subparsers.add_parser(
+    "status",
+    help="Show AeroLIT configuration and deployment readiness.",
+)
+status_parser.set_defaults(func=cmd_status)
+
+So it should become:
+
+doctor_parser = subparsers.add_parser(
+    "doctor",
+    help="Run AeroLIT health checks.",
+)
+doctor_parser.set_defaults(func=cmd_doctor)
+status_parser = subparsers.add_parser(
+    "status",
+    help="Show AeroLIT configuration and deployment readiness.",
+)
+status_parser.set_defaults(func=cmd_status)
+
+Do not put this under configure_subparsers, path_subparsers, or bundle_subparsers. status is a top-level command, same level as:
+
+aerolitctl doctor
+aerolitctl status
+aerolitctl configure server
+aerolitctl bundle show
+
+⸻
+
+Then test:
+
+python3 -m py_compile src/aerolitctl/status.py src/aerolitctl/cli.py
+aerolitctl status
+aerolitctl --verbose status
+aerolitctl --help
+
+You should see status listed as a top-level command in aerolitctl --help.
