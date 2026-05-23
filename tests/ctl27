@@ -1,0 +1,593 @@
+"""CLI entry point for aerolitctl."""
+
+import argparse
+import sys
+from pathlib import Path
+
+from . import __version__
+from .bundle import show_bundle, validate_bundle
+from .config import get_bundle_path, load_config, set_bundle_path
+from .doctor import run_doctor
+from .initialize import run_configure_init
+from .server import run_configure_server
+from .deploy_server import run_deploy_server
+from .status import run_status
+
+
+def cmd_version(args):
+    """Print aerolitctl version."""
+    print("aerolitctl {}".format(__version__))
+    return 0
+
+
+def cmd_configure_init(args):
+    """Run full initialization workflow."""
+    return run_configure_init(
+        bundle_path=args.bundle,
+        force=args.force,
+        dry_run=args.dry_run,
+        non_interactive=args.non_interactive,
+        verbose=getattr(args, "verbose", False),
+        no_backup=args.no_backup,
+        skip_preserve_file=args.skip_preserve_file,
+        skip_ci_file=args.skip_ci_file,
+        skip_ansible_files=args.skip_ansible_files,
+    )
+
+
+def cmd_path_show(args):
+    """Show configured bundle path."""
+    config = load_config()
+    bundle_path = get_bundle_path(config)
+
+    if not bundle_path:
+        print("No bundle path is configured.", file=sys.stderr)
+        return 1
+
+    print(bundle_path)
+    return 0
+
+
+def cmd_path_set(args):
+    """Set configured bundle path."""
+    new_path = Path(args.path)
+    config, backup_path, changed = set_bundle_path(
+        new_path,
+        backup=not args.no_backup,
+    )
+
+    if not changed:
+        print("AeroLIT bundle path already set:")
+        print("  {}".format(get_bundle_path(config)))
+        print("")
+        print("No changes made.")
+        return 0
+
+    print("Updated AeroLIT bundle path:")
+    print("  {}".format(get_bundle_path(config)))
+
+    if backup_path:
+        print("")
+        print("Config backup:")
+        print("  {}".format(backup_path))
+
+    if not new_path.exists():
+        print("")
+        print("WARNING: Bundle path does not currently exist:")
+        print("  {}".format(new_path))
+        print("")
+        print("You can create/place the bundle there, then run:")
+        print("  aerolitctl configure init --bundle {}".format(new_path))
+
+    return 0
+
+
+def cmd_bundle_show(args):
+    """Show configured bundle details."""
+    return show_bundle(bundle_path=args.path)
+
+
+def cmd_bundle_validate(args):
+    """Validate configured bundle layout."""
+    return validate_bundle(bundle_path=args.path)
+
+
+def cmd_doctor(args):
+    """Run doctor checks."""
+    return run_doctor()
+
+
+def cmd_status(args):
+    """Show AeroLIT status."""
+    return run_status(verbose=getattr(args, "verbose", False))
+
+
+def cmd_configure_server(args):
+    """Run aerolitctl configure server."""
+    return run_configure_server(
+        guided=args.guided,
+        dry_run=args.dry_run,
+        show=args.show,
+        mode=args.mode,
+        interface=args.interface,
+        server_ip=args.server_ip,
+        network=args.network,
+        prefix=args.prefix,
+        gateway=args.gateway,
+        dns_servers=args.dns_servers,
+        dhcp_start=args.dhcp_start,
+        dhcp_end=args.dhcp_end,
+        pxe_http_port=args.pxe_http_port,
+        pxe_http_bind_address=args.pxe_http_bind_address,
+        configure_interface=args.configure_interface,
+        nfs_enabled=args.nfs_enabled,
+        nfs_export_path=args.nfs_export_path,
+        nfs_allowed_clients=args.nfs_allowed_clients,
+        nfs_allow_all_clients=args.nfs_allow_all_clients,
+        nfs_create_export_path=args.nfs_create_export_path,
+        nfs_exports_file=args.nfs_exports_file,
+        target_mount_path=args.target_mount_path,
+        mount_mode=args.mount_mode,
+        mount_owner=args.mount_owner,
+        mount_group=args.mount_group,
+        firewall_manage=args.firewall_manage,
+    )
+
+
+def cmd_deploy_server(args):
+    """Apply saved server/network/NFS/PXE/controller configuration."""
+    return run_deploy_server(
+        dry_run=args.dry_run,
+        show=args.show,
+        skip_interface=args.skip_interface,
+        skip_nfs=args.skip_nfs,
+        skip_firewall=args.skip_firewall,
+        skip_pxe=args.skip_pxe,
+        skip_controller=args.skip_controller,
+        verbose=getattr(args, "verbose", False),
+    )
+
+
+def add_command_verbose(parser):
+    """Allow --verbose after a leaf command.
+
+    The root parser already supports:
+
+      aerolitctl --verbose status
+
+    This helper also allows:
+
+      aerolitctl status --verbose
+      aerolitctl deploy server --verbose
+      aerolitctl configure init --verbose
+
+    default=argparse.SUPPRESS prevents the leaf parser from overwriting the
+    root --verbose value when --verbose is not provided at the leaf level.
+    """
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Show more detailed output.",
+    )
+
+
+def add_configure_server_parser(configure_subparsers):
+    """Add aerolitctl configure server parser."""
+    server_parser = configure_subparsers.add_parser(
+        "server",
+        help="Configure AeroLIT server, PXE, network, and NFS settings.",
+    )
+
+    server_parser.add_argument(
+        "--guided",
+        action="store_true",
+        help="Walk through server/PXE/NFS configuration interactively.",
+    )
+    server_parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Show the current server plan without changing files.",
+    )
+    server_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change without writing files.",
+    )
+    server_parser.add_argument(
+        "--mode",
+        choices=("full", "pxe", "controller"),
+        help="Configuration mode: full, pxe, or controller.",
+    )
+    server_parser.add_argument(
+        "--interface",
+        help="Provisioning/PXE interface, for example ens160.",
+    )
+    server_parser.add_argument(
+        "--server-ip",
+        dest="server_ip",
+        help="AeroLIT server IP on the provisioning network.",
+    )
+    server_parser.add_argument(
+        "--network",
+        help="Provisioning network CIDR, for example 192.168.98.0/24.",
+    )
+    server_parser.add_argument(
+        "--prefix",
+        type=int,
+        help="CIDR prefix length, for example 24.",
+    )
+    server_parser.add_argument(
+        "--gateway",
+        help="PXE gateway IP, or 'none'.",
+    )
+    server_parser.add_argument(
+        "--dns",
+        dest="dns_servers",
+        help="Comma-separated DNS servers, for example 192.168.98.1,8.8.8.8.",
+    )
+    server_parser.add_argument(
+        "--dhcp-start",
+        dest="dhcp_start",
+        help="PXE DHCP range start IP.",
+    )
+    server_parser.add_argument(
+        "--dhcp-end",
+        dest="dhcp_end",
+        help="PXE DHCP range end IP.",
+    )
+    server_parser.add_argument(
+        "--pxe-http-port",
+        dest="pxe_http_port",
+        type=int,
+        help="PXE HTTP content port.",
+    )
+    server_parser.add_argument(
+        "--pxe-http-bind-address",
+        dest="pxe_http_bind_address",
+        help="PXE HTTP bind address, default usually 0.0.0.0.",
+    )
+
+    server_parser.add_argument(
+        "--configure-interface",
+        dest="configure_interface",
+        action="store_true",
+        default=None,
+        help="Store intent for deploy to configure the selected interface.",
+    )
+    server_parser.add_argument(
+        "--no-configure-interface",
+        dest="configure_interface",
+        action="store_false",
+        help="Store intent for deploy not to configure the selected interface.",
+    )
+
+    server_parser.add_argument(
+        "--nfs-enabled",
+        dest="nfs_enabled",
+        action="store_true",
+        default=None,
+        help="Enable NFS/controller generated settings.",
+    )
+    server_parser.add_argument(
+        "--no-nfs",
+        dest="nfs_enabled",
+        action="store_false",
+        help="Disable NFS/controller generated settings.",
+    )
+    server_parser.add_argument(
+        "--nfs-export-path",
+        dest="nfs_export_path",
+        help="Path to export over NFS.",
+    )
+    server_parser.add_argument(
+        "--nfs-allow-clients",
+        "--nfs-allowed-clients",
+        dest="nfs_allowed_clients",
+        help="NFS allowed client IP or CIDR, for example 192.168.98.0/24.",
+    )
+    server_parser.add_argument(
+        "--nfs-allow-all-clients",
+        dest="nfs_allow_all_clients",
+        action="store_true",
+        default=None,
+        help="Allow all NFS clients. Only use for isolated labs.",
+    )
+    server_parser.add_argument(
+        "--no-nfs-allow-all-clients",
+        dest="nfs_allow_all_clients",
+        action="store_false",
+        help="Disable allow-all NFS clients.",
+    )
+    server_parser.add_argument(
+        "--nfs-create-export-path",
+        dest="nfs_create_export_path",
+        action="store_true",
+        default=None,
+        help="Store intent for deploy to create the NFS export path if missing.",
+    )
+    server_parser.add_argument(
+        "--no-nfs-create-export-path",
+        dest="nfs_create_export_path",
+        action="store_false",
+        help="Store intent for deploy not to create the NFS export path.",
+    )
+    server_parser.add_argument(
+        "--nfs-exports-file",
+        dest="nfs_exports_file",
+        help="NFS exports file path for later deploy.",
+    )
+
+    server_parser.add_argument(
+        "--target-mount-path",
+        dest="target_mount_path",
+        help="Client mount path used by Ansible, for example /home/unix/sysadmin.",
+    )
+    server_parser.add_argument(
+        "--mount-mode",
+        dest="mount_mode",
+        help="Client mount directory mode, for example 0755.",
+    )
+    server_parser.add_argument(
+        "--mount-owner",
+        dest="mount_owner",
+        help="Client mount directory owner.",
+    )
+    server_parser.add_argument(
+        "--mount-group",
+        dest="mount_group",
+        help="Client mount directory group.",
+    )
+
+    server_parser.add_argument(
+        "--firewall-manage",
+        dest="firewall_manage",
+        action="store_true",
+        default=None,
+        help="Store intent for deploy to manage required firewall rules.",
+    )
+    server_parser.add_argument(
+        "--no-firewall-manage",
+        dest="firewall_manage",
+        action="store_false",
+        help="Store intent for deploy not to manage firewall rules.",
+    )
+
+    add_command_verbose(server_parser)
+    server_parser.set_defaults(func=cmd_configure_server)
+
+    return server_parser
+
+
+def add_deploy_parser(subparsers):
+    """Add aerolitctl deploy parser."""
+    deploy_parser = subparsers.add_parser(
+        "deploy",
+        help="Apply saved AeroLIT configuration.",
+    )
+
+    deploy_subparsers = deploy_parser.add_subparsers(dest="deploy_command")
+
+    server_parser = deploy_subparsers.add_parser(
+        "server",
+        help="Apply saved server/network/NFS/PXE/controller configuration.",
+    )
+
+    server_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would happen without changing files or services.",
+    )
+    server_parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Show the saved deploy plan without changing anything.",
+    )
+    server_parser.add_argument(
+        "--skip-interface",
+        action="store_true",
+        help="Do not apply NetworkManager interface IP changes.",
+    )
+    server_parser.add_argument(
+        "--skip-nfs",
+        action="store_true",
+        help="Do not create/update NFS exports, permissions, or NFS services.",
+    )
+    server_parser.add_argument(
+        "--skip-firewall",
+        action="store_true",
+        help="Do not apply firewalld changes.",
+    )
+    server_parser.add_argument(
+        "--skip-pxe",
+        action="store_true",
+        help="Do not run the PXE server playbook.",
+    )
+    server_parser.add_argument(
+        "--skip-controller",
+        action="store_true",
+        help="Do not run the Ansible controller playbook.",
+    )
+
+    add_command_verbose(server_parser)
+    server_parser.set_defaults(func=cmd_deploy_server)
+
+    return deploy_parser
+
+
+def build_parser():
+    """Build command-line parser."""
+    parser = argparse.ArgumentParser(
+        prog="aerolitctl",
+        description="Command and control interface for AeroLIT bundles.",
+    )
+
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show more detailed output.",
+    )
+
+    subparsers = parser.add_subparsers(dest="command")
+
+    version_parser = subparsers.add_parser(
+        "version",
+        help="Show aerolitctl version.",
+    )
+    add_command_verbose(version_parser)
+    version_parser.set_defaults(func=cmd_version)
+
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Run AeroLIT health checks.",
+    )
+    add_command_verbose(doctor_parser)
+    doctor_parser.set_defaults(func=cmd_doctor)
+
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Show AeroLIT configuration and deployment readiness.",
+    )
+    add_command_verbose(status_parser)
+    status_parser.set_defaults(func=cmd_status)
+
+    configure_parser = subparsers.add_parser(
+        "configure",
+        help="Configure AeroLIT.",
+    )
+    configure_subparsers = configure_parser.add_subparsers(dest="configure_command")
+
+    init_parser = configure_subparsers.add_parser(
+        "init",
+        help="Initialize AeroLIT configuration, state, preserves, CI, and active Ansible files.",
+    )
+    init_parser.add_argument(
+        "--bundle",
+        default=None,
+        help="Path to AeroLIT bundle. Defaults to /opt/aerolit/aerolit-bundle.",
+    )
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing managed files from templates after backing them up.",
+    )
+    init_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would happen without making changes.",
+    )
+    init_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Do not prompt. Use defaults unless options are provided.",
+    )
+    init_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not create initialization backups before replacing files.",
+    )
+    init_parser.add_argument(
+        "--skip-preserve-file",
+        action="store_true",
+        help="Do not create or update collections-hub/.sync-preserve.",
+    )
+    init_parser.add_argument(
+        "--skip-ci-file",
+        action="store_true",
+        help="Do not generate collections-hub/.gitlab-ci.yml.",
+    )
+    init_parser.add_argument(
+        "--skip-ansible-files",
+        action="store_true",
+        help="Do not create or replace ansible/inventory, ansible/group_vars, or ansible/ansible.cfg.",
+    )
+    add_command_verbose(init_parser)
+    init_parser.set_defaults(func=cmd_configure_init)
+
+    add_configure_server_parser(configure_subparsers)
+    add_deploy_parser(subparsers)
+
+    path_parser = subparsers.add_parser(
+        "path",
+        help="Show or update the configured AeroLIT bundle path.",
+    )
+    path_subparsers = path_parser.add_subparsers(dest="path_command")
+
+    path_show_parser = path_subparsers.add_parser(
+        "show",
+        help="Show configured bundle path.",
+    )
+    add_command_verbose(path_show_parser)
+    path_show_parser.set_defaults(func=cmd_path_show)
+
+    path_set_parser = path_subparsers.add_parser(
+        "set",
+        help="Set configured bundle path.",
+    )
+    path_set_parser.add_argument(
+        "path",
+        help="Path to the AeroLIT bundle.",
+    )
+    path_set_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not back up /etc/aerolit/aerolitctl.yml before updating it.",
+    )
+    add_command_verbose(path_set_parser)
+    path_set_parser.set_defaults(func=cmd_path_set)
+
+    bundle_parser = subparsers.add_parser(
+        "bundle",
+        help="Show or validate the configured AeroLIT bundle.",
+    )
+    bundle_subparsers = bundle_parser.add_subparsers(dest="bundle_command")
+
+    bundle_show_parser = bundle_subparsers.add_parser(
+        "show",
+        help="Show bundle paths and status.",
+    )
+    bundle_show_parser.add_argument(
+        "--path",
+        default=None,
+        help="Inspect a bundle path without changing aerolitctl.yml.",
+    )
+    add_command_verbose(bundle_show_parser)
+    bundle_show_parser.set_defaults(func=cmd_bundle_show)
+
+    bundle_validate_parser = bundle_subparsers.add_parser(
+        "validate",
+        help="Validate bundle layout and required files.",
+    )
+    bundle_validate_parser.add_argument(
+        "--path",
+        default=None,
+        help="Validate a bundle path without changing aerolitctl.yml.",
+    )
+    add_command_verbose(bundle_validate_parser)
+    bundle_validate_parser.set_defaults(func=cmd_bundle_validate)
+
+    return parser
+
+
+def main(argv=None):
+    """Main entry point."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if not hasattr(args, "func"):
+        parser.print_help()
+        return 2
+
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        print("")
+        print("Cancelled.", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        print("ERROR: {}".format(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
