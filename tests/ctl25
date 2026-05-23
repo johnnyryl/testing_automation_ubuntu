@@ -1,0 +1,26 @@
+# 1. Move old generated file out of active group_vars/all
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all
+mkdir -p /opt/aerolit/aerolit-bundle/collections-hub/.manual-backups
+mv aerolit_bootstrap_generated.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/.manual-backups/aerolit_bootstrap_generated.yml.$(date +%Y%m%d-%H%M%S)
+
+# 2. Go back to the aerolitctl repo
+cd /path/to/aerolitctl/project
+
+# 3. Write the real server config/generated vars
+aerolitctl configure server \
+  --mode full \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --dhcp-start 192.168.109.100 \
+  --dhcp-end 192.168.109.149 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+
+# 4. Verify
+aerolitctl status
+aerolitctl deploy server --show
+aerolitctl deploy server --dry-run
