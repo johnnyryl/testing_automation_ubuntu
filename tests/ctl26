@@ -1,0 +1,89 @@
+This looks way better. The important part is now working:
+
+Created:
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+Updated:
+  /etc/aerolit/aerolitctl.yml
+
+Then aerolitctl status says:
+
+Generated vars current : yes
+Ready for deploy       : yes
+No blocking status findings detected.
+
+So the rename/fix worked.
+
+The only things I’d still look at are these:
+
+1. The interface change is real and potentially disruptive
+
+Your dry-run says it will do this:
+
+nmcli connection modify ens160 +ipv4.addresses 192.168.109.10/24
+nmcli connection up ens160
+
+That means a real deploy will add 192.168.109.10/24 to ens160 and bounce/reload that NetworkManager connection.
+
+That is probably what you want for a lab VM, but it is the highest-risk step. If you are connected through that same interface, it could briefly disconnect you. Since you are on console/VMware, it is probably okay.
+
+2. I want to verify the NFS exports file behavior
+
+The dry-run shows ownership, mode, NFS services, exportfs -rav, firewall, and playbooks.
+
+But I don’t clearly see a line saying it would create/update:
+
+/etc/exports.d/aerolit-bundle.exports
+
+That may just be because the output is wrapped or already exists, but I would check before running real deploy:
+
+ls -l /etc/exports.d/aerolit-bundle.exports || true
+cat /etc/exports.d/aerolit-bundle.exports || true
+
+Expected content should be something close to:
+
+/opt/aerolit/aerolit-bundle 192.168.109.0/24(rw,sync,no_subtree_check)
+
+If that file does not exist and dry-run is not saying it would create it, then we need to fix deploy_server.py before running the real deploy.
+
+3. The old generated file is handled now
+
+You moved this out:
+
+aerolit_bootstrap_generated.yml
+
+Good. Active group_vars/all should now only have the new server-generated file, plus your normal user/default files.
+
+Check:
+
+ls -l /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all
+
+You want to see:
+
+aerolitctl_server_generated.yml
+user_account.yml
+workstation_defaults.yml
+
+and not:
+
+aerolit_bootstrap_generated.yml
+
+What I’d run next
+
+Run these three checks:
+
+cat /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+ls -l /etc/exports.d/aerolit-bundle.exports || true
+cat /etc/exports.d/aerolit-bundle.exports || true
+aerolitctl deploy server --dry-run --skip-interface
+
+The --skip-interface dry-run is useful because it tests the rest of the deployment path without the NetworkManager IP change. If that looks clean, then I’d feel pretty good about the deployment logic.
+
+One small CLI thing still exists: --verbose has to go before the command right now:
+
+aerolitctl --verbose status
+
+not:
+
+aerolitctl status --verbose
+
+That is annoying, but not a deploy blocker.
