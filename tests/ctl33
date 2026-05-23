@@ -1,0 +1,119 @@
+Not quite. That is a good first test, but it only proves:
+
+python3 -m compileall src
+
+Syntax/imports are okay.
+
+aerolitctl configure server --dry-run --mode pxe --show
+aerolitctl configure server --dry-run --mode controller --show
+aerolitctl configure server --dry-run --mode full --show
+
+The display path works and --show respects --mode.
+
+It does not prove the saved config, generated vars, status, or deploy gating are correct.
+
+I’d run this next:
+
+aerolitctl configure server --dry-run --mode pxe
+aerolitctl configure server --dry-run --mode controller
+aerolitctl configure server --dry-run --mode full
+
+Then test the important bug we fixed: controller mode should turn NFS back on by default when --mode controller is supplied.
+
+aerolitctl configure server --dry-run --mode controller \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+
+Expected:
+
+PXE Server:
+  Enabled                        : no
+Ansible Controller / NFS:
+  Enabled                        : yes
+  NFS enabled                    : yes
+Firewall intent:
+  Services                       : nfs, mountd, rpc-bind
+  Ports                          : none
+
+Also test the explicit override:
+
+aerolitctl configure server --dry-run --mode controller --no-nfs \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+
+Expected:
+
+Ansible Controller / NFS:
+  Enabled                        : yes
+  NFS enabled                    : no
+
+Then, to prove deploy behaves right, you need to actually save each mode and run deploy dry-run.
+
+PXE mode:
+
+aerolitctl configure server \
+  --mode pxe \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --dhcp-start 192.168.109.100 \
+  --dhcp-end 192.168.109.149 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+aerolitctl status
+aerolitctl deploy server --dry-run
+
+Expected: PXE playbook runs, controller playbook skipped, NFS/controller skipped.
+
+Controller mode:
+
+aerolitctl configure server \
+  --mode controller \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+aerolitctl status
+aerolitctl deploy server --dry-run
+
+Expected: PXE playbook skipped, Ansible controller playbook runs, NFS/firewall services are included.
+
+Full mode:
+
+aerolitctl configure server \
+  --mode full \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --dhcp-start 192.168.109.100 \
+  --dhcp-end 192.168.109.149 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+aerolitctl status
+aerolitctl deploy server --dry-run
+
+Expected: PXE and Ansible Controller / NFS both enabled.
+
+Finally check the generated vars:
+
+grep -E "aerolit_pxe_enabled|aerolit_controller_enabled|aerolit_nfs_enabled|aerolit_server_mode" \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+
+So: your three commands are enough for a quick smoke test, but not enough to say everything is fixed. The save + status + deploy dry-run tests are what prove the actual behavior.
