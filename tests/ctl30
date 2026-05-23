@@ -1,0 +1,112 @@
+You’re right to be concerned. The fact that print_plan() still shows leftover values is not automatically proof that deploy will run everything, but it is exactly the kind of UI confusion that can hide a real deploy-gating bug.
+
+The key distinction is:
+
+configure server --dry-run --mode pxe
+
+is testing what the config would become, but it does not save that mode.
+
+So if your saved config is still mode: full, then:
+
+aerolitctl deploy server --dry-run
+
+will still plan a full deploy. That part is expected.
+
+But this is the real question we need to prove:
+
+When saved mode = pxe, does deploy server only run PXE-related actions?
+When saved mode = controller, does deploy server only run controller/NFS-related actions?
+
+What I’d test next, safely
+
+First, back up the current known-good config and generated vars:
+
+cp -a /etc/aerolit/aerolitctl.yml /etc/aerolit/aerolitctl.yml.before-mode-test.$(date +%Y%m%d-%H%M%S)
+cp -a \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml.before-mode-test.$(date +%Y%m%d-%H%M%S)
+
+Then actually save PXE mode:
+
+aerolitctl configure server \
+  --mode pxe \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --dhcp-start 192.168.109.100 \
+  --dhcp-end 192.168.109.149 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+
+Then run:
+
+aerolitctl status
+aerolitctl deploy server --show
+aerolitctl deploy server --dry-run
+
+For saved mode: pxe, I would expect deploy dry-run to show PXE playbook actions, maybe interface/firewall actions depending your saved intent, but not Ansible controller playbook and not NFS export creation/service work.
+
+Then test controller mode:
+
+aerolitctl configure server \
+  --mode controller \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+aerolitctl status
+aerolitctl deploy server --show
+aerolitctl deploy server --dry-run
+
+For saved mode: controller, I would expect deploy dry-run to show controller/NFS actions, but not PXE playbook actions.
+
+Then restore or save full mode again:
+
+aerolitctl configure server \
+  --mode full \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --dhcp-start 192.168.109.100 \
+  --dhcp-end 192.168.109.149 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+
+What would prove deploy is wrong
+
+If saved mode: pxe still shows something like this in deploy server --dry-run:
+
+Would run ansible_controller.yml
+Would create /etc/exports.d/aerolit-bundle.exports
+Would enable/start NFS services
+
+then yes, deploy is stepping on its own mode logic.
+
+If saved mode: controller still shows:
+
+Would run pxe_server.yml
+
+then deploy is also wrong there.
+
+What I would fix regardless
+
+I would still clean up print_plan() now. Disabled sections should not look half-enabled. For example, PXE mode should show something closer to:
+
+NFS/controller:
+  Enabled : False
+  Skipped because mode is pxe
+
+instead of showing export paths, services, mount paths, etc. Same for controller mode:
+
+PXE:
+  Enabled : False
+  Skipped because mode is controller
+
+That makes the output much safer because you can immediately tell whether a section is actually active or just carrying saved/default values.
