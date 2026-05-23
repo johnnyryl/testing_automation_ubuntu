@@ -1,0 +1,124 @@
+Yes — since you touched paths.py, initialize.py, server.py, status.py, deploy_server.py, deploy.py, and cli.py, I’d test in layers.
+
+Start with syntax/import tests first, before running any real commands.
+
+cd /path/to/aerolitctl/project
+python3 -m compileall src
+
+Then check for old/stale names from the rename:
+
+grep -R "generated_bootstrap_vars_file" -n src || true
+grep -R "aerolit_bootstrap_generated.yml" -n src || true
+grep -R "bootstrap_repo_environment_playbook" -n src || true
+grep -R "bootstrap_repo_environment.yml" -n src || true
+
+Expected: ideally no matches for those old names, unless you intentionally left a compatibility comment somewhere.
+
+Then check parser/help wiring:
+
+python3 -m aerolitctl.cli --help
+python3 -m aerolitctl.cli version
+python3 -m aerolitctl.cli configure --help
+python3 -m aerolitctl.cli configure init --help
+python3 -m aerolitctl.cli configure server --help
+python3 -m aerolitctl.cli status --help
+python3 -m aerolitctl.cli deploy --help
+python3 -m aerolitctl.cli deploy server --help
+
+If you have the installed command available too, also run:
+
+aerolitctl --help
+aerolitctl version
+aerolitctl status --help
+aerolitctl deploy server --help
+
+Then test that the configured path still works:
+
+aerolitctl path show
+aerolitctl bundle show
+aerolitctl bundle validate
+
+Now test init safely:
+
+aerolitctl configure init --dry-run --non-interactive --verbose
+
+Then test server config read/show:
+
+aerolitctl configure server --show
+
+Then test server config dry-run write path:
+
+aerolitctl configure server --dry-run \
+  --mode full \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --dhcp-start 192.168.109.100 \
+  --dhcp-end 192.168.109.149 \
+  --gateway none \
+  --nfs-export-path /home/unix/bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+
+Then verify the renamed generated file path:
+
+ls -l /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/
+cat /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+
+If that file name is correct and the contents look right, run:
+
+aerolitctl status
+aerolitctl status --verbose
+
+The important things to check in status:
+
+Generated server vars = aerolitctl_server_generated.yml
+PXE playbook = pxe_server.yml
+Controller playbook = ansible_controller.yml
+No reference to bootstrap_repo_environment.yml
+Next recommended command makes sense
+
+Then test deploy server without changing anything:
+
+aerolitctl deploy server --show
+aerolitctl deploy server --dry-run
+aerolitctl deploy server --dry-run --skip-interface
+aerolitctl deploy server --dry-run --skip-nfs
+aerolitctl deploy server --dry-run --skip-pxe
+aerolitctl deploy server --dry-run --skip-controller
+
+Also test the split modes, because these catch a lot of wiring mistakes:
+
+aerolitctl configure server --dry-run --mode pxe --show
+aerolitctl configure server --dry-run --mode controller --show
+aerolitctl configure server --dry-run --mode full --show
+
+If you have deploy pxe and deploy ansible parser stubs already started, test only help for now:
+
+aerolitctl deploy pxe --help
+aerolitctl deploy ansible --help
+
+If they don’t exist yet, it should fail cleanly and that’s fine.
+
+Then run Git checks:
+
+git diff --check
+git status
+git diff -- src/aerolitctl/paths.py
+git diff -- src/aerolitctl/initialize.py
+git diff -- src/aerolitctl/server.py
+git diff -- src/aerolitctl/status.py
+git diff -- src/aerolitctl/deploy_server.py
+git diff -- src/aerolitctl/deploy.py
+git diff -- src/aerolitctl/cli.py
+
+The highest-value final smoke test is this sequence:
+
+aerolitctl path show
+aerolitctl bundle validate
+aerolitctl configure server --show
+aerolitctl status
+aerolitctl deploy server --show
+aerolitctl deploy server --dry-run
+
+Do not run non-dry-run aerolitctl deploy server yet until those all pass cleanly and the generated vars file name/content looks exactly right.
