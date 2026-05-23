@@ -1,0 +1,257 @@
+Yes, that’s cleaner. Since you’re willing to update everything now, I would not keep compatibility wrapper names. Do a clean rename everywhere so the code is easier to understand later.
+
+Here’s the rename plan I’d use.
+
+1. In paths.py, use the final names only
+
+Replace:
+
+def ansible_inventory_file(bundle_path):
+    return ansible_dir(bundle_path) / "inventory"
+def ansible_inventory_template_file(bundle_path):
+    return ansible_dir(bundle_path) / "inventory_template"
+def generated_bootstrap_vars_file(bundle_path):
+    return ansible_group_vars_all_dir(bundle_path) / "aerolitctl_server_generated.yml"
+
+With:
+
+def ansible_inventory_dir(bundle_path):
+    """Return active Ansible inventory directory path."""
+    return ansible_dir(bundle_path) / "inventory"
+def ansible_inventory_template_dir(bundle_path):
+    """Return inventory template directory path."""
+    return ansible_dir(bundle_path) / "inventory_template"
+def aerolitctl_server_generated_vars_file(bundle_path):
+    """Return aerolitctl generated server vars path inside active group_vars/all."""
+    return ansible_group_vars_all_dir(bundle_path) / "aerolitctl_server_generated.yml"
+def aerolitctl_ansible_generated_vars_file(bundle_path):
+    """Return aerolitctl generated Ansible vars path inside active group_vars/all."""
+    return ansible_group_vars_all_dir(bundle_path) / "aerolitctl_ansible_generated.yml"
+def aerolitctl_inventory_file(bundle_path):
+    """Return aerolitctl managed inventory fragment path."""
+    return ansible_inventory_dir(bundle_path) / "90_aerolitctl.ini"
+
+Also add these playbook helpers:
+
+def bootstrap_repo_environment_playbook(bundle_path):
+    """Return bootstrap repo environment playbook path."""
+    return ansible_dir(bundle_path) / "bootstrap_repo_environment.yml"
+def pxe_server_playbook(bundle_path):
+    """Return PXE server playbook path."""
+    return ansible_dir(bundle_path) / "pxe_server.yml"
+def ansible_controller_playbook(bundle_path):
+    """Return Ansible controller playbook path."""
+    return ansible_dir(bundle_path) / "ansible_controller.yml"
+
+2. Update bundle_derived_paths()
+
+Change the bottom section to this:
+
+return {
+    "bundle": str(bundle_path),
+    "collections_hub": str(collections_hub_path(bundle_path)),
+    "repos": str(bundle_path / "repos"),
+    "files": str(bundle_path / "files"),
+    "extracted_isos": str(bundle_path / "extracted_isos"),
+    "bootstrap": str(bundle_path / "bootstrap.sh"),
+    "manifest": str(bundle_path / "aerolit-bundle.yml"),
+    "ansible": str(ansible_dir(bundle_path)),
+    "ansible_cfg": str(ansible_cfg_file(bundle_path)),
+    "ansible_inventory": str(ansible_inventory_dir(bundle_path)),
+    "ansible_group_vars": str(ansible_group_vars_dir(bundle_path)),
+    "ansible_group_vars_all": str(ansible_group_vars_all_dir(bundle_path)),
+    "aerolitctl_inventory": str(aerolitctl_inventory_file(bundle_path)),
+    "aerolitctl_server_generated_vars": str(aerolitctl_server_generated_vars_file(bundle_path)),
+    "aerolitctl_ansible_generated_vars": str(aerolitctl_ansible_generated_vars_file(bundle_path)),
+    "bootstrap_repo_environment_playbook": str(bootstrap_repo_environment_playbook(bundle_path)),
+    "pxe_server_playbook": str(pxe_server_playbook(bundle_path)),
+    "ansible_controller_playbook": str(ansible_controller_playbook(bundle_path)),
+    "sync_preserve": str(sync_preserve_file(bundle_path)),
+    "gitlab_ci": str(gitlab_ci_file(bundle_path)),
+    "initialization_backups": str(initialization_backup_root(bundle_path)),
+}
+
+3. Update imports everywhere
+
+Search for these old names:
+
+grep -R "generated_bootstrap_vars_file" -n src/aerolitctl
+grep -R "ansible_inventory_file" -n src/aerolitctl
+grep -R "ansible_inventory_template_file" -n src/aerolitctl
+grep -R "generated_bootstrap_vars" -n src/aerolitctl
+grep -R "aerolit_bootstrap_generated" -n src/aerolitctl
+
+Replace them like this:
+
+generated_bootstrap_vars_file
+→ aerolitctl_server_generated_vars_file
+ansible_inventory_file
+→ ansible_inventory_dir
+ansible_inventory_template_file
+→ ansible_inventory_template_dir
+generated_bootstrap_vars
+→ aerolitctl_server_generated_vars
+aerolit_bootstrap_generated.yml
+→ aerolitctl_server_generated.yml
+
+4. Update initialize.py
+
+Imports should become:
+
+from .paths import (
+    BACKUP_DIR,
+    CONFIG_FILE,
+    DEFAULT_BUNDLE_PATH,
+    STATE_FILE,
+    aerolitctl_server_generated_vars_file,
+    ansible_cfg_file,
+    ansible_cfg_template_file,
+    ansible_dir,
+    ansible_group_vars_dir,
+    ansible_group_vars_template_dir,
+    ansible_inventory_dir,
+    ansible_inventory_template_dir,
+    collections_hub_path,
+    gitlab_ci_file,
+    initialization_backup_root,
+    provision_gitlab_template,
+    required_control_directories,
+    scheduled_gitlab_template,
+    stig_gitlab_template,
+    sync_preserve_file,
+    system_update_gitlab_template,
+)
+
+Then inside validate_basic_bundle_layout():
+
+required_ansible_templates = [
+    ansible_cfg_template_file(bundle_path),
+    ansible_inventory_template_dir(bundle_path),
+    ansible_group_vars_template_dir(bundle_path),
+]
+
+Inside initialize_collections_hub_ansible():
+
+copy_path(
+    ansible_inventory_template_dir(bundle_path),
+    ansible_inventory_dir(bundle_path),
+    report,
+    overwrite=force,
+    backup=True,
+    dry_run=dry_run,
+    backup_root=backup_root,
+    base_path=collections_hub,
+    no_backup=no_backup,
+)
+
+And:
+
+write_text_file(
+    aerolitctl_server_generated_vars_file(bundle_path),
+    GENERATED_SERVER_VARS_CONTENT,
+    report,
+    overwrite=force,
+    backup=True,
+    dry_run=dry_run,
+    backup_root=backup_root,
+    base_path=collections_hub,
+    no_backup=no_backup,
+)
+
+I would also rename this constant:
+
+GENERATED_BOOTSTRAP_VARS_CONTENT
+
+to:
+
+GENERATED_SERVER_VARS_CONTENT
+
+And update the text inside it:
+
+GENERATED_SERVER_VARS_CONTENT = """---
+# Generated AeroLIT server variables
+# Created by aerolitctl configure server.
+# Later server/deploy commands may update this file.
+aerolit_generated_by: aerolitctl
+aerolit_generated_reason: configure server
+"""
+
+Small note: since configure init creates the empty starter file, this comment could also say “Created by aerolitctl configure init for later configure server updates.” Either is fine, but don’t call it “bootstrap” anymore.
+
+5. Update server.py
+
+Anywhere it writes the generated vars file should now import/use:
+
+aerolitctl_server_generated_vars_file
+
+Not:
+
+generated_bootstrap_vars_file
+
+And the output label should say something like:
+
+Generated server vars path:
+
+not:
+
+Generated bootstrap vars path:
+
+6. Update status.py
+
+Imports should use the final names:
+
+from .paths import (
+    CONFIG_FILE,
+    aerolitctl_server_generated_vars_file,
+    ansible_controller_playbook,
+    ansible_group_vars_dir,
+    ansible_inventory_dir,
+    collections_hub_path,
+    pxe_server_playbook,
+)
+
+Then replace:
+
+generated_vars = generated_bootstrap_vars_file(bundle_path)
+
+with:
+
+server_generated_vars = aerolitctl_server_generated_vars_file(bundle_path)
+
+And replace manual playbook building like:
+
+find_playbook(ansible_dir, "pxe_server.yml")
+
+with:
+
+pxe_server_playbook(bundle_path)
+
+and:
+
+ansible_controller_playbook(bundle_path)
+
+7. Update tests/docs/output examples
+
+Run these after the rename:
+
+grep -R "generated_bootstrap_vars_file" -n src tests || true
+grep -R "generated_bootstrap_vars" -n src tests || true
+grep -R "aerolit_bootstrap_generated" -n src tests || true
+grep -R "ansible_inventory_file" -n src tests || true
+grep -R "ansible_inventory_template_file" -n src tests || true
+
+You want no hits unless it’s in an intentional changelog/comment.
+
+Then run:
+
+python -m compileall src
+aerolitctl configure init --dry-run --non-interactive
+aerolitctl configure server --show
+aerolitctl status
+aerolitctl bundle show
+
+That gets you fully away from the confusing “bootstrap generated” naming and lines everything up with the ownership model:
+
+configure server  → group_vars/all/aerolitctl_server_generated.yml
+configure ansible → group_vars/all/aerolitctl_ansible_generated.yml + inventory/90_aerolitctl.ini
+deploy server     → consumes generated vars and runs playbooks
