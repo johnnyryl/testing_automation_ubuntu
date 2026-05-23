@@ -1,0 +1,91 @@
+Yes, fix this now. The bug is very specific:
+
+--mode pxe and --mode controller work in the normal dry-run path, but --show is using the saved config too early and ignoring CLI overrides.
+
+So the fix is not in cli.py. It is in server.py, inside run_configure_server().
+
+Find the early block that looks like this:
+
+if show:
+    server = current_server_config(config)
+    plan = build_plan_from_values(
+        ...
+    )
+    print_plan(plan, bundle_path)
+    print("Show complete. No files changed.")
+    return 0
+
+Delete that whole early if show: block.
+
+Then find the normal path lower in run_configure_server() where it builds the actual proposed plan. It is the path that already works for:
+
+aerolitctl configure server --dry-run --mode pxe
+aerolitctl configure server --dry-run --mode controller
+
+Right after that normal path does:
+
+print_plan(plan, bundle_path)
+
+add this immediately after it:
+
+    if show:
+        print("Show complete. No files were changed.")
+        return 0
+
+So the structure should become:
+
+    plan = build_plan_from_values(
+        config,
+        bundle_path,
+        mode=mode,
+        interface=interface,
+        server_ip=server_ip,
+        network=network,
+        prefix=prefix,
+        gateway=gateway,
+        dns_servers=dns_servers,
+        dhcp_start=dhcp_start,
+        dhcp_end=dhcp_end,
+        pxe_http_port=pxe_http_port,
+        pxe_http_bind_address=pxe_http_bind_address,
+        configure_interface=configure_interface,
+        nfs_enabled=nfs_enabled,
+        nfs_export_path=nfs_export_path,
+        nfs_allowed_clients=nfs_allowed_clients,
+        nfs_allow_all_clients=nfs_allow_all_clients,
+        nfs_create_export_path=nfs_create_export_path,
+        nfs_exports_file=nfs_exports_file,
+        target_mount_path=target_mount_path,
+        mount_mode=mount_mode,
+        mount_owner=mount_owner,
+        mount_group=mount_group,
+        firewall_manage=firewall_manage,
+    )
+    print_plan(plan, bundle_path)
+    if show:
+        print("Show complete. No files were changed.")
+        return 0
+    if dry_run:
+        ...
+
+The exact build_plan_from_values(...) arguments may differ slightly in your file, so do not invent a second copy if one already exists. The key idea is:
+
+--show must use the same plan object that dry-run/write uses.
+
+Then test only this:
+
+python3 -m compileall src
+aerolitctl configure server --dry-run --mode pxe
+aerolitctl configure server --dry-run --mode pxe --show
+aerolitctl configure server --dry-run --mode controller
+aerolitctl configure server --dry-run --mode controller --show
+aerolitctl configure server --dry-run --mode full
+aerolitctl configure server --dry-run --mode full --show
+
+Expected:
+
+--mode pxe --show         -> Mode : pxe
+--mode controller --show  -> Mode : controller
+--mode full --show        -> Mode : full
+
+Your screenshot already proves the non---show mode logic is fine. We only need to stop --show from taking the old saved-config shortcut.
