@@ -1,0 +1,64 @@
+Yes — from these screenshots, the verbose wiring looks right.
+
+You now have the important pieces:
+
+verbose=getattr(args, "verbose", False),
+
+in:
+
+cmd_status()
+cmd_configure_server()
+cmd_deploy_server()
+
+And in server.py you now have:
+
+verbose=False,
+
+in the run_configure_server() function signature, plus:
+
+report = ServerConfigReport(verbose=verbose)
+
+That means these should now be supported:
+
+aerolitctl status --verbose
+aerolitctl --verbose status
+aerolitctl configure init --verbose --dry-run --non-interactive
+aerolitctl --verbose configure init --dry-run --non-interactive
+aerolitctl configure server --verbose --show
+aerolitctl --verbose configure server --show
+aerolitctl deploy server --verbose --dry-run
+aerolitctl --verbose deploy server --dry-run
+
+The only thing I would double-check is that every leaf parser you care about calls:
+
+add_command_verbose(...)
+
+From what you showed, you added it to status, configure init, configure server, deploy server, path show, path set, bundle show, and bundle validate, so that looks good.
+
+Run these now:
+
+python3 -m compileall src
+
+Then:
+
+aerolitctl status --verbose
+aerolitctl configure server --verbose --show
+aerolitctl deploy server --verbose --dry-run
+
+Also test the root-level form:
+
+aerolitctl --verbose status
+aerolitctl --verbose configure server --show
+aerolitctl --verbose deploy server --dry-run
+
+How to read failures:
+
+unrecognized arguments: --verbose
+
+means the specific leaf parser is missing add_command_verbose(...).
+
+unexpected keyword argument 'verbose'
+
+means the CLI is passing verbose=... into a function that does not accept it yet.
+
+But based on your screenshots, the status, configure server, and deploy server paths look correctly wired now.
