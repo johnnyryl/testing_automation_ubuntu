@@ -1,0 +1,84 @@
+You’re right to pause here. Do not assume plain aerolitctl is using the code you just edited. It might be an older installed copy, or it might not exist yet.
+
+For testing your current GitLab repo checkout, use this pattern from the repo root:
+
+cd /path/to/aerolitctl/project
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+AEROLITCTL="python3 -m aerolitctl.cli"
+
+Then use:
+
+$AEROLITCTL version
+$AEROLITCTL --help
+$AEROLITCTL status
+
+instead of:
+
+aerolitctl version
+aerolitctl --help
+aerolitctl status
+
+So the tests I gave you should mostly be the same, but replace every plain aerolitctl command with $AEROLITCTL.
+
+Example:
+
+python3 -m compileall src
+$AEROLITCTL --help
+$AEROLITCTL version
+$AEROLITCTL configure --help
+$AEROLITCTL configure init --help
+$AEROLITCTL configure server --help
+$AEROLITCTL status --help
+$AEROLITCTL deploy --help
+$AEROLITCTL deploy server --help
+
+Then:
+
+$AEROLITCTL path show
+$AEROLITCTL bundle show
+$AEROLITCTL bundle validate
+$AEROLITCTL configure init --dry-run --non-interactive --verbose
+$AEROLITCTL configure server --show
+
+And this becomes:
+
+$AEROLITCTL configure server --dry-run \
+  --mode full \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --dhcp-start 192.168.109.100 \
+  --dhcp-end 192.168.109.149 \
+  --gateway none \
+  --nfs-export-path /home/unix/bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+
+Then:
+
+$AEROLITCTL status
+$AEROLITCTL status --verbose
+$AEROLITCTL deploy server --show
+$AEROLITCTL deploy server --dry-run
+$AEROLITCTL deploy server --dry-run --skip-interface
+$AEROLITCTL deploy server --dry-run --skip-nfs
+$AEROLITCTL deploy server --dry-run --skip-pxe
+$AEROLITCTL deploy server --dry-run --skip-controller
+
+When I said “installed command,” I meant this kind of thing:
+
+command -v aerolitctl
+
+If that returns a path, then aerolitctl exists somewhere on the system. But it may not be the code you just edited. To avoid confusion for now, use $AEROLITCTL for all testing.
+
+After everything passes, then you can decide whether to install it in editable mode so plain aerolitctl points at your repo code, probably something like:
+
+python3 -m pip install --user -e .
+
+But for now, safest test setup is:
+
+cd /path/to/aerolitctl/project
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+AEROLITCTL="python3 -m aerolitctl.cli"
+
+Then run the same tests using $AEROLITCTL.
