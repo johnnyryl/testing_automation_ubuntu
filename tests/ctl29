@@ -1,3 +1,15 @@
+
+aerolitctl --verbose status
+aerolitctl status --verbose
+
+aerolitctl deploy server --dry-run --verbose
+aerolitctl deploy server --verbose --dry-run
+
+aerolitctl configure init --dry-run --non-interactive --verbose
+aerolitctl configure server --dry-run --mode pxe --verbose
+aerolitctl configure server --dry-run --mode pxe --show --verbose
+
+
     if show:
         print("Generated vars path:")
         print("  {}".format(generated_vars_path))
