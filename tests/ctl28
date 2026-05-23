@@ -62,3 +62,17 @@ unexpected keyword argument 'verbose'
 means the CLI is passing verbose=... into a function that does not accept it yet.
 
 But based on your screenshots, the status, configure server, and deploy server paths look correctly wired now.
+
+
+
+
+python3 -m compileall src
+
+aerolitctl status --verbose
+aerolitctl configure init --verbose --dry-run --non-interactive
+aerolitctl configure server --verbose --show
+aerolitctl deploy server --verbose --dry-run
+
+aerolitctl --verbose status
+aerolitctl --verbose configure server --show
+aerolitctl --verbose deploy server --dry-run
