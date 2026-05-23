@@ -1,3 +1,11 @@
+    if show:
+        print("Generated vars path:")
+        print("  {}".format(generated_vars_path))
+        print("")
+        print("Show complete. No files were changed.")
+        return 0
+
+
 Yes, fix this now. The bug is very specific:
 
 --mode pxe and --mode controller work in the normal dry-run path, but --show is using the saved config too early and ignoring CLI overrides.
