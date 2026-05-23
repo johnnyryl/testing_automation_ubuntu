@@ -1321,8 +1321,8 @@ def choose_nfs_settings(config, bundle_path, server_ip, network):
         print("")
         print("The NFS export path already exists.")
         print("A later deploy step does not need to create it.")
-		create_export_default = current_nfs.get("create_export_path", False)
-	else:
+        create_export_default = current_nfs.get("create_export_path", False)
+    else:
         print("")
         print("NOTE: {} does not currently exist.".format(export_path))
         print("")
@@ -1331,7 +1331,7 @@ def choose_nfs_settings(config, bundle_path, server_ip, network):
         print("")
         print("Choose 'yes' only if this is an intentional new export directory")
         print("that a later deploy step should create.")
-		create_export_default = current_nfs.get("create_export_path", False)
+        create_export_default = current_nfs.get("create_export_path", False)
 
     create_export_path = yes_no_prompt(
         "Allow a later deploy step to create this NFS export path if missing?",
@@ -2239,7 +2239,7 @@ def run_configure_server(
     mount_owner=None,
     mount_group=None,
     firewall_manage=None,
-	verbose=False,
+    verbose=False,
 ):
     """Configure AeroLIT server values and generated Ansible vars."""
     report = ServerConfigReport(verbose=verbose)
@@ -2290,12 +2290,12 @@ def run_configure_server(
 
     print_plan(plan, bundle_path)
 
-	if show:
-			print("Generated vars path:")
-			print("  {}".format(generated_vars_path))
-			print("")
-			print("Show complete. No files were changed.")
-			return 0
+    if show:
+        print("Generated vars path:")
+        print("  {}".format(generated_vars_path))
+        print("")
+        print("Show complete. No files were changed.")
+        return 0
 
     for warning in collect_plan_warnings(plan):
         report.add("warnings", warning)
