@@ -1320,18 +1320,18 @@ def choose_nfs_settings(config, bundle_path, server_ip, network):
     if export_path_obj.exists():
         print("")
         print("The NFS export path already exists.")
-        print("A later deploy setup does not need to create it.")
+        print("A later deploy step does not need to create it.")
 				create_export_default = current_nfs.get("create_export_path", False)
 		else
         print("")
         print("NOTE: {} does not currently exist.".format(export_path))
         print("")
-        print("If this path is supposed to be your Aerolit bundle, choose 'no'")
+        print("If this path is supposed to be your AeroLIT bundle, choose 'no'")
         print("and fix the bundle path instead.")
         print("")
         print("Choose 'yes' only if this is an intentional new export directory")
-        print("that a later deploy step should create")
-				create_export_default = current_nfs.get("create_export_path", False")
+        print("that a later deploy step should create.")
+				create_export_default = current_nfs.get("create_export_path", False)
 
     create_export_path = yes_no_prompt(
         "Allow a later deploy step to create this NFS export path if missing?",
