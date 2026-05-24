@@ -1,0 +1,1113 @@
+#!/usr/bin/env python3
+"""AeroLIT aerolitctl merge-readiness regression test.
+
+Run from the aerolitctl repo root on a test VM.
+
+This is a broad manual smoke/regression test for the work around:
+- CLI parsing/help
+- configure server mode handling
+- generated server vars
+- status read-only reporting
+- deploy server dry-run mode behavior
+- show vs dry-run safety behavior
+- configure init dry-run behavior
+
+It intentionally runs real `aerolitctl configure server` commands because those
+are the only way to confirm saved config and generated vars behavior. By default
+it restores the original config/generated vars before exiting.
+
+Recommended location:
+  tools/aerolitctl_merge_readiness.py
+
+Recommended run:
+  sudo python3 tools/aerolitctl_merge_readiness.py
+"""
+
+from __future__ import print_function
+
+import argparse
+import datetime
+import difflib
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+class TestFailure(Exception):
+    """Raised when a merge-readiness check fails."""
+
+
+def timestamp():
+    """Return a filesystem-safe timestamp."""
+    return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def quote_cmd_part(value):
+    """Quote one shell command part for display."""
+    value = str(value)
+    if re.search(r"[^A-Za-z0-9_@%+=:,./-]", value):
+        return "'" + value.replace("'", "'\"'\"'") + "'"
+    return value
+
+
+def shell_quote(value):
+    """Quote one value for use inside a generated POSIX shell script."""
+    return "'" + str(value).replace("'", "'\"'\"'") + "'"
+
+
+def render_cmd(command):
+    """Render a command list for readable logging."""
+    return " ".join(quote_cmd_part(item) for item in command)
+
+
+def read_text(path):
+    """Read text from path while tolerating non-UTF8 bytes."""
+    with open(str(path), "r", encoding="utf-8", errors="ignore") as handle:
+        return handle.read()
+
+
+def write_text(path, content):
+    """Write text to path, creating parent directories if needed."""
+    path = Path(path)
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True)
+    with open(str(path), "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
+def run_cmd(command, cwd=None, expected_rc=0, log_path=None, env=None):
+    """Run a command, print output, optionally save output, and return output."""
+    print("")
+    print("$ {}".format(render_cmd(command)))
+
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+    )
+    stdout, stderr = process.communicate()
+
+    combined = stdout or ""
+    if stderr:
+        combined += "\n[stderr]\n{}".format(stderr)
+
+    if stdout:
+        sys.stdout.write(stdout)
+        if not stdout.endswith("\n"):
+            print("")
+
+    if stderr:
+        sys.stderr.write(stderr)
+        if not stderr.endswith("\n"):
+            print("", file=sys.stderr)
+
+    if log_path:
+        write_text(log_path, combined)
+
+    if expected_rc is not None and process.returncode != expected_rc:
+        raise TestFailure(
+            "Command failed with rc={}: {}".format(
+                process.returncode,
+                render_cmd(command),
+            )
+        )
+
+    lowered = combined.lower()
+    if "unrecognized arguments" in lowered:
+        raise TestFailure(
+            "Command output contained 'unrecognized arguments': {}".format(
+                render_cmd(command)
+            )
+        )
+
+    if "distributionnotfound" in lowered and "aerolitctl" in lowered:
+        raise TestFailure(
+            "aerolitctl failed with pkg_resources DistributionNotFound. "
+            "The test wrapper should avoid the installed console-script wrapper; "
+            "check the generated wrapper under the log directory."
+        )
+
+    return combined
+
+
+def command_output(command, cwd=None):
+    """Return rc/stdout/stderr for a command without printing it."""
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+        stdout, stderr = process.communicate()
+        return process.returncode, stdout or "", stderr or ""
+    except OSError as exc:
+        return 127, "", str(exc)
+
+
+def assert_contains(text, expected, label=None):
+    """Assert text contains expected string."""
+    if expected not in text:
+        raise TestFailure(
+            "Missing expected text{}: {}".format(
+                " in {}".format(label) if label else "",
+                expected,
+            )
+        )
+
+
+def assert_not_contains(text, unexpected, label=None):
+    """Assert text does not contain unexpected string."""
+    if unexpected in text:
+        raise TestFailure(
+            "Unexpected text found{}: {}".format(
+                " in {}".format(label) if label else "",
+                unexpected,
+            )
+        )
+
+
+def assert_regex(text, pattern, label=None):
+    """Assert text matches regex pattern."""
+    if not re.search(pattern, text, re.MULTILINE):
+        raise TestFailure(
+            "Missing expected pattern{}: {}".format(
+                " in {}".format(label) if label else "",
+                pattern,
+            )
+        )
+
+
+def assert_not_regex(text, pattern, label=None):
+    """Assert text does not match regex pattern."""
+    if re.search(pattern, text, re.MULTILINE):
+        raise TestFailure(
+            "Unexpected pattern found{}: {}".format(
+                " in {}".format(label) if label else "",
+                pattern,
+            )
+        )
+
+
+def sha256_file(path):
+    """Return sha256 line for a path, or MISSING when absent."""
+    path = Path(path)
+    if not path.exists():
+        return "MISSING  {}".format(path)
+
+    digest = hashlib.sha256()
+    with open(str(path), "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+    return "{}  {}".format(digest.hexdigest(), path)
+
+
+def sha256_paths(paths):
+    """Return sha256 lines for all supplied paths."""
+    return "\n".join(sha256_file(path) for path in paths) + "\n"
+
+
+def assert_hashes_same(before, after, label):
+    """Assert a before/after sha256 listing is unchanged."""
+    if before == after:
+        return
+
+    diff = "".join(
+        difflib.unified_diff(
+            before.splitlines(True),
+            after.splitlines(True),
+            fromfile="before-{}".format(label),
+            tofile="after-{}".format(label),
+        )
+    )
+    raise TestFailure("{} changed files unexpectedly:\n{}".format(label, diff))
+
+
+def cleanup_python_artifacts(repo_root):
+    """Remove bytecode/cache junk without deleting editable-install metadata."""
+    repo_root = Path(repo_root)
+
+    for cache_dir in repo_root.rglob("__pycache__"):
+        if ".git" in cache_dir.parts:
+            continue
+        shutil.rmtree(str(cache_dir), ignore_errors=True)
+
+    for pyc_file in repo_root.rglob("*.pyc"):
+        if ".git" in pyc_file.parts:
+            continue
+        try:
+            pyc_file.unlink()
+        except OSError:
+            pass
+
+
+def create_local_aerolitctl_wrapper(repo_root, log_dir):
+    """Create a temporary aerolitctl wrapper that runs the checked-out source."""
+    repo_root = Path(repo_root)
+    src_dir = repo_root / "src"
+    wrapper_dir = Path(log_dir) / "bin"
+    wrapper_dir.mkdir(parents=True, exist_ok=True)
+
+    wrapper_path = wrapper_dir / "aerolitctl"
+    inline_python = (
+        "import sys; "
+        "from aerolitctl.cli import main; "
+        "sys.argv[0] = 'aerolitctl'; "
+        "sys.exit(main())"
+    )
+
+    script = """#!/bin/sh
+if [ -n "${{PYTHONPATH:-}}" ]; then
+    export PYTHONPATH={src_dir}:$PYTHONPATH
+else
+    export PYTHONPATH={src_dir}
+fi
+exec {python_exe} -c {inline_python} "$@"
+""".format(
+        src_dir=shell_quote(src_dir),
+        python_exe=shell_quote(sys.executable),
+        inline_python=shell_quote(inline_python),
+    )
+
+    wrapper_path.write_text(script)
+    os.chmod(str(wrapper_path), 0o755)
+
+    return wrapper_path
+
+
+def snapshot_files(paths, backup_dir):
+    """Snapshot important files so real configure tests can be restored."""
+    backup_dir = Path(backup_dir)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    snapshot = {}
+
+    for path in paths:
+        path = Path(path)
+        key = str(path)
+        if path.exists():
+            data = path.read_bytes()
+            snapshot[key] = data
+
+            safe_name = key.strip("/").replace("/", "__")
+            backup_path = backup_dir / safe_name
+            backup_path.write_bytes(data)
+        else:
+            snapshot[key] = None
+
+    return snapshot
+
+
+def restore_snapshot(snapshot):
+    """Restore files captured by snapshot_files."""
+    for key, data in snapshot.items():
+        path = Path(key)
+
+        if data is None:
+            if path.exists():
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            continue
+
+        if not path.parent.exists():
+            path.parent.mkdir(parents=True)
+
+        path.write_bytes(data)
+
+
+def parse_generated_vars(path):
+    """Parse simple top-level generated YAML scalars into a dict."""
+    values = {}
+    content = read_text(path)
+
+    for line in content.splitlines():
+        match = re.match(r"^\s*([A-Za-z0-9_]+):\s*(.*?)\s*$", line)
+        if not match:
+            continue
+
+        key = match.group(1)
+        value = match.group(2).strip().strip("'").strip('"')
+        values[key] = value
+
+    return values
+
+
+def expect_generated_vars(path, expected):
+    """Assert generated vars contain expected key/value pairs."""
+    values = parse_generated_vars(path)
+
+    for key, expected_value in expected.items():
+        actual_value = values.get(key)
+        if actual_value is None:
+            raise TestFailure("Generated vars missing key: {}".format(key))
+
+        if str(actual_value).lower() != str(expected_value).lower():
+            raise TestFailure(
+                "Generated vars mismatch for {}: expected {}, got {}".format(
+                    key,
+                    expected_value,
+                    actual_value,
+                )
+            )
+
+
+def configure_server_command(args, mode, no_nfs=False):
+    """Build a real configure server command for the requested mode."""
+    command = [
+        "aerolitctl",
+        "configure",
+        "server",
+        "--mode",
+        mode,
+        "--interface",
+        args.interface,
+        "--server-ip",
+        args.server_ip,
+        "--network",
+        args.network,
+        "--gateway",
+        args.gateway,
+        "--nfs-export-path",
+        args.nfs_export_path,
+        "--nfs-allow-clients",
+        args.allowed_clients,
+        "--target-mount-path",
+        args.target_mount_path,
+    ]
+
+    if mode in ("pxe", "full"):
+        command.extend(
+            [
+                "--dhcp-start",
+                args.dhcp_start,
+                "--dhcp-end",
+                args.dhcp_end,
+            ]
+        )
+
+    if no_nfs:
+        command.append("--no-nfs")
+
+    return command
+
+
+def test_environment_preflight(args):
+    """Fail early when the VM/repo is not ready for this regression test."""
+    aerolitctl_path = shutil.which("aerolitctl")
+    if aerolitctl_path is None:
+        raise TestFailure("aerolitctl command was not found in PATH")
+
+    repo_root = Path(args.repo_root)
+    expected_src = repo_root / "src" / "aerolitctl"
+    expected_cli = expected_src / "cli.py"
+
+    if not expected_src.exists():
+        raise TestFailure(
+            "Repo root does not look correct. Missing: {}".format(expected_src)
+        )
+
+    if not expected_cli.exists():
+        raise TestFailure(
+            "Repo root does not look correct. Missing: {}".format(expected_cli)
+        )
+
+    if not Path(args.config_file).exists():
+        raise TestFailure("AeroLIT config file is missing: {}".format(args.config_file))
+
+    if not Path(args.bundle_path).exists():
+        raise TestFailure("AeroLIT bundle path is missing: {}".format(args.bundle_path))
+
+    generated_parent = Path(args.generated_vars_path).parent
+    if not generated_parent.exists():
+        raise TestFailure(
+            "Generated vars parent directory is missing: {}".format(generated_parent)
+        )
+
+    rc, stdout, stderr = command_output(["aerolitctl", "--help"])
+    if rc != 0:
+        raise TestFailure(
+            "Temporary aerolitctl wrapper failed preflight rc={}.\nstdout:\n{}\nstderr:\n{}".format(
+                rc,
+                stdout,
+                stderr,
+            )
+        )
+
+    if args.require_firewalld:
+        if shutil.which("firewall-cmd") is None:
+            raise TestFailure(
+                "firewall-cmd was not found. Use --no-require-firewalld to skip "
+                "strict firewall action assertions on this host."
+            )
+
+        rc, stdout, stderr = command_output(["systemctl", "is-active", "--quiet", "firewalld"])
+        if rc != 0:
+            raise TestFailure(
+                "firewalld is not active. Use --no-require-firewalld to skip "
+                "strict firewall action assertions on this host."
+            )
+
+    print("aerolitctl path : {}".format(aerolitctl_path))
+    print("source wrapper  : {}".format(args.aerolitctl_wrapper))
+
+
+def test_basic_repo_sanity(args):
+    """Check Python syntax and git whitespace sanity."""
+    cleanup_python_artifacts(args.repo_root)
+
+    run_cmd(["git", "diff", "--check"], cwd=args.repo_root)
+    run_cmd(["python3", "-m", "compileall", "src"], cwd=args.repo_root)
+
+    cleanup_python_artifacts(args.repo_root)
+
+    status = run_cmd(["git", "status", "--porcelain"], cwd=args.repo_root)
+    bad_lines = [
+        line
+        for line in status.splitlines()
+        if "__pycache__" in line or line.endswith(".pyc")
+    ]
+
+    if bad_lines:
+        raise TestFailure(
+            "Python cache/build artifacts are present in git status:\n{}".format(
+                "\n".join(bad_lines)
+            )
+        )
+
+
+def test_cli_help_and_parser(args):
+    """Confirm command parser and help paths still work."""
+    commands = [
+        ["aerolitctl", "--help"],
+        ["aerolitctl", "version"],
+        ["aerolitctl", "doctor"],
+        ["aerolitctl", "status", "--help"],
+        ["aerolitctl", "configure", "--help"],
+        ["aerolitctl", "configure", "init", "--help"],
+        ["aerolitctl", "configure", "server", "--help"],
+        ["aerolitctl", "deploy", "--help"],
+        ["aerolitctl", "deploy", "server", "--help"],
+        ["aerolitctl", "path", "--help"],
+        ["aerolitctl", "bundle", "--help"],
+        ["aerolitctl", "--verbose", "status"],
+        ["aerolitctl", "status", "--verbose"],
+        ["aerolitctl", "deploy", "server", "--dry-run", "--verbose"],
+        ["aerolitctl", "deploy", "server", "--verbose", "--dry-run"],
+        ["aerolitctl", "configure", "init", "--dry-run", "--non-interactive", "--verbose"],
+        ["aerolitctl", "configure", "server", "--dry-run", "--mode", "pxe", "--verbose"],
+        ["aerolitctl", "configure", "server", "--dry-run", "--mode", "pxe", "--show", "--verbose"],
+    ]
+
+    help_output = run_cmd(["aerolitctl", "configure", "server", "--help"])
+    assert_not_contains(help_output, "NFS/controller", "configure server help")
+    assert_contains(help_output, "Ansible Controller / NFS", "configure server help")
+
+    for command in commands:
+        run_cmd(command)
+
+
+def test_standardized_source_wording(args):
+    """Catch old user-facing wording in Python source."""
+    src_root = Path(args.repo_root) / "src"
+
+    bad_strings = [
+        "NFS/controller",
+        "PXE:",
+    ]
+
+    required_strings = [
+        "PXE Server",
+        "Ansible Controller / NFS",
+    ]
+
+    all_python_text = []
+    for path in src_root.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        all_python_text.append((path, read_text(path)))
+
+    for bad in bad_strings:
+        offenders = [str(path) for path, content in all_python_text if bad in content]
+        if offenders:
+            raise TestFailure(
+                "Old/non-standard wording '{}' found in:\n{}".format(
+                    bad,
+                    "\n".join(offenders),
+                )
+            )
+
+    combined = "\n".join(content for path, content in all_python_text)
+    for required in required_strings:
+        if required not in combined:
+            raise TestFailure(
+                "Expected standardized wording not found in Python source: {}".format(
+                    required
+                )
+            )
+
+
+def test_configure_show_modes(args, hash_paths):
+    """Confirm configure server --show is mode-aware and read-only."""
+    before = sha256_paths(hash_paths)
+
+    expectations = {
+        "pxe": [
+            r"Mode\s*: pxe",
+            r"PXE Server:",
+            r"Enabled\s*: yes",
+            r"Ansible Controller / NFS:",
+            r"Reason\s*: disabled by mode pxe",
+            r"Show complete\. No files were changed\.",
+        ],
+        "controller": [
+            r"Mode\s*: controller",
+            r"PXE Server:",
+            r"Reason\s*: disabled by mode controller",
+            r"Ansible Controller / NFS:",
+            r"Enabled\s*: yes",
+            r"Show complete\. No files were changed\.",
+        ],
+        "full": [
+            r"Mode\s*: full",
+            r"PXE Server:",
+            r"Enabled\s*: yes",
+            r"Ansible Controller / NFS:",
+            r"Enabled\s*: yes",
+            r"Show complete\. No files were changed\.",
+        ],
+    }
+
+    for mode, patterns in expectations.items():
+        output = run_cmd(
+            ["aerolitctl", "configure", "server", "--dry-run", "--mode", mode, "--show"]
+        )
+        for pattern in patterns:
+            assert_regex(output, pattern, "configure server --show {}".format(mode))
+        assert_not_contains(output, "NFS/controller", "configure server --show {}".format(mode))
+
+    after = sha256_paths(hash_paths)
+    assert_hashes_same(before, after, "configure-server-show")
+
+
+def test_configure_dry_run_modes(args, hash_paths):
+    """Confirm configure server --dry-run is mode-aware and read-only."""
+    before = sha256_paths(hash_paths)
+
+    for mode in ("pxe", "controller", "full"):
+        output = run_cmd(["aerolitctl", "configure", "server", "--dry-run", "--mode", mode])
+        assert_regex(output, r"Mode\s*: {}".format(mode), "configure dry-run {}".format(mode))
+        assert_contains(
+            output,
+            "Dry run complete. No files were changed.",
+            "configure dry-run {}".format(mode),
+        )
+        assert_not_contains(output, "NFS/controller", "configure dry-run {}".format(mode))
+
+    after = sha256_paths(hash_paths)
+    assert_hashes_same(before, after, "configure-server-dry-run")
+
+
+def test_real_configure_modes(args):
+    """Run real configure server writes and verify generated vars/status."""
+    generated = args.generated_vars_path
+
+    mode_expectations = [
+        (
+            "pxe",
+            False,
+            {
+                "aerolit_server_mode": "pxe",
+                "aerolit_pxe_enabled": "true",
+                "aerolit_controller_enabled": "false",
+                "aerolit_nfs_enabled": "false",
+            },
+            [
+                r"Mode\s*: pxe",
+                r"PXE Server:",
+                r"Enabled\s*: yes",
+                r"Ansible Controller / NFS:",
+                r"Reason\s*: disabled by mode pxe",
+            ],
+        ),
+        (
+            "controller",
+            False,
+            {
+                "aerolit_server_mode": "controller",
+                "aerolit_pxe_enabled": "false",
+                "aerolit_controller_enabled": "true",
+                "aerolit_nfs_enabled": "true",
+            },
+            [
+                r"Mode\s*: controller",
+                r"PXE Server:",
+                r"Reason\s*: disabled by mode controller",
+                r"Ansible Controller / NFS:",
+                r"NFS enabled\s*: yes",
+            ],
+        ),
+        (
+            "full",
+            False,
+            {
+                "aerolit_server_mode": "full",
+                "aerolit_pxe_enabled": "true",
+                "aerolit_controller_enabled": "true",
+                "aerolit_nfs_enabled": "true",
+            },
+            [
+                r"Mode\s*: full",
+                r"PXE Server:",
+                r"Enabled\s*: yes",
+                r"Ansible Controller / NFS:",
+                r"NFS enabled\s*: yes",
+            ],
+        ),
+        (
+            "controller",
+            True,
+            {
+                "aerolit_server_mode": "controller",
+                "aerolit_pxe_enabled": "false",
+                "aerolit_controller_enabled": "true",
+                "aerolit_nfs_enabled": "false",
+            },
+            [
+                r"Mode\s*: controller",
+                r"PXE Server:",
+                r"Reason\s*: disabled by mode controller",
+                r"Ansible Controller / NFS:",
+                r"NFS enabled\s*: no",
+                r"NFS reason\s*: NFS disabled by explicit option or saved configuration",
+            ],
+        ),
+    ]
+
+    for mode, no_nfs, expected_vars, status_patterns in mode_expectations:
+        run_cmd(configure_server_command(args, mode, no_nfs=no_nfs))
+
+        status_output = run_cmd(["aerolitctl", "status"])
+        for pattern in status_patterns:
+            assert_regex(status_output, pattern, "status after configure {}".format(mode))
+
+        assert_contains(
+            status_output,
+            "No blocking status findings detected.",
+            "status after configure {}".format(mode),
+        )
+        assert_not_contains(
+            status_output,
+            "Generated server vars file may be stale",
+            "status after configure {}".format(mode),
+        )
+        assert_not_contains(status_output, "NFS/controller", "status after configure {}".format(mode))
+
+        expect_generated_vars(generated, expected_vars)
+
+
+def configure_and_capture_deploy(args, mode, log_name):
+    """Configure one mode and capture deploy server dry-run output."""
+    run_cmd(configure_server_command(args, mode))
+    log_path = Path(args.log_dir) / log_name
+    output = run_cmd(["aerolitctl", "deploy", "server", "--dry-run"], log_path=log_path)
+    return output
+
+
+def assert_firewall_action_expectations(args, output, mode_label):
+    """Assert firewall dry-run actions when strict firewall assertions are enabled."""
+    if not args.require_firewalld:
+        return
+
+    if mode_label == "pxe":
+        assert_regex(output, r"Would run Open firewall port:.*18080/tcp", "deploy pxe")
+        assert_not_regex(output, r"Would run Open firewall service:.*--add-service=nfs", "deploy pxe")
+        return
+
+    if mode_label == "controller":
+        assert_regex(output, r"Would run Open firewall service:.*--add-service=nfs", "deploy controller")
+        assert_regex(output, r"Would run Open firewall service:.*--add-service=mountd", "deploy controller")
+        assert_regex(output, r"Would run Open firewall service:.*--add-service=rpc-bind", "deploy controller")
+        assert_not_regex(output, r"Would run Open firewall port:.*18080/tcp", "deploy controller")
+        return
+
+    if mode_label == "full":
+        assert_regex(output, r"Would run Open firewall service:.*--add-service=nfs", "deploy full")
+        assert_regex(output, r"Would run Open firewall service:.*--add-service=mountd", "deploy full")
+        assert_regex(output, r"Would run Open firewall service:.*--add-service=rpc-bind", "deploy full")
+        assert_regex(output, r"Would run Open firewall port:.*18080/tcp", "deploy full")
+
+
+def test_deploy_mode_matrix(args):
+    """Confirm deploy dry-run only runs actions for the saved mode."""
+    pxe_output = configure_and_capture_deploy(args, "pxe", "deploy-pxe.log")
+    assert_regex(pxe_output, r"Mode\s*: pxe", "deploy pxe")
+    assert_contains(pxe_output, "PXE Server:", "deploy pxe")
+    assert_regex(pxe_output, r"Enabled\s*: yes", "deploy pxe")
+    assert_contains(pxe_output, "Would run Run pxe_server.yml", "deploy pxe")
+    assert_contains(pxe_output, "Controller playbook skipped", "deploy pxe")
+    assert_contains(pxe_output, "Ansible Controller / NFS is disabled by mode pxe", "deploy pxe")
+    assert_not_contains(pxe_output, "Would run Run ansible_controller.yml", "deploy pxe")
+    assert_not_contains(pxe_output, "Would run Enable and start NFS services", "deploy pxe")
+    assert_firewall_action_expectations(args, pxe_output, "pxe")
+
+    controller_output = configure_and_capture_deploy(args, "controller", "deploy-controller.log")
+    assert_regex(controller_output, r"Mode\s*: controller", "deploy controller")
+    assert_contains(controller_output, "PXE Server:", "deploy controller")
+    assert_contains(controller_output, "disabled by mode controller", "deploy controller")
+    assert_contains(controller_output, "Ansible Controller / NFS:", "deploy controller")
+    assert_contains(controller_output, "Would run Run ansible_controller.yml", "deploy controller")
+    assert_contains(controller_output, "PXE playbook skipped", "deploy controller")
+    assert_not_contains(controller_output, "Would run Run pxe_server.yml", "deploy controller")
+    assert_firewall_action_expectations(args, controller_output, "controller")
+
+    full_output = configure_and_capture_deploy(args, "full", "deploy-full.log")
+    assert_regex(full_output, r"Mode\s*: full", "deploy full")
+    assert_contains(full_output, "Would run Run pxe_server.yml", "deploy full")
+    assert_contains(full_output, "Would run Run ansible_controller.yml", "deploy full")
+    assert_firewall_action_expectations(args, full_output, "full")
+
+
+def test_deploy_skip_flags(args):
+    """Confirm deploy skip flags override the saved full-mode plan."""
+    run_cmd(configure_server_command(args, "full"))
+
+    checks = [
+        ("--skip-interface", "Interface configuration skipped by option"),
+        ("--skip-nfs", "Ansible Controller / NFS deployment skipped by option"),
+        ("--skip-firewall", "Firewall deployment skipped by option"),
+        ("--skip-pxe", "PXE playbook skipped"),
+        ("--skip-controller", "Controller playbook skipped"),
+    ]
+
+    for flag, expected in checks:
+        output = run_cmd(["aerolitctl", "deploy", "server", "--dry-run", flag])
+        assert_contains(output, expected, "deploy {}".format(flag))
+
+
+def test_deploy_show_vs_dry_run(args, hash_paths):
+    """Confirm deploy --show and deploy --dry-run do not change saved files."""
+    before = sha256_paths(hash_paths)
+
+    show_output = run_cmd(
+        ["aerolitctl", "deploy", "server", "--show"],
+        log_path=Path(args.log_dir) / "deploy-show.log",
+    )
+    assert_contains(
+        show_output,
+        "Show complete. No files or services were changed.",
+        "deploy --show",
+    )
+    assert_not_contains(show_output, "Would run", "deploy --show")
+
+    dry_output = run_cmd(
+        ["aerolitctl", "deploy", "server", "--dry-run"],
+        log_path=Path(args.log_dir) / "deploy-dry-run.log",
+    )
+    assert_contains(
+        dry_output,
+        "Dry run complete. No files or services were changed.",
+        "deploy --dry-run",
+    )
+    assert_contains(dry_output, "Would run", "deploy --dry-run")
+
+    after = sha256_paths(hash_paths)
+    assert_hashes_same(before, after, "deploy-show-and-dry-run-read-only")
+
+
+def test_status_read_only(args, hash_paths):
+    """Confirm status is read-only."""
+    before = sha256_paths(hash_paths)
+
+    run_cmd(["aerolitctl", "status"])
+    run_cmd(["aerolitctl", "status", "--verbose"])
+
+    after = sha256_paths(hash_paths)
+    assert_hashes_same(before, after, "status-read-only")
+
+
+def test_configure_dry_run_read_only(args, hash_paths):
+    """Confirm configure server --dry-run is read-only against saved files."""
+    before = sha256_paths(hash_paths)
+
+    run_cmd(["aerolitctl", "configure", "server", "--dry-run", "--mode", "pxe"])
+    run_cmd(["aerolitctl", "configure", "server", "--dry-run", "--mode", "controller"])
+    run_cmd(["aerolitctl", "configure", "server", "--dry-run", "--mode", "full"])
+
+    after = sha256_paths(hash_paths)
+    assert_hashes_same(before, after, "configure-server-dry-run-read-only")
+
+
+def test_path_bundle_doctor(args):
+    """Confirm existing path, bundle, and doctor commands still work."""
+    run_cmd(["aerolitctl", "path", "show"])
+    run_cmd(["aerolitctl", "bundle", "show"])
+    run_cmd(["aerolitctl", "bundle", "validate"])
+    run_cmd(["aerolitctl", "doctor"])
+
+
+def test_configure_init_dry_run(args):
+    """Confirm configure init dry-run message and read-only behavior."""
+    bundle_path = Path(args.bundle_path)
+    init_hash_paths = [
+        args.config_file,
+        args.generated_vars_path,
+        bundle_path / "collections-hub" / ".sync-preserve",
+        bundle_path / "collections-hub" / ".gitlab-ci.yml",
+    ]
+
+    before = sha256_paths(init_hash_paths)
+
+    output = run_cmd(
+        [
+            "aerolitctl",
+            "configure",
+            "init",
+            "--dry-run",
+            "--non-interactive",
+            "--verbose",
+        ]
+    )
+    assert_contains(output, "AeroLIT initialization dry run complete.", "configure init dry-run")
+
+    after = sha256_paths(init_hash_paths)
+    assert_hashes_same(before, after, "configure-init-dry-run")
+
+
+def test_final_merge_gate(args):
+    """Final compile and git whitespace gate."""
+    run_cmd(["python3", "-m", "compileall", "src"], cwd=args.repo_root)
+    cleanup_python_artifacts(args.repo_root)
+
+    run_cmd(["git", "diff", "--check"], cwd=args.repo_root)
+
+    status = run_cmd(["git", "status", "--porcelain"], cwd=args.repo_root)
+    bad_lines = [
+        line
+        for line in status.splitlines()
+        if "__pycache__" in line or line.endswith(".pyc")
+    ]
+
+    if bad_lines:
+        raise TestFailure(
+            "Python cache/build artifacts are present in git status:\n{}".format(
+                "\n".join(bad_lines)
+            )
+        )
+
+
+def build_parser():
+    """Build CLI parser for the regression test script."""
+    parser = argparse.ArgumentParser(
+        description="Run AeroLIT aerolitctl merge-readiness regression tests."
+    )
+
+    parser.add_argument("--repo-root", default=".", help="aerolitctl repo root")
+    parser.add_argument("--bundle-path", default="/opt/aerolit/aerolit-bundle")
+    parser.add_argument("--config-file", default="/etc/aerolit/aerolitctl.yml")
+
+    parser.add_argument("--interface", default="ens160")
+    parser.add_argument("--server-ip", default="192.168.109.10")
+    parser.add_argument("--network", default="192.168.109.0/24")
+    parser.add_argument("--dhcp-start", default="192.168.109.100")
+    parser.add_argument("--dhcp-end", default="192.168.109.149")
+    parser.add_argument("--gateway", default="none")
+    parser.add_argument("--allowed-clients", default="192.168.109.0/24")
+    parser.add_argument("--target-mount-path", default="/home/unix/sysadmin")
+
+    parser.add_argument(
+        "--log-dir",
+        default=None,
+        help="Directory for captured logs. Default: /tmp/aerolitctl-merge-test-<timestamp>",
+    )
+    parser.add_argument(
+        "--keep-state",
+        action="store_true",
+        help="Do not restore /etc/aerolit/aerolitctl.yml and generated vars at the end.",
+    )
+    parser.add_argument(
+        "--skip-write-tests",
+        action="store_true",
+        help="Skip real configure server write tests.",
+    )
+    parser.add_argument(
+        "--no-require-firewalld",
+        action="store_true",
+        help=(
+            "Do not require firewalld to be active and do not enforce strict "
+            "firewall dry-run action assertions."
+        ),
+    )
+
+    return parser
+
+
+def main():
+    """Run the merge-readiness regression suite."""
+    parser = build_parser()
+    args = parser.parse_args()
+
+    args.repo_root = str(Path(args.repo_root).resolve())
+    args.bundle_path = str(Path(args.bundle_path))
+    args.nfs_export_path = args.bundle_path
+    args.generated_vars_path = str(
+        Path(args.bundle_path)
+        / "collections-hub"
+        / "ansible"
+        / "group_vars"
+        / "all"
+        / "aerolitctl_server_generated.yml"
+    )
+    args.log_dir = args.log_dir or "/tmp/aerolitctl-merge-test-{}".format(timestamp())
+    args.require_firewalld = not args.no_require_firewalld
+
+    Path(args.log_dir).mkdir(parents=True, exist_ok=True)
+
+    args.aerolitctl_wrapper = create_local_aerolitctl_wrapper(
+        args.repo_root,
+        args.log_dir,
+    )
+
+    old_path = os.environ.get("PATH", "")
+    wrapper_bin = str(Path(args.aerolitctl_wrapper).parent)
+    os.environ["PATH"] = wrapper_bin + os.pathsep + old_path
+
+    src_dir = str(Path(args.repo_root) / "src")
+    old_pythonpath = os.environ.get("PYTHONPATH", "")
+    if old_pythonpath:
+        os.environ["PYTHONPATH"] = src_dir + os.pathsep + old_pythonpath
+    else:
+        os.environ["PYTHONPATH"] = src_dir
+
+    hash_paths = [
+        Path(args.config_file),
+        Path(args.generated_vars_path),
+    ]
+
+    state_snapshot = None
+
+    print("")
+    print("=" * 80)
+    print("AeroLIT aerolitctl merge-readiness regression test")
+    print("=" * 80)
+    print("")
+    print("Repo root          : {}".format(args.repo_root))
+    print("Bundle path        : {}".format(args.bundle_path))
+    print("Config file        : {}".format(args.config_file))
+    print("Generated vars     : {}".format(args.generated_vars_path))
+    print("Log dir            : {}".format(args.log_dir))
+    print("Local CLI wrapper  : {}".format(args.aerolitctl_wrapper))
+    print("Keep state         : {}".format(args.keep_state))
+    print("Skip write tests   : {}".format(args.skip_write_tests))
+    print("Require firewalld  : {}".format(args.require_firewalld))
+    print("")
+
+    if not args.skip_write_tests:
+        if hasattr(os, "geteuid") and os.geteuid() != 0:
+            raise TestFailure(
+                "Write tests update /etc/aerolit and generated vars. Run as root, "
+                "or use --skip-write-tests."
+            )
+
+        state_snapshot = snapshot_files(
+            hash_paths,
+            Path(args.log_dir) / "backups-before-tests",
+        )
+
+    tests = [
+        ("environment preflight", lambda: test_environment_preflight(args)),
+        ("basic repo/code sanity", lambda: test_basic_repo_sanity(args)),
+        ("CLI help and parser", lambda: test_cli_help_and_parser(args)),
+        ("standardized source wording", lambda: test_standardized_source_wording(args)),
+        ("configure server --show mode behavior", lambda: test_configure_show_modes(args, hash_paths)),
+        ("configure server dry-run mode behavior", lambda: test_configure_dry_run_modes(args, hash_paths)),
+    ]
+
+    if not args.skip_write_tests:
+        tests.extend(
+            [
+                ("real configure server mode writes", lambda: test_real_configure_modes(args)),
+                ("deploy server mode dry-run matrix", lambda: test_deploy_mode_matrix(args)),
+                ("deploy server skip flags", lambda: test_deploy_skip_flags(args)),
+                ("deploy show vs dry-run", lambda: test_deploy_show_vs_dry_run(args, hash_paths)),
+                ("status read-only", lambda: test_status_read_only(args, hash_paths)),
+                ("configure server dry-run read-only", lambda: test_configure_dry_run_read_only(args, hash_paths)),
+            ]
+        )
+
+    tests.extend(
+        [
+            ("path/bundle/doctor checks", lambda: test_path_bundle_doctor(args)),
+            ("configure init dry-run", lambda: test_configure_init_dry_run(args)),
+            ("final merge gate", lambda: test_final_merge_gate(args)),
+        ]
+    )
+
+    passed = []
+
+    try:
+        for name, test_func in tests:
+            print("")
+            print("=" * 80)
+            print("TEST: {}".format(name))
+            print("=" * 80)
+            test_func()
+            passed.append(name)
+            print("")
+            print("PASS: {}".format(name))
+
+        print("")
+        print("=" * 80)
+        print("PASS: AeroLIT aerolitctl merge-readiness regression test passed")
+        print("=" * 80)
+        print("")
+        print("Passed tests:")
+        for name in passed:
+            print("  - {}".format(name))
+        print("")
+        print("Logs saved under:")
+        print("  {}".format(args.log_dir))
+        print("")
+
+        return 0
+
+    finally:
+        cleanup_python_artifacts(args.repo_root)
+
+        if state_snapshot is not None and not args.keep_state:
+            print("")
+            print("Restoring saved AeroLIT config/generated-vars state...")
+            try:
+                restore_snapshot(state_snapshot)
+                print("State restored.")
+            except Exception as exc:
+                print("")
+                print("WARNING: failed to restore saved state: {}".format(exc))
+                print("Manual backups are under:")
+                print("  {}".format(Path(args.log_dir) / "backups-before-tests"))
+                raise
+        elif state_snapshot is not None and args.keep_state:
+            print("")
+            print("Keeping final test state because --keep-state was used.")
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except TestFailure as exc:
+        print("")
+        print("=" * 80)
+        print("FAIL: {}".format(exc))
+        print("=" * 80)
+        print("")
+        sys.exit(1)
