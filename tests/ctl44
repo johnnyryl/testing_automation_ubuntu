@@ -1,3 +1,12 @@
+
+assert_regex(
+    pxe_output,
+    r"Ansible Controller / NFS:[\s\S]*?Reason\s*: disabled by mode pxe",
+    "deploy pxe controller/NFS disabled reason",
+)
+
+
+
 #!/usr/bin/env python3
 """AeroLIT aerolitctl merge-readiness regression test.
 
