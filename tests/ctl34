@@ -408,7 +408,7 @@ def run_status(verbose=False):
     print_status_value("DHCP netmask", pxe.get("dhcp_netmask"))
     print_status_value(
         "PXE playbook",
-        path_with_state(pxe_server_playbook(bundle_path),
+        path_with_state(pxe_server_playbook(bundle_path)),
     )
     print("")
 
@@ -429,7 +429,7 @@ def run_status(verbose=False):
     print_status_value("Target/client mount path", nfs.get("target_mount_path"))
     print_status_value(
         "Controller playbook",
-        path_with_state(find_playbook(ansible_dir, "ansible_controller.yml")),
+        path_with_state(ansible_controller_playbook(bundle_path)),
     )
     print("")
 
