@@ -396,7 +396,7 @@ def run_status(verbose=False):
     )
     print("")
 
-    print("PXE:")
+    print("PXE Server:")
     print_status_value("PXE enabled", yes_no(pxe_enabled))
     print_status_value(
         "PXE HTTP bind address",
@@ -412,7 +412,7 @@ def run_status(verbose=False):
     )
     print("")
 
-    print("NFS/controller:")
+    print("Ansible Controller / NFS:")
     print_status_value("Controller enabled", yes_no(controller_enabled))
     print_status_value("NFS enabled", yes_no(nfs_enabled))
     print_status_value("NFS server IP", nfs.get("server_ip"))
