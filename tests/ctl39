@@ -1,0 +1,56 @@
+Fix this in src/aerolitctl/cli.py, inside add_configure_server_parser().
+
+Look for these two argument blocks:
+
+server_parser.add_argument(
+    "--nfs-enabled",
+    dest="nfs_enabled",
+    action="store_true",
+    default=None,
+    help="Enable NFS/controller generated settings.",
+)
+server_parser.add_argument(
+    "--no-nfs",
+    dest="nfs_enabled",
+    action="store_false",
+    help="Disable NFS/controller generated settings.",
+)
+
+Replace them with:
+
+server_parser.add_argument(
+    "--nfs-enabled",
+    dest="nfs_enabled",
+    action="store_true",
+    default=None,
+    help="Enable Ansible Controller / NFS generated settings.",
+)
+server_parser.add_argument(
+    "--no-nfs",
+    dest="nfs_enabled",
+    action="store_false",
+    help="Disable Ansible Controller / NFS generated settings.",
+)
+
+I’d also fix the guided prompt in src/aerolitctl/server.py so the interactive wording matches.
+
+Find this in choose_nfs_settings():
+
+nfs_enabled = yes_no_prompt(
+    "Enable NFS/controller settings?",
+    default=current_nfs.get("enabled", True),
+)
+
+Replace with:
+
+nfs_enabled = yes_no_prompt(
+    "Enable Ansible Controller / NFS settings?",
+    default=current_nfs.get("enabled", True),
+)
+
+Then run:
+
+python3 -m compileall src
+aerolitctl configure server --help
+
+You should now see Ansible Controller / NFS instead of NFS/controller in the configure help.
