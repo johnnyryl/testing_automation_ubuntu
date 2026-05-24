@@ -331,7 +331,7 @@ def print_deploy_plan(plan, generated_vars_path):
     print_plan_value("Deploy configures interface", plan.get("configure_interface"))
 
     print("")
-    print("PXE:")
+    print("PXE Server:")
     print_plan_value("Enabled", plan.get("pxe_enabled"))
     print_plan_value("HTTP bind address", plan.get("pxe_http_bind_address"))
     print_plan_value("HTTP port", plan.get("pxe_http_port"))
@@ -343,7 +343,7 @@ def print_deploy_plan(plan, generated_vars_path):
 
     nfs = plan.get("nfs", {})
     print("")
-    print("NFS/controller:")
+    print("Ansible Controller / NFS:")
     print_plan_value("Enabled", nfs.get("enabled"))
     print_plan_value("Server IP", nfs.get("server_ip"))
     print_plan_value("Export path", nfs.get("export_path"))
@@ -568,7 +568,7 @@ def deploy_nfs(plan, report, dry_run=False, skip=False):
 
     nfs = plan.get("nfs", {})
     if not nfs.get("enabled"):
-        report.add("skipped", "NFS/controller is disabled")
+        report.add("skipped", "Ansible Controller / NFS is disabled by mode pxe")
         return
 
     export_path = Path(nfs.get("export_path"))
