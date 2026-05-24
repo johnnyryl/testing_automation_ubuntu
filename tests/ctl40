@@ -1,0 +1,41 @@
+Yes — fix this in:
+
+src/aerolitctl/initialize.py
+
+Find the line that prints:
+
+print("AeroLIT initialization complete.")
+
+Replace that single print with this:
+
+if dry_run:
+    print("AeroLIT initialization dry run complete.")
+else:
+    print("AeroLIT initialization complete.")
+
+So the block should look like this:
+
+print("")
+if dry_run:
+    print("AeroLIT initialization dry run complete.")
+else:
+    print("AeroLIT initialization complete.")
+print("")
+print("Configured bundle path:")
+print("  {}".format(bundle_path))
+
+Then test it with:
+
+python3 -m compileall src
+aerolitctl configure init --dry-run --non-interactive --verbose
+
+Expected output should now say:
+
+AeroLIT initialization dry run complete.
+
+Then run the non-dry-run help/smoke check again:
+
+aerolitctl configure init --help
+aerolitctl doctor
+
+This is just wording polish, but it’s the right cleanup before merge.
