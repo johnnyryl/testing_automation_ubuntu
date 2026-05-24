@@ -1,0 +1,412 @@
+Yes. At this point I would not merge until you run a full merge-readiness pass, not just compileall and a couple dry-runs. You changed CLI parsing, server planning, generated vars, status reporting, deploy behavior, mode handling, output wording, and safety behavior. So test all of those together.
+
+Run these from the repo root on your test VM/clone.
+
+1. Basic repo/code sanity
+
+git status
+git diff --check
+python3 -m compileall src
+
+Expected:
+
+python3 -m compileall src
+
+returns 0 with no syntax errors.
+
+git diff --check should return no whitespace/error output.
+
+2. CLI parser / help tests
+
+These confirm every command still parses and the standardized command layout still exists.
+
+aerolitctl --help
+aerolitctl version
+aerolitctl doctor
+aerolitctl status --help
+aerolitctl configure --help
+aerolitctl configure init --help
+aerolitctl configure server --help
+aerolitctl deploy --help
+aerolitctl deploy server --help
+aerolitctl path --help
+aerolitctl bundle --help
+
+Then specifically confirm --verbose works in both positions:
+
+aerolitctl --verbose status
+aerolitctl status --verbose
+aerolitctl deploy server --dry-run --verbose
+aerolitctl deploy server --verbose --dry-run
+aerolitctl configure init --dry-run --non-interactive --verbose
+aerolitctl configure server --dry-run --mode pxe --verbose
+aerolitctl configure server --dry-run --mode pxe --show --verbose
+
+Expected: none of these should fail with unrecognized arguments.
+
+3. Check old wording is gone from the files we standardized
+
+This catches half-updated labels like PXE: or NFS/controller: still showing in user-facing output.
+
+grep -R "NFS/controller" src README.md man packaging completions 2>/dev/null || true
+grep -R "PXE:" src README.md man packaging completions 2>/dev/null || true
+grep -R "PXE Server" src README.md man packaging completions 2>/dev/null || true
+grep -R "Ansible Controller / NFS" src README.md man packaging completions 2>/dev/null || true
+
+Expected: old NFS/controller should not appear in the Python files we just standardized. PXE Server and Ansible Controller / NFS should appear in the updated output/help/docs where appropriate.
+
+4. Backup the current test VM state before write tests
+
+Do this before running real configure server commands, because those intentionally update /etc/aerolit/aerolitctl.yml and generated vars.
+
+mkdir -p /root/aerolitctl-merge-test-backups
+cp -a /etc/aerolit/aerolitctl.yml \
+  /root/aerolitctl-merge-test-backups/aerolitctl.yml.before-merge-test.$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
+cp -a /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml \
+  /root/aerolitctl-merge-test-backups/aerolitctl_server_generated.yml.before-merge-test.$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
+
+5. Configure server --show mode tests
+
+These should not write files. They confirm the show-path uses the CLI overrides and does not fall back to saved mode incorrectly.
+
+aerolitctl configure server --dry-run --mode pxe --show
+aerolitctl configure server --dry-run --mode controller --show
+aerolitctl configure server --dry-run --mode full --show
+
+Expected:
+
+For --mode pxe --show:
+
+Mode : pxe
+PXE Server:
+  Enabled : yes
+Ansible Controller / NFS:
+  Enabled : no
+  Reason  : disabled by mode pxe
+Show complete. No files were changed.
+
+For --mode controller --show:
+
+Mode : controller
+PXE Server:
+  Enabled : no
+  Reason  : disabled by mode controller
+Ansible Controller / NFS:
+  Enabled : yes
+Show complete. No files were changed.
+
+For --mode full --show:
+
+Mode : full
+PXE Server:
+  Enabled : yes
+Ansible Controller / NFS:
+  Enabled : yes
+Show complete. No files were changed.
+
+6. Configure server dry-run mode tests
+
+These should also not write files, but they should show what would change.
+
+aerolitctl configure server --dry-run --mode pxe
+aerolitctl configure server --dry-run --mode controller
+aerolitctl configure server --dry-run --mode full
+
+Expected:
+
+Each should print the correct mode and end with:
+
+Dry run complete. No files were changed.
+
+The summary should show Dry-run actions, not Updated.
+
+7. Real configure server mode tests
+
+These are the important write tests. They prove saved config and generated vars match the selected mode.
+
+PXE mode
+
+aerolitctl configure server \
+  --mode pxe \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --dhcp-start 192.168.109.100 \
+  --dhcp-end 192.168.109.149 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+
+Then:
+
+aerolitctl status
+grep -E "aerolit_server_mode|aerolit_pxe_enabled|aerolit_controller_enabled|aerolit_nfs_enabled" \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+
+Expected generated vars should show:
+
+aerolit_server_mode: pxe
+aerolit_pxe_enabled: true
+aerolit_controller_enabled: false
+aerolit_nfs_enabled: false
+
+Controller mode
+
+aerolitctl configure server \
+  --mode controller \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+
+Then:
+
+aerolitctl status
+grep -E "aerolit_server_mode|aerolit_pxe_enabled|aerolit_controller_enabled|aerolit_nfs_enabled" \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+
+Expected:
+
+aerolit_server_mode: controller
+aerolit_pxe_enabled: false
+aerolit_controller_enabled: true
+aerolit_nfs_enabled: true
+
+Full mode
+
+aerolitctl configure server \
+  --mode full \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --dhcp-start 192.168.109.100 \
+  --dhcp-end 192.168.109.149 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+
+Then:
+
+aerolitctl status
+grep -E "aerolit_server_mode|aerolit_pxe_enabled|aerolit_controller_enabled|aerolit_nfs_enabled" \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+
+Expected:
+
+aerolit_server_mode: full
+aerolit_pxe_enabled: true
+aerolit_controller_enabled: true
+aerolit_nfs_enabled: true
+
+8. Explicit disabled NFS test
+
+This confirms controller mode can still have NFS intentionally disabled and reports it clearly.
+
+aerolitctl configure server \
+  --mode controller \
+  --no-nfs \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+aerolitctl status
+grep -E "aerolit_server_mode|aerolit_controller_enabled|aerolit_nfs_enabled" \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+
+Expected:
+
+aerolit_server_mode: controller
+aerolit_controller_enabled: true
+aerolit_nfs_enabled: false
+
+Status should not look broken. It should explain NFS is disabled rather than showing misleading stale values.
+
+9. Deploy server mode dry-run matrix
+
+This is the biggest merge gate. It proves deploy obeys the saved mode.
+
+Save logs
+
+Run each mode and capture deploy dry-run output:
+
+mkdir -p /tmp/aerolitctl-merge-test
+
+PXE:
+
+aerolitctl configure server \
+  --mode pxe \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --dhcp-start 192.168.109.100 \
+  --dhcp-end 192.168.109.149 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+aerolitctl deploy server --dry-run | tee /tmp/aerolitctl-merge-test/deploy-pxe.log
+
+Controller:
+
+aerolitctl configure server \
+  --mode controller \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+aerolitctl deploy server --dry-run | tee /tmp/aerolitctl-merge-test/deploy-controller.log
+
+Full:
+
+aerolitctl configure server \
+  --mode full \
+  --interface ens160 \
+  --server-ip 192.168.109.10 \
+  --network 192.168.109.0/24 \
+  --dhcp-start 192.168.109.100 \
+  --dhcp-end 192.168.109.149 \
+  --gateway none \
+  --nfs-export-path /opt/aerolit/aerolit-bundle \
+  --nfs-allow-clients 192.168.109.0/24 \
+  --target-mount-path /home/unix/sysadmin
+aerolitctl deploy server --dry-run | tee /tmp/aerolitctl-merge-test/deploy-full.log
+
+Verify PXE deploy behavior
+
+grep -q "Mode.*pxe" /tmp/aerolitctl-merge-test/deploy-pxe.log
+grep -q "PXE Server:" /tmp/aerolitctl-merge-test/deploy-pxe.log
+grep -q "Enabled.*yes" /tmp/aerolitctl-merge-test/deploy-pxe.log
+grep -q "Would run Run pxe_server.yml" /tmp/aerolitctl-merge-test/deploy-pxe.log
+grep -q "Controller playbook skipped" /tmp/aerolitctl-merge-test/deploy-pxe.log
+grep -q "Ansible Controller / NFS is disabled by mode pxe" /tmp/aerolitctl-merge-test/deploy-pxe.log
+grep -q "Would run Open firewall port.*18080/tcp" /tmp/aerolitctl-merge-test/deploy-pxe.log
+! grep -q "Would run Run ansible_controller.yml" /tmp/aerolitctl-merge-test/deploy-pxe.log
+! grep -q "Would run Open firewall service.*nfs" /tmp/aerolitctl-merge-test/deploy-pxe.log
+! grep -q "Would run Enable and start NFS services" /tmp/aerolitctl-merge-test/deploy-pxe.log
+
+Verify controller deploy behavior
+
+grep -q "Mode.*controller" /tmp/aerolitctl-merge-test/deploy-controller.log
+grep -q "PXE Server:" /tmp/aerolitctl-merge-test/deploy-controller.log
+grep -q "disabled by mode controller" /tmp/aerolitctl-merge-test/deploy-controller.log
+grep -q "Ansible Controller / NFS:" /tmp/aerolitctl-merge-test/deploy-controller.log
+grep -q "Would run Run ansible_controller.yml" /tmp/aerolitctl-merge-test/deploy-controller.log
+grep -q "PXE playbook skipped" /tmp/aerolitctl-merge-test/deploy-controller.log
+grep -q "Would run Open firewall service.*nfs" /tmp/aerolitctl-merge-test/deploy-controller.log
+grep -q "Would run Open firewall service.*mountd" /tmp/aerolitctl-merge-test/deploy-controller.log
+grep -q "Would run Open firewall service.*rpc-bind" /tmp/aerolitctl-merge-test/deploy-controller.log
+! grep -q "Would run Run pxe_server.yml" /tmp/aerolitctl-merge-test/deploy-controller.log
+! grep -q "Would run Open firewall port.*18080/tcp" /tmp/aerolitctl-merge-test/deploy-controller.log
+
+Verify full deploy behavior
+
+grep -q "Mode.*full" /tmp/aerolitctl-merge-test/deploy-full.log
+grep -q "Would run Run pxe_server.yml" /tmp/aerolitctl-merge-test/deploy-full.log
+grep -q "Would run Run ansible_controller.yml" /tmp/aerolitctl-merge-test/deploy-full.log
+grep -q "Would run Open firewall service.*nfs" /tmp/aerolitctl-merge-test/deploy-full.log
+grep -q "Would run Open firewall service.*mountd" /tmp/aerolitctl-merge-test/deploy-full.log
+grep -q "Would run Open firewall service.*rpc-bind" /tmp/aerolitctl-merge-test/deploy-full.log
+grep -q "Would run Open firewall port.*18080/tcp" /tmp/aerolitctl-merge-test/deploy-full.log
+
+10. Deploy skip flag tests
+
+These confirm explicit skip flags still override mode behavior.
+
+aerolitctl deploy server --dry-run --skip-interface
+aerolitctl deploy server --dry-run --skip-nfs
+aerolitctl deploy server --dry-run --skip-firewall
+aerolitctl deploy server --dry-run --skip-pxe
+aerolitctl deploy server --dry-run --skip-controller
+
+Expected: each should print a clear Skipped: entry for that specific area and should not crash.
+
+11. Show vs dry-run behavior
+
+These confirm --show does not run deploy actions and --dry-run shows planned actions.
+
+aerolitctl deploy server --show | tee /tmp/aerolitctl-merge-test/deploy-show.log
+aerolitctl deploy server --dry-run | tee /tmp/aerolitctl-merge-test/deploy-dry-run.log
+grep -q "Show complete. No files or services were changed." /tmp/aerolitctl-merge-test/deploy-show.log
+! grep -q "Would run" /tmp/aerolitctl-merge-test/deploy-show.log
+grep -q "Dry run complete. No files or services were changed." /tmp/aerolitctl-merge-test/deploy-dry-run.log
+grep -q "Would run" /tmp/aerolitctl-merge-test/deploy-dry-run.log
+
+12. Status read-only test
+
+This confirms status does not change files.
+
+sha256sum /etc/aerolit/aerolitctl.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml \
+  > /tmp/aerolitctl-merge-test/before-status.sha256
+aerolitctl status
+aerolitctl status --verbose
+sha256sum /etc/aerolit/aerolitctl.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml \
+  > /tmp/aerolitctl-merge-test/after-status.sha256
+diff -u /tmp/aerolitctl-merge-test/before-status.sha256 /tmp/aerolitctl-merge-test/after-status.sha256
+
+Expected: no diff.
+
+13. Configure dry-run read-only test
+
+This confirms configure server --dry-run does not write files.
+
+sha256sum /etc/aerolit/aerolitctl.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml \
+  > /tmp/aerolitctl-merge-test/before-configure-dry-run.sha256
+aerolitctl configure server --dry-run --mode pxe
+aerolitctl configure server --dry-run --mode controller
+aerolitctl configure server --dry-run --mode full
+sha256sum /etc/aerolit/aerolitctl.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml \
+  > /tmp/aerolitctl-merge-test/after-configure-dry-run.sha256
+diff -u /tmp/aerolitctl-merge-test/before-configure-dry-run.sha256 /tmp/aerolitctl-merge-test/after-configure-dry-run.sha256
+
+Expected: no diff.
+
+14. Bundle/path/doctor checks
+
+aerolitctl path show
+aerolitctl bundle show
+aerolitctl bundle validate
+aerolitctl doctor
+
+Expected: no unexpected failure. If doctor warns about host conditions, that may be okay, but it should not crash.
+
+15. Configure init dry-run check
+
+Since configure init was part of the work, at least confirm it still dry-runs cleanly.
+
+aerolitctl configure init --dry-run --non-interactive --verbose
+
+Expected: no crash, no real writes, and it should still understand the bundle path.
+
+16. Final merge gate
+
+Run these at the very end:
+
+python3 -m compileall src
+git diff --check
+git status
+
+Then review changed files:
+
+git diff -- src/aerolitctl/server.py
+git diff -- src/aerolitctl/status.py
+git diff -- src/aerolitctl/deploy_server.py
+git diff -- src/aerolitctl/cli.py
+
+What I would consider “good enough to merge”:
+
+compileall passes. git diff --check passes. CLI help and verbose placement work. configure server --show and --dry-run are mode-aware. Real configure server writes correct generated vars for pxe, controller, and full. status is read-only and reports the same mode/flags as generated vars. deploy server --dry-run only runs the correct actions for the saved mode. PXE mode does not run NFS/controller or NFS firewall services. Controller mode does not run PXE playbook or PXE firewall port. Full mode runs both.
