@@ -1,5 +1,28 @@
 
 
+sha256sum /etc/aerolit/aerolitctl.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/.sync-preserve \
+  /opt/aerolit/aerolit-bundle/collections-hub/.gitlab-ci.yml \
+  > /tmp/aerolitctl-merge-test/before-init-dry-run.sha256
+
+aerolitctl configure init --dry-run --non-interactive --verbose
+
+sha256sum /etc/aerolit/aerolitctl.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/.sync-preserve \
+  /opt/aerolit/aerolit-bundle/collections-hub/.gitlab-ci.yml \
+  > /tmp/aerolitctl-merge-test/after-init-dry-run.sha256
+
+diff -u /tmp/aerolitctl-merge-test/before-init-dry-run.sha256 \
+  /tmp/aerolitctl-merge-test/after-init-dry-run.sha256
+
+
+
+
+
+
+
 set -e
 
 grep -q "Mode.*pxe" /tmp/aerolitctl-merge-test/deploy-pxe.log
