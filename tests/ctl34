@@ -5,8 +5,12 @@ from pathlib import Path
 from .config import get_bundle_path, load_config
 from .paths import (
     CONFIG_FILE,
+    aerolitctl_server_generated_vars_file,
+    ansible_controller_playbook,
+    ansible_group_vars_dir,
+    ansible_inventory_dir,
     collections_hub_path,
-    generated_bootstrap_vars_file,
+    pxe_server_playbook,
 )
 from .server import (
     DEFAULT_HTTP_PORT,
@@ -192,7 +196,7 @@ def collect_status_findings(config, bundle_path):
     bundle_path = Path(bundle_path)
     collections_hub = collections_hub_path(bundle_path)
     ansible_dir = collections_hub / "ansible"
-    generated_vars = generated_bootstrap_vars_file(bundle_path)
+    server_generated_vars = aerolitctl_server_generated_vars_file(bundle_path)
 
     if not bundle_path.exists():
         findings.append("Bundle path is missing: {}".format(bundle_path))
@@ -257,19 +261,19 @@ def collect_status_findings(config, bundle_path):
             )
         )
 
-    if not generated_vars.exists():
+    if not server_generated_vars.exists():
         findings.append(
-            "Generated bootstrap vars file is missing: {}".format(generated_vars)
+            "Generated server vars file is missing: {}".format(server_generated_vars)
         )
-    elif not generated_vars_look_current(generated_vars, config):
+    elif not generated_vars_look_current(server_generated_vars, config):
         findings.append(
-            "Generated bootstrap vars file may be stale or incomplete: {}".format(
-                generated_vars
+            "Generated server vars file may be stale or incomplete: {}".format(
+                server_generated_vars
             )
         )
 
     if pxe_enabled:
-        pxe_playbook = find_playbook(ansible_dir, "pxe_server.yml")
+        pxe_playbook = pxe_server_playbook(bundle_path)
         if not pxe_playbook.exists():
             findings.append("PXE playbook is missing: {}".format(pxe_playbook))
 
@@ -283,7 +287,7 @@ def collect_status_findings(config, bundle_path):
             findings.append("PXE DHCP netmask is not configured.")
 
     if controller_enabled:
-        controller_playbook = find_playbook(ansible_dir, "ansible_controller.yml")
+        controller_playbook = ansible_controller_playbook(bundle_path)
         if not controller_playbook.exists():
             findings.append(
                 "Ansible controller playbook is missing: {}".format(
@@ -348,18 +352,18 @@ def run_status(verbose=False):
     collections_hub = collections_hub_path(bundle_path)
     ansible_dir = collections_hub / "ansible"
     group_vars_dir = ansible_dir / "group_vars"
-    generated_vars = generated_bootstrap_vars_file(bundle_path)
+    server_generated_vars = aerolitctl_server_generated_vars_file(bundle_path)
 
     print("Bundle:")
     print_status_value("Bundle exists", yes_no(bundle_path.exists()))
     print_status_value("collections-hub", path_with_state(collections_hub))
     print_status_value("Ansible dir", path_with_state(ansible_dir))
     print_status_value("group_vars dir", path_with_state(group_vars_dir))
-    print_status_value("Generated vars", path_with_state(generated_vars))
-    if generated_vars.exists():
+    print_status_value("Generated vars", path_with_state(server_generated_vars))
+    if server_generated_vars.exists():
         print_status_value(
             "Generated vars current",
-            yes_no(generated_vars_look_current(generated_vars, config)),
+            yes_no(generated_vars_look_current(server_generated_vars, config)),
         )
     else:
         print_status_value("Generated vars current", "no")
@@ -404,7 +408,7 @@ def run_status(verbose=False):
     print_status_value("DHCP netmask", pxe.get("dhcp_netmask"))
     print_status_value(
         "PXE playbook",
-        path_with_state(find_playbook(ansible_dir, "pxe_server.yml")),
+        path_with_state(pxe_server_playbook(bundle_path),
     )
     print("")
 
