@@ -1,0 +1,982 @@
+"""Apply saved AeroLIT server configuration.
+
+This module is the deploy side of ``aerolitctl configure server``.
+It reads the saved server intent, applies host-side network/NFS/firewall
+changes, and runs the existing PXE/controller Ansible playbooks.
+"""
+
+import os
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+from .config import get_bundle_path, load_config
+from .paths import collections_hub_path, aerolitctl_server_generated_vars_file
+from .server import (
+    DEFAULT_BIND_ADDRESS,
+    DEFAULT_HTTP_PORT,
+    DEFAULT_MOUNT_GROUP,
+    DEFAULT_MOUNT_MODE,
+    DEFAULT_MOUNT_OWNER,
+    DEFAULT_NFS_EXPORTS_FILE,
+    DEFAULT_TARGET_MOUNT_PATH,
+    current_server_config,
+    interface_has_ip,
+    interface_ipv4_addresses,
+    parse_ipv4_address,
+    parse_ipv4_network,
+    parse_prefix,
+    validate_absolute_path,
+    normalize_mode,
+)
+
+
+class DeployServerReport(object):
+    """Collect deploy server actions."""
+
+    def __init__(self, verbose=False):
+        self.verbose = verbose
+        self.changed = []
+        self.existing = []
+        self.skipped = []
+        self.dry_run = []
+        self.warnings = []
+        self.errors = []
+
+    def add(self, category, message):
+        getattr(self, category).append(message)
+
+    def print_summary(self):
+        """Print action summary."""
+        print("")
+        print("AeroLIT server deployment summary")
+        print("")
+
+        sections = [
+            ("Changed", self.changed),
+            ("Already current / skipped", self.existing),
+            ("Skipped", self.skipped),
+            ("Dry-run actions", self.dry_run),
+            ("Warnings", self.warnings),
+            ("Errors", self.errors),
+        ]
+
+        for title, values in sections:
+            if not values:
+                continue
+
+            print("{}:".format(title))
+            for value in values:
+                print("  - {}".format(value))
+            print("")
+
+
+def command_exists(command):
+    """Return True if command exists."""
+    return shutil.which(command) is not None
+
+
+def run_command(command, cwd=None, env=None):
+    """Run a command and return rc, stdout, stderr."""
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+        stdout, stderr = process.communicate()
+        return process.returncode, stdout.strip(), stderr.strip()
+    except OSError as exc:
+        return 127, "", str(exc)
+
+
+def as_root_command(command):
+    """Prefix a command with sudo when not running as root."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        return command
+
+    if command_exists("sudo"):
+        return ["sudo"] + command
+
+    raise RuntimeError(
+        "This deploy action requires root privileges. Re-run as root or install sudo."
+    )
+
+
+def run_logged_command(
+    report,
+    command,
+    dry_run=False,
+    check=True,
+    root=False,
+    cwd=None,
+    env=None,
+    description=None,
+):
+    """Run a command, record the action, and optionally fail on errors."""
+    rendered = " ".join(str(item) for item in command)
+    if description:
+        rendered = "{}: {}".format(description, rendered)
+
+    if dry_run:
+        report.add("dry_run", "Would run {}".format(rendered))
+        return 0, "", ""
+
+    actual_command = list(command)
+    if root:
+        actual_command = as_root_command(actual_command)
+
+    rc, stdout, stderr = run_command(actual_command, cwd=cwd, env=env)
+
+    if rc == 0:
+        report.add("changed", rendered)
+    elif check:
+        message = "Command failed rc={}: {}".format(rc, rendered)
+        if stderr:
+            message = "{}; stderr: {}".format(message, stderr)
+        report.add("errors", message)
+        raise RuntimeError(message)
+    else:
+        report.add("warnings", "Command returned rc={}: {}".format(rc, rendered))
+
+    return rc, stdout, stderr
+
+
+def normalize_bool(value, default=False):
+    """Normalize a config boolean."""
+    if value is None:
+        return default
+
+    if isinstance(value, bool):
+        return value
+
+    value = str(value).strip().lower()
+    if value in ("1", "true", "yes", "y", "on"):
+        return True
+    if value in ("0", "false", "no", "n", "off"):
+        return False
+
+    return default
+
+
+def yes_no(value):
+    """Return yes/no text."""
+    return "yes" if bool(value) else "no"
+
+
+def require_value(plan, key, label):
+    """Require a plan value."""
+    value = plan.get(key)
+    if value is None or value == "":
+        raise ValueError(
+            "{} is required. Run: aerolitctl configure server --guided".format(label)
+        )
+    return value
+
+
+def mode_enables(mode, target):
+    """Return whether a normalized mode enables a deployment target."""
+    mode = normalize_mode(mode)
+
+    if target == "pxe":
+        return mode in ("full", "pxe")
+
+    if target == "controller":
+        return mode in ("full", "controller")
+
+    return False
+
+
+def effective_firewall_intent(
+    firewall,
+    pxe_enabled=False,
+    nfs_enabled=False,
+    pxe_http_port=DEFAULT_HTTP_PORT,
+):
+    """Build effective firewall intent from the active saved mode.
+
+    This intentionally derives services/ports from the effective plan so stale
+    saved firewall values cannot cause deploy to apply the wrong mode's rules.
+    """
+    services = []
+    ports = []
+
+    if nfs_enabled:
+        services.extend(["nfs", "mountd", "rpc-bind"])
+
+    if pxe_enabled:
+        ports.append("{}/tcp".format(pxe_http_port or DEFAULT_HTTP_PORT))
+
+    return {
+        "manage": normalize_bool(firewall.get("manage"), True),
+        "services": services,
+        "ports": ports,
+    }
+
+
+def load_deploy_plan(config, bundle_path):
+    """Build a deploy plan from /etc/aerolit/aerolitctl.yml."""
+    raw_server = config.get("server", {}) or {}
+    server = current_server_config(config)
+    pxe_config = config.get("pxe", {}) or {}
+
+    raw_mode = raw_server.get("mode")
+    mode = normalize_mode(raw_mode or server.get("mode") or "full")
+
+    if raw_mode:
+        pxe_enabled = mode_enables(mode, "pxe")
+        controller_enabled = mode_enables(mode, "controller")
+    else:
+        pxe_enabled = normalize_bool(pxe_config.get("enabled"), False)
+        controller_enabled = normalize_bool(
+            (raw_server.get("nfs", {}) or {}).get("enabled"),
+            True,
+        )
+
+    interface = server.get("interface") or pxe_config.get("interface")
+    server_ip = server.get("ip_address") or pxe_config.get("server_ip")
+    prefix = server.get("prefix")
+
+    if server_ip:
+        parse_ipv4_address(server_ip, "AeroLIT server IP")
+
+    if prefix is None and pxe_config.get("dhcp_netmask"):
+        network = parse_ipv4_network(
+            "{}/{}".format(server_ip, pxe_config.get("dhcp_netmask")),
+            "Provisioning network",
+        )
+        prefix = network.prefixlen
+
+    if prefix is not None:
+        prefix = parse_prefix(prefix)
+
+    network = None
+    if server_ip and prefix is not None:
+        network = parse_ipv4_network(
+            "{}/{}".format(server_ip, prefix),
+            "Provisioning network",
+        )
+
+    pxe_http = server.get("pxe_http", {}) or {}
+    nfs = dict(server.get("nfs", {}) or {})
+    firewall = dict(server.get("firewall", {}) or {})
+
+    pxe_http_port = int(pxe_http.get("port") or DEFAULT_HTTP_PORT)
+
+    nfs.setdefault("enabled", bool(controller_enabled))
+    nfs.setdefault("server_ip", server_ip)
+    nfs.setdefault("export_path", str(bundle_path))
+    nfs.setdefault("allowed_clients", None)
+    nfs.setdefault("allow_all_clients", False)
+    nfs.setdefault("create_export_path", False)
+    nfs.setdefault("exports_file", DEFAULT_NFS_EXPORTS_FILE)
+    nfs.setdefault("target_mount_path", DEFAULT_TARGET_MOUNT_PATH)
+    nfs.setdefault("mount_mode", DEFAULT_MOUNT_MODE)
+    nfs.setdefault("mount_owner", DEFAULT_MOUNT_OWNER)
+    nfs.setdefault("mount_group", DEFAULT_MOUNT_GROUP)
+
+    nfs["enabled"] = bool(
+        controller_enabled and normalize_bool(nfs.get("enabled"), True)
+    )
+    nfs["allow_all_clients"] = normalize_bool(nfs.get("allow_all_clients"), False)
+    nfs["create_export_path"] = normalize_bool(nfs.get("create_export_path"), False)
+
+    plan = {
+        "mode": mode,
+        "bundle_path": str(bundle_path),
+        "pxe_enabled": bool(pxe_enabled),
+        "controller_enabled": bool(controller_enabled),
+        "interface": interface,
+        "server_ip": server_ip,
+        "prefix": prefix,
+        "network": str(network) if network else None,
+        "gateway": server.get("gateway") or pxe_config.get("gateway"),
+        "dns_servers": list(server.get("dns") or pxe_config.get("dns_servers") or []),
+        "configure_interface": normalize_bool(
+            server.get("configure_interface"),
+            False,
+        ),
+        "pxe_http_port": pxe_http_port,
+        "pxe_http_bind_address": pxe_http.get("bind_address") or DEFAULT_BIND_ADDRESS,
+        "dhcp_start": pxe_config.get("dhcp_start"),
+        "dhcp_end": pxe_config.get("dhcp_end"),
+        "dhcp_netmask": pxe_config.get("dhcp_netmask"),
+        "nfs": nfs,
+    }
+
+    plan["firewall"] = effective_firewall_intent(
+        firewall,
+        pxe_enabled=plan.get("pxe_enabled"),
+        nfs_enabled=plan.get("nfs", {}).get("enabled"),
+        pxe_http_port=plan.get("pxe_http_port"),
+    )
+
+    validate_deploy_plan(plan)
+    return plan
+
+
+def validate_no_whitespace_path(value, label):
+    """Reject paths that contain whitespace because shell/system tools handle them poorly here."""
+    if value and any(char.isspace() for char in str(value)):
+        raise ValueError("{} must not contain whitespace: {}".format(label, value))
+
+
+def validate_deploy_plan(plan):
+    """Validate the saved deploy plan before applying it."""
+    require_value(plan, "mode", "Server mode")
+    interface = require_value(plan, "interface", "Server interface")
+    server_ip = require_value(plan, "server_ip", "Server IP")
+    parse_ipv4_address(server_ip, "AeroLIT server IP")
+
+    prefix = require_value(plan, "prefix", "Server prefix")
+    parse_prefix(prefix)
+
+    if plan.get("network"):
+        network = parse_ipv4_network(plan.get("network"), "Provisioning network")
+        if parse_ipv4_address(server_ip, "AeroLIT server IP") not in network:
+            raise ValueError("Server IP must be inside {}".format(network))
+
+    if plan.get("pxe_enabled"):
+        require_value(plan, "dhcp_start", "PXE DHCP start")
+        require_value(plan, "dhcp_end", "PXE DHCP end")
+        require_value(plan, "dhcp_netmask", "PXE DHCP netmask")
+        parse_ipv4_address(plan.get("dhcp_start"), "PXE DHCP start")
+        parse_ipv4_address(plan.get("dhcp_end"), "PXE DHCP end")
+        if plan.get("pxe_http_port") < 1 or plan.get("pxe_http_port") > 65535:
+            raise ValueError("PXE HTTP port must be between 1 and 65535")
+
+    nfs = plan.get("nfs", {})
+    if nfs.get("enabled"):
+        validate_absolute_path(nfs.get("export_path"), "NFS export path")
+        validate_absolute_path(nfs.get("exports_file"), "NFS exports file")
+        validate_absolute_path(nfs.get("target_mount_path"), "Target/client mount path")
+        validate_no_whitespace_path(nfs.get("export_path"), "NFS export path")
+        validate_no_whitespace_path(nfs.get("exports_file"), "NFS exports file")
+        validate_no_whitespace_path(
+            nfs.get("target_mount_path"),
+            "Target/client mount path",
+        )
+        if not nfs.get("allow_all_clients") and not nfs.get("allowed_clients"):
+            raise ValueError(
+                "NFS allowed clients is required unless allow_all_clients is true. "
+                "Run: aerolitctl configure server --guided"
+            )
+
+    return interface
+
+
+def print_plan_value(label, value):
+    """Print an aligned plan value."""
+    if isinstance(value, bool):
+        value = yes_no(value)
+
+    if value is None or value == "":
+        value = "none"
+
+    print("  {:<31}: {}".format(label, value))
+
+
+def pxe_disabled_reason(plan):
+    """Return readable reason PXE is disabled."""
+    if plan.get("mode") == "controller":
+        return "disabled by mode controller"
+
+    return "disabled by saved PXE configuration"
+
+
+def controller_disabled_reason(plan):
+    """Return readable reason controller/NFS is disabled."""
+    if plan.get("mode") == "pxe":
+        return "disabled by mode pxe"
+
+    return "disabled by saved Ansible Controller / NFS configuration"
+
+
+def nfs_disabled_reason(plan):
+    """Return readable reason NFS is disabled."""
+    if not plan.get("controller_enabled"):
+        return controller_disabled_reason(plan)
+
+    return "NFS disabled by explicit option or saved configuration"
+
+
+def rendered_nfs_allowed_clients(nfs):
+    """Return readable NFS allowed clients."""
+    if nfs.get("allow_all_clients"):
+        return "*"
+
+    return nfs.get("allowed_clients") or "none"
+
+
+def print_deploy_plan(plan, generated_vars_path):
+    """Print the deploy plan."""
+    print("")
+    print("#" * 80)
+    print("# AeroLIT deploy server plan")
+    print("#" * 80)
+    print("")
+    print_plan_value("Mode", plan.get("mode"))
+    print_plan_value("Bundle path", plan.get("bundle_path"))
+    print_plan_value("Generated vars", generated_vars_path)
+
+    print("")
+    print("Network/interface:")
+    print_plan_value("Interface", plan.get("interface"))
+    print_plan_value(
+        "Current IPs",
+        ", ".join(interface_ipv4_addresses(plan.get("interface"))) or "none",
+    )
+    print_plan_value("Planned server IP", plan.get("server_ip"))
+    print_plan_value("Prefix", plan.get("prefix"))
+    print_plan_value("Network", plan.get("network"))
+    print_plan_value("Deploy configures interface", plan.get("configure_interface"))
+
+    print("")
+    print("PXE Server:")
+    print_plan_value("Enabled", plan.get("pxe_enabled"))
+    if plan.get("pxe_enabled"):
+        print_plan_value("HTTP bind address", plan.get("pxe_http_bind_address"))
+        print_plan_value("HTTP port", plan.get("pxe_http_port"))
+        print_plan_value("DHCP start", plan.get("dhcp_start"))
+        print_plan_value("DHCP end", plan.get("dhcp_end"))
+        print_plan_value("DHCP netmask", plan.get("dhcp_netmask"))
+        print_plan_value("Gateway", plan.get("gateway") or "none")
+        print_plan_value(
+            "DNS servers",
+            ", ".join(plan.get("dns_servers") or []) or "none",
+        )
+    else:
+        print_plan_value("Reason", pxe_disabled_reason(plan))
+
+    nfs = plan.get("nfs", {})
+    print("")
+    print("Ansible Controller / NFS:")
+    print_plan_value("Enabled", plan.get("controller_enabled"))
+    if not plan.get("controller_enabled"):
+        print_plan_value("Reason", controller_disabled_reason(plan))
+    else:
+        print_plan_value("NFS enabled", nfs.get("enabled"))
+        if nfs.get("enabled"):
+            print_plan_value("NFS server IP", nfs.get("server_ip"))
+            print_plan_value("NFS export path", nfs.get("export_path"))
+            print_plan_value("NFS allowed clients", rendered_nfs_allowed_clients(nfs))
+            print_plan_value("NFS allow all clients", nfs.get("allow_all_clients"))
+            print_plan_value("Create export path", nfs.get("create_export_path"))
+            print_plan_value("Exports file", nfs.get("exports_file"))
+            print_plan_value("Target/client mount", nfs.get("target_mount_path"))
+        else:
+            print_plan_value("Reason", nfs_disabled_reason(plan))
+
+    firewall = plan.get("firewall", {})
+    print("")
+    print("Firewall:")
+    print_plan_value("Manage firewall", firewall.get("manage"))
+    print_plan_value("Services", ", ".join(firewall.get("services") or []) or "none")
+    print_plan_value("Ports", ", ".join(firewall.get("ports") or []) or "none")
+    print("")
+
+
+def find_nmcli_connection_for_interface(interface):
+    """Return the active NetworkManager connection name for an interface."""
+    rc, stdout, stderr = run_command(
+        ["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show", "--active"]
+    )
+    if rc != 0:
+        return None
+
+    for line in stdout.splitlines():
+        parts = line.rsplit(":", 1)
+        if len(parts) != 2:
+            continue
+        name, device = parts
+        if device == interface:
+            return name.replace("\\:", ":")
+
+    return None
+
+
+def deploy_interface(plan, report, dry_run=False, skip=False):
+    """Apply interface IP configuration intent."""
+    if skip:
+        report.add("skipped", "Interface configuration skipped by option")
+        return
+
+    if not plan.get("configure_interface"):
+        report.add("skipped", "Interface configuration intent is disabled")
+        return
+
+    interface = plan.get("interface")
+    server_ip = plan.get("server_ip")
+    prefix = plan.get("prefix")
+    planned = "{}/{}".format(server_ip, prefix)
+
+    if interface_has_ip(interface, server_ip):
+        report.add("existing", "{} already has {}".format(interface, planned))
+        return
+
+    if not command_exists("nmcli"):
+        raise RuntimeError(
+            "nmcli is required to configure the interface persistently. "
+            "Install NetworkManager or configure {} with {} manually.".format(
+                interface,
+                planned,
+            )
+        )
+
+    connection = find_nmcli_connection_for_interface(interface)
+    if not connection:
+        raise RuntimeError(
+            "No active NetworkManager connection was found for interface {}. "
+            "Configure {} manually or create/activate a NetworkManager connection first.".format(
+                interface,
+                planned,
+            )
+        )
+
+    run_logged_command(
+        report,
+        ["nmcli", "connection", "modify", connection, "+ipv4.addresses", planned],
+        dry_run=dry_run,
+        root=True,
+        description="Add planned server IP to interface connection",
+    )
+    run_logged_command(
+        report,
+        ["nmcli", "connection", "up", connection],
+        dry_run=dry_run,
+        root=True,
+        description="Bring NetworkManager connection up",
+    )
+
+
+def ensure_directory(path, report, dry_run=False, root=False):
+    """Ensure a directory exists."""
+    path = Path(path)
+    if path.exists():
+        if not path.is_dir():
+            raise RuntimeError("{} exists but is not a directory".format(path))
+        report.add("existing", "{} directory exists".format(path))
+        return
+
+    run_logged_command(
+        report,
+        ["mkdir", "-p", str(path)],
+        dry_run=dry_run,
+        root=root,
+        description="Create directory",
+    )
+
+
+def ensure_nfs_utils(report, dry_run=False):
+    """Ensure exportfs is available."""
+    if command_exists("exportfs"):
+        report.add("existing", "exportfs is available")
+        return
+
+    if not command_exists("dnf"):
+        raise RuntimeError(
+            "exportfs is missing and dnf is not available to install nfs-utils"
+        )
+
+    run_logged_command(
+        report,
+        ["dnf", "install", "-y", "nfs-utils"],
+        dry_run=dry_run,
+        root=True,
+        description="Install nfs-utils",
+    )
+
+
+def ensure_ansible_playbook(report, dry_run=False, package="ansible-core"):
+    """Ensure ansible-playbook is available."""
+    if command_exists("ansible-playbook"):
+        report.add("existing", "ansible-playbook is available")
+        return True
+
+    if dry_run:
+        report.add(
+            "dry_run",
+            "Would install {} because ansible-playbook is missing".format(package),
+        )
+        return False
+
+    if not command_exists("dnf"):
+        raise RuntimeError("ansible-playbook is missing and dnf is not available")
+
+    run_logged_command(
+        report,
+        ["dnf", "install", "-y", package],
+        dry_run=False,
+        root=True,
+        description="Install ansible package",
+    )
+
+    if not command_exists("ansible-playbook"):
+        raise RuntimeError(
+            "ansible-playbook is still missing after installing {}".format(package)
+        )
+
+    return True
+
+
+def install_text_file(report, path, content, dry_run=False, mode="0644"):
+    """Install text content to a root-owned path using install."""
+    path = Path(path)
+    old_content = None
+
+    if path.exists():
+        try:
+            old_content = path.read_text()
+        except IOError:
+            old_content = None
+
+    if old_content == content:
+        report.add("existing", "{} unchanged".format(path))
+        return
+
+    if dry_run:
+        action = "Would update" if path.exists() else "Would create"
+        report.add("dry_run", "{} {}".format(action, path))
+        return
+
+    fd, temp_path = tempfile.mkstemp(prefix="aerolit-deploy-", text=True)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(content)
+
+        run_logged_command(
+            report,
+            ["mkdir", "-p", str(path.parent)],
+            dry_run=False,
+            root=True,
+            description="Create parent directory",
+        )
+
+        if path.exists():
+            backup_path = "{}.aerolit-backup".format(path)
+            run_logged_command(
+                report,
+                ["cp", "-a", str(path), backup_path],
+                dry_run=False,
+                root=True,
+                description="Back up existing file",
+            )
+
+        run_logged_command(
+            report,
+            ["install", "-m", mode, temp_path, str(path)],
+            dry_run=False,
+            root=True,
+            description="Install file",
+        )
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+
+
+def render_exports_file(nfs):
+    """Render /etc/exports.d content for the AeroLIT bundle export."""
+    export_path = nfs.get("export_path")
+    allowed = "*" if nfs.get("allow_all_clients") else nfs.get("allowed_clients")
+    return "# Managed by AeroLIT deploy server\n{} {}(rw,sync,no_subtree_check)\n".format(
+        export_path,
+        allowed,
+    )
+
+
+def deploy_nfs(plan, report, dry_run=False, skip=False):
+    """Apply NFS export, service, and local permissions."""
+    if skip:
+        report.add("skipped", "Ansible Controller / NFS deployment skipped by option")
+        return
+
+    nfs = plan.get("nfs", {})
+    if not nfs.get("enabled"):
+        report.add("skipped", nfs_disabled_reason(plan))
+        return
+
+    export_path = Path(nfs.get("export_path"))
+    create_export_path = nfs.get("create_export_path", False)
+
+    if not export_path.exists() and not create_export_path:
+        raise RuntimeError(
+            "NFS export path {} does not exist. Re-run configure server and allow "
+            "deploy to create it, or create it manually.".format(export_path)
+        )
+
+    ensure_directory(export_path, report, dry_run=dry_run, root=True)
+    ensure_directory(export_path / "files", report, dry_run=dry_run, root=True)
+    ensure_directory(export_path / "repos", report, dry_run=dry_run, root=True)
+
+    owner = nfs.get("mount_owner") or DEFAULT_MOUNT_OWNER
+    group = nfs.get("mount_group") or DEFAULT_MOUNT_GROUP
+    mode = str(nfs.get("mount_mode") or DEFAULT_MOUNT_MODE)
+
+    run_logged_command(
+        report,
+        [
+            "chown",
+            "{}:{}".format(owner, group),
+            str(export_path),
+            str(export_path / "files"),
+            str(export_path / "repos"),
+        ],
+        dry_run=dry_run,
+        root=True,
+        description="Set NFS export ownership",
+    )
+    run_logged_command(
+        report,
+        [
+            "chmod",
+            mode,
+            str(export_path),
+            str(export_path / "files"),
+            str(export_path / "repos"),
+        ],
+        dry_run=dry_run,
+        root=True,
+        description="Set NFS export directory mode",
+    )
+
+    install_text_file(
+        report,
+        nfs.get("exports_file") or DEFAULT_NFS_EXPORTS_FILE,
+        render_exports_file(nfs),
+        dry_run=dry_run,
+        mode="0644",
+    )
+
+    ensure_nfs_utils(report, dry_run=dry_run)
+
+    run_logged_command(
+        report,
+        ["systemctl", "enable", "--now", "rpcbind", "nfs-server"],
+        dry_run=dry_run,
+        root=True,
+        description="Enable and start NFS services",
+    )
+    run_logged_command(
+        report,
+        ["exportfs", "-rav"],
+        dry_run=dry_run,
+        root=True,
+        description="Refresh NFS exports",
+    )
+
+
+def deploy_firewall(plan, report, dry_run=False, skip=False):
+    """Apply firewall intent."""
+    if skip:
+        report.add("skipped", "Firewall deployment skipped by option")
+        return
+
+    firewall = plan.get("firewall", {})
+    if not firewall.get("manage"):
+        report.add("skipped", "Firewall management intent is disabled")
+        return
+
+    services = firewall.get("services") or []
+    ports = firewall.get("ports") or []
+
+    if not services and not ports:
+        report.add("skipped", "No firewall services or ports were configured")
+        return
+
+    if not command_exists("firewall-cmd"):
+        report.add("warnings", "firewall-cmd not found; skipping firewall changes")
+        return
+
+    rc, stdout, stderr = run_command(["systemctl", "is-active", "--quiet", "firewalld"])
+    if rc != 0:
+        report.add("warnings", "firewalld is not active; skipping firewall changes")
+        return
+
+    for service in services:
+        run_logged_command(
+            report,
+            ["firewall-cmd", "--permanent", "--add-service={}".format(service)],
+            dry_run=dry_run,
+            root=True,
+            description="Open firewall service",
+        )
+
+    for port in ports:
+        run_logged_command(
+            report,
+            ["firewall-cmd", "--permanent", "--add-port={}".format(port)],
+            dry_run=dry_run,
+            root=True,
+            description="Open firewall port",
+        )
+
+    run_logged_command(
+        report,
+        ["firewall-cmd", "--reload"],
+        dry_run=dry_run,
+        root=True,
+        description="Reload firewalld",
+    )
+
+
+def ansible_environment(playbooks_dir):
+    """Build ansible environment for local playbook execution."""
+    env = os.environ.copy()
+    cfg = Path(playbooks_dir) / "ansible.cfg"
+    if cfg.exists():
+        env["ANSIBLE_CONFIG"] = str(cfg)
+    return env
+
+
+def run_server_playbook(
+    report,
+    playbooks_dir,
+    playbook_name,
+    generated_vars_path,
+    dry_run=False,
+):
+    """Run one existing server playbook."""
+    playbooks_dir = Path(playbooks_dir)
+    playbook = playbooks_dir / playbook_name
+
+    if not playbook.exists():
+        raise RuntimeError("Required playbook not found: {}".format(playbook))
+
+    command = [
+        "ansible-playbook",
+        "-i",
+        "localhost,",
+        "-c",
+        "local",
+        "-e",
+        "@{}".format(generated_vars_path),
+        str(playbook),
+    ]
+
+    run_logged_command(
+        report,
+        command,
+        dry_run=dry_run,
+        root=False,
+        cwd=str(playbooks_dir),
+        env=ansible_environment(playbooks_dir),
+        description="Run {}".format(playbook_name),
+    )
+
+
+def deploy_ansible_playbooks(
+    plan,
+    report,
+    bundle_path,
+    generated_vars_path,
+    dry_run=False,
+    skip_pxe=False,
+    skip_controller=False,
+):
+    """Run PXE/controller playbooks from the bundle."""
+    collections_hub = collections_hub_path(bundle_path)
+    playbooks_dir = Path(collections_hub) / "ansible"
+
+    if not plan.get("pxe_enabled"):
+        skip_pxe = True
+    if not plan.get("controller_enabled"):
+        skip_controller = True
+
+    if skip_pxe and skip_controller:
+        report.add("skipped", "PXE/controller Ansible playbooks skipped")
+        return
+
+    ensure_ansible_playbook(report, dry_run=dry_run)
+
+    if not Path(generated_vars_path).exists():
+        raise RuntimeError(
+            "Generated vars file not found: {}. Run: aerolitctl configure server".format(
+                generated_vars_path
+            )
+        )
+
+    if not playbooks_dir.exists():
+        raise RuntimeError(
+            "Ansible playbooks directory not found: {}".format(playbooks_dir)
+        )
+
+    if not skip_pxe:
+        run_server_playbook(
+            report,
+            playbooks_dir,
+            "pxe_server.yml",
+            generated_vars_path,
+            dry_run=dry_run,
+        )
+    else:
+        report.add("skipped", "PXE playbook skipped")
+
+    if not skip_controller:
+        run_server_playbook(
+            report,
+            playbooks_dir,
+            "ansible_controller.yml",
+            generated_vars_path,
+            dry_run=dry_run,
+        )
+    else:
+        report.add("skipped", "Controller playbook skipped")
+
+
+def run_deploy_server(
+    dry_run=False,
+    show=False,
+    skip_interface=False,
+    skip_nfs=False,
+    skip_firewall=False,
+    skip_pxe=False,
+    skip_controller=False,
+    verbose=False,
+):
+    """Deploy the saved AeroLIT server configuration."""
+    report = DeployServerReport(verbose=verbose)
+
+    config = load_config()
+    bundle_path_value = get_bundle_path(config)
+
+    if not bundle_path_value:
+        raise RuntimeError("No bundle path is configured. Run: aerolitctl configure init")
+
+    bundle_path = Path(bundle_path_value)
+    generated_vars_path = aerolitctl_server_generated_vars_file(bundle_path)
+    plan = load_deploy_plan(config, bundle_path)
+
+    print_deploy_plan(plan, generated_vars_path)
+
+    if show:
+        print("Show complete. No files or services were changed.")
+        return 0
+
+    deploy_interface(plan, report, dry_run=dry_run, skip=skip_interface)
+    deploy_nfs(plan, report, dry_run=dry_run, skip=skip_nfs)
+    deploy_firewall(plan, report, dry_run=dry_run, skip=skip_firewall)
+    deploy_ansible_playbooks(
+        plan,
+        report,
+        bundle_path,
+        generated_vars_path,
+        dry_run=dry_run,
+        skip_pxe=skip_pxe,
+        skip_controller=skip_controller,
+    )
+
+    print("")
+    if dry_run:
+        print("Dry run complete. No files or services were changed.")
+    else:
+        print("Server deployment complete.")
+
+    report.print_summary()
+
+    return 1 if report.errors else 0
