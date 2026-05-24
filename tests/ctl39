@@ -1,3 +1,37 @@
+
+
+set -e
+
+grep -q "Mode.*pxe" /tmp/aerolitctl-merge-test/deploy-pxe.log
+grep -q "PXE Server:" /tmp/aerolitctl-merge-test/deploy-pxe.log
+grep -q "Would run Run pxe_server.yml" /tmp/aerolitctl-merge-test/deploy-pxe.log
+grep -q "Controller playbook skipped" /tmp/aerolitctl-merge-test/deploy-pxe.log
+! grep -q "Would run Run ansible_controller.yml" /tmp/aerolitctl-merge-test/deploy-pxe.log
+! grep -q "Would run Enable and start NFS services" /tmp/aerolitctl-merge-test/deploy-pxe.log
+
+grep -q "Mode.*controller" /tmp/aerolitctl-merge-test/deploy-controller.log
+grep -q "disabled by mode controller" /tmp/aerolitctl-merge-test/deploy-controller.log
+grep -q "Would run Run ansible_controller.yml" /tmp/aerolitctl-merge-test/deploy-controller.log
+grep -q "PXE playbook skipped" /tmp/aerolitctl-merge-test/deploy-controller.log
+! grep -q "Would run Run pxe_server.yml" /tmp/aerolitctl-merge-test/deploy-controller.log
+! grep -q "Would run Open firewall port.*18080/tcp" /tmp/aerolitctl-merge-test/deploy-controller.log
+
+grep -q "Mode.*full" /tmp/aerolitctl-merge-test/deploy-full.log
+grep -q "Would run Run pxe_server.yml" /tmp/aerolitctl-merge-test/deploy-full.log
+grep -q "Would run Run ansible_controller.yml" /tmp/aerolitctl-merge-test/deploy-full.log
+grep -q "Would run Open firewall service.*nfs" /tmp/aerolitctl-merge-test/deploy-full.log
+grep -q "Would run Open firewall port.*18080/tcp" /tmp/aerolitctl-merge-test/deploy-full.log
+
+echo "PASS: deploy mode behavior looks correct"
+
+
+
+
+
+
+
+
+
 Fix this in src/aerolitctl/cli.py, inside add_configure_server_parser().
 
 Look for these two argument blocks:
