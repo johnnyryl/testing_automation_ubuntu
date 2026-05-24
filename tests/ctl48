@@ -21,6 +21,9 @@ Recommended location:
 
 Recommended run:
   sudo python3 tools/aerolitctl_merge_readiness.py
+
+If firewalld is not active on future test VM, run:
+  sudo python3 tools/aerolitctl_merge_readiness.py --no-require-firewalld
 """
 
 from __future__ import print_function
@@ -756,7 +759,11 @@ def test_deploy_mode_matrix(args):
     assert_regex(pxe_output, r"Enabled\s*: yes", "deploy pxe")
     assert_contains(pxe_output, "Would run Run pxe_server.yml", "deploy pxe")
     assert_contains(pxe_output, "Controller playbook skipped", "deploy pxe")
-    assert_contains(pxe_output, "Ansible Controller / NFS is disabled by mode pxe", "deploy pxe")
+    assert_regex(
+        pxe_output,
+        r"Ansible Controller / NFS:[\s\S]*?Reason\s*: disabled by mode pxe",
+        "deploy pxe controller/NFS disabled reason",
+    )
     assert_not_contains(pxe_output, "Would run Run ansible_controller.yml", "deploy pxe")
     assert_not_contains(pxe_output, "Would run Enable and start NFS services", "deploy pxe")
     assert_firewall_action_expectations(args, pxe_output, "pxe")
