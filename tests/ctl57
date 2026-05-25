@@ -162,7 +162,6 @@ def bundle_derived_paths(bundle_path):
         "aerolitctl_inventory": str(aerolitctl_inventory_file(bundle_path)),
         "aerolitctl_server_generated_vars": str(aerolitctl_server_generated_vars_file(bundle_path)),
         "aerolitctl_ansible_generated_vars": str(aerolitctl_ansible_generated_vars_file(bundle_path)),
-        "bootstrap_repo_environment_playbook": str(bootstrap_repo_environment_playbook(bundle_path)),
         "pxe_server_playbook": str(pxe_server_playbook(bundle_path)),
         "ansible_controller_playbook": str(ansible_controller_playbook(bundle_path)),
         "sync_preserve": str(sync_preserve_file(bundle_path)),
