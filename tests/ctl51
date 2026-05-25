@@ -22,11 +22,12 @@ from .paths import (
     ansible_cfg_template_file,
     ansible_dir,
     ansible_group_vars_dir,
+    ansible_group_vars_all_dir,
     ansible_group_vars_template_dir,
-    ansible_inventory_file,
-    ansible_inventory_template_file,
+    ansible_inventory_dir,
+    ansible_inventory_template_dir,
     collections_hub_path,
-    generated_bootstrap_vars_file,
+    aerolitctl_server_generated_vars_file,
     gitlab_ci_file,
     initialization_backup_root,
     provision_gitlab_template,
@@ -39,12 +40,13 @@ from .paths import (
 from .state import state_text
 
 
-GENERATED_BOOTSTRAP_VARS_CONTENT = """---
-# Generated AeroLIT bootstrap variables
-# Created by aerolitctl configure init.
-# Later configure commands may update this file.
+AEROLITCTL_SERVER_GENERATED_VARS_CONTENT = """---
+# Generated AeroLIT server variables
+# Created by aerolitctl configure init for later configure server updates.
+# Later server/deploy commands may update this file.
+
 aerolit_generated_by: aerolitctl
-aerolit_generated_reason: configure init
+aerolit_generated_reason: configure server
 """
 
 SYNC_PRESERVE_CONTENT = """# Paths listed here are preserved during scheduled sync.
