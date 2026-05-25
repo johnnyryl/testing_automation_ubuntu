@@ -1,0 +1,57 @@
+Yes, we have enough to start the design and implementation plan, but I do not have enough to give exact line-by-line edits yet because I can’t see the current contents of your new branch after the merge.
+
+For this branch, I would start with a clean, small implementation:
+
+1. Add aerolit-bundle.yml creation during configure init
+2. Make configure init --dry-run show that it would create/update it
+3. Make bundle validate validate it when present
+4. Keep missing manifest as a warning, not a failure
+5. Make doctor continue warning cleanly until the manifest exists
+6. Add/adjust your regression test script to check this behavior
+
+Run this first from the repo root on the new branch and send me the output:
+
+git status --short --branch
+grep -R "aerolit-bundle.yml\|Bundle manifest\|bundle manifest\|manifest" -n src README.md man packaging completions 2>/dev/null || true
+grep -R "def .*bundle\|bundle validate\|validate_bundle\|doctor\|configure init\|initialize" -n src/aerolitctl 2>/dev/null || true
+find src/aerolitctl -maxdepth 1 -type f -name "*.py" -print | sort
+
+That will tell us exactly where the current warning lives and where the cleanest hook point is.
+
+My expected file targets are probably:
+
+src/aerolitctl/initialize.py
+src/aerolitctl/bundle.py
+src/aerolitctl/doctor.py
+src/aerolitctl/paths.py or config.py, depending how paths are centralized
+
+I would probably add a small new helper module, maybe:
+
+src/aerolitctl/bundle_manifest.py
+
+That keeps the manifest logic from getting jammed into initialize.py, bundle.py, and doctor.py separately.
+
+The first version of the manifest should stay simple. Something like:
+
+bundle_schema_version: 1
+bundle_name: aerolit-bundle
+created_by: aerolitctl
+bundle_layout_version: 1
+paths:
+  collections_hub: collections-hub
+  ansible_dir: collections-hub/ansible
+  group_vars_all: collections-hub/ansible/group_vars/all
+  repos: repos
+  files: files
+  extracted_isos: extracted_isos
+  bootstrap: bootstrap.sh
+  sync_preserve: collections-hub/.sync-preserve
+  gitlab_ci: collections-hub/.gitlab-ci.yml
+features:
+  pxe_server: true
+  ansible_controller: true
+  nfs: true
+
+I would not add checksums, ISO inventory, repo inventory, or generated timestamps yet unless you really want that now. Those make the manifest more powerful, but they also create more decisions and more ways for the file to become stale. For this first branch, the goal should be: “AeroLIT can create and validate its own bundle identity file.”
+
+So yes, let’s start. Send me the command output above, and then I’ll help you make the first exact code change.
