@@ -1,0 +1,193 @@
+"""Bundle inspection and validation commands for aerolitctl."""
+
+from pathlib import Path
+
+from .config import get_bundle_path, load_config
+from .paths import (
+    ansible_cfg_file,
+    ansible_cfg_template_file,
+    ansible_dir,
+    ansible_group_vars_dir,
+    ansible_group_vars_template_dir,
+    ansible_inventory_file,
+    ansible_inventory_template_file,
+    collections_hub_path,
+    generated_bootstrap_vars_file,
+    gitlab_ci_file,
+    provision_gitlab_template,
+    scheduled_gitlab_template,
+    stig_gitlab_template,
+    sync_preserve_file,
+    system_update_gitlab_template,
+    templates_dir,
+)
+
+
+class BundleValidationReport(object):
+    """Collect bundle validation results."""
+
+    def __init__(self):
+        self.ok = []
+        self.warnings = []
+        self.errors = []
+
+    def add_ok(self, message):
+        self.ok.append(message)
+
+    def add_warning(self, message):
+        self.warnings.append(message)
+
+    def add_error(self, message):
+        self.errors.append(message)
+
+    def print_report(self):
+        print("AeroLIT bundle validation")
+        print("")
+
+        for message in self.ok:
+            print("[OK] {}".format(message))
+
+        for message in self.warnings:
+            print("[WARN] {}".format(message))
+
+        for message in self.errors:
+            print("[FAIL] {}".format(message))
+
+        print("")
+        print("Summary:")
+        print("  OK: {}".format(len(self.ok)))
+        print("  Warnings: {}".format(len(self.warnings)))
+        print("  Failures: {}".format(len(self.errors)))
+
+    def exit_code(self):
+        return 1 if self.errors else 0
+
+
+def configured_bundle_path():
+    """Return configured bundle path from aerolitctl config."""
+    config = load_config()
+    bundle_path = get_bundle_path(config)
+
+    if not bundle_path:
+        raise RuntimeError(
+            "No bundle path is configured. Run: aerolitctl configure init"
+        )
+
+    return Path(bundle_path)
+
+
+def path_status(path):
+    """Return found/missing string for a path."""
+    path = Path(path)
+    return "found" if path.exists() else "missing"
+
+
+def print_path(label, path):
+    """Print a labeled path."""
+    print("{:<28} {}".format(label + ":", path))
+
+
+def show_bundle(bundle_path=None):
+    """Show configured bundle details."""
+    if bundle_path is None:
+        bundle_path = configured_bundle_path()
+    else:
+        bundle_path = Path(bundle_path)
+
+    collections_hub = collections_hub_path(bundle_path)
+
+    print("AeroLIT bundle")
+    print("")
+    print_path("Bundle path", bundle_path)
+    print_path("collections-hub", collections_hub)
+    print_path("Ansible directory", ansible_dir(bundle_path))
+    print_path("Templates directory", templates_dir(bundle_path))
+    print_path("Repos directory", bundle_path / "repos")
+    print_path("Files directory", bundle_path / "files")
+    print_path("Extracted ISOs", bundle_path / "extracted_isos")
+    print_path("Manifest", bundle_path / "aerolit-bundle.yml")
+    print_path("Bootstrap", bundle_path / "bootstrap.sh")
+    print_path("Preserve file", sync_preserve_file(bundle_path))
+    print_path("GitLab CI file", gitlab_ci_file(bundle_path))
+
+    print("")
+    print("Status:")
+    print("  bundle: {}".format(path_status(bundle_path)))
+    print("  collections-hub: {}".format(path_status(collections_hub)))
+    print("  ansible: {}".format(path_status(ansible_dir(bundle_path))))
+    print("  templates: {}".format(path_status(templates_dir(bundle_path))))
+    print("  repos: {}".format(path_status(bundle_path / "repos")))
+    print("  files: {}".format(path_status(bundle_path / "files")))
+    print("  extracted_isos: {}".format(path_status(bundle_path / "extracted_isos")))
+    print("  manifest: {}".format(path_status(bundle_path / "aerolit-bundle.yml")))
+
+    return 0
+
+
+def check_required_path(report, label, path):
+    """Check required path."""
+    path = Path(path)
+
+    if path.exists():
+        report.add_ok("{}: {}".format(label, path))
+        return True
+
+    report.add_error("{} missing: {}".format(label, path))
+    return False
+
+
+def check_expected_path(report, label, path):
+    """Check expected but not always fatal path."""
+    path = Path(path)
+
+    if path.exists():
+        report.add_ok("{}: {}".format(label, path))
+        return True
+
+    report.add_warning("{} not found: {}".format(label, path))
+    return False
+
+
+def validate_bundle(bundle_path=None):
+    """Validate configured bundle layout."""
+    if bundle_path is None:
+        bundle_path = configured_bundle_path()
+    else:
+        bundle_path = Path(bundle_path)
+
+    report = BundleValidationReport()
+
+    print("Bundle path:")
+    print("  {}".format(bundle_path))
+    print("")
+
+    check_required_path(report, "Bundle root", bundle_path)
+    check_required_path(report, "collections-hub", collections_hub_path(bundle_path))
+    check_required_path(report, "collections-hub Ansible directory", ansible_dir(bundle_path))
+    check_required_path(report, "collections-hub templates directory", templates_dir(bundle_path))
+
+    check_required_path(report, "Repos directory", bundle_path / "repos")
+    check_required_path(report, "Files directory", bundle_path / "files")
+    check_required_path(report, "Extracted ISOs directory", bundle_path / "extracted_isos")
+
+    check_required_path(report, "Ansible inventory template", ansible_inventory_template_file(bundle_path))
+    check_required_path(report, "Ansible group_vars template", ansible_group_vars_template_dir(bundle_path))
+    check_required_path(report, "Ansible config template", ansible_cfg_template_file(bundle_path))
+
+    check_required_path(report, "Provision GitLab CI template", provision_gitlab_template(bundle_path))
+    check_required_path(report, "Scheduled updater GitLab CI template", scheduled_gitlab_template(bundle_path))
+    check_required_path(report, "System update GitLab CI template", system_update_gitlab_template(bundle_path))
+    check_required_path(report, "STIG GitLab CI template", stig_gitlab_template(bundle_path))
+
+    check_expected_path(report, "Bundle manifest", bundle_path / "aerolit-bundle.yml")
+    check_expected_path(report, "Compatibility bootstrap.sh", bundle_path / "bootstrap.sh")
+    check_expected_path(report, "collections-hub .sync-preserve", sync_preserve_file(bundle_path))
+    check_expected_path(report, "collections-hub .gitlab-ci.yml", gitlab_ci_file(bundle_path))
+
+    check_expected_path(report, "Active ansible.cfg", ansible_cfg_file(bundle_path))
+    check_expected_path(report, "Active inventory", ansible_inventory_file(bundle_path))
+    check_expected_path(report, "Active group_vars", ansible_group_vars_dir(bundle_path))
+    check_expected_path(report, "Generated bootstrap vars", generated_bootstrap_vars_file(bundle_path))
+
+    report.print_report()
+    return report.exit_code()
