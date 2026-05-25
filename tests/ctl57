@@ -92,6 +92,21 @@ def aerolitctl_ansible_generated_vars_file(bundle_path):
     return ansible_group_vars_all_dir(bundle_path) / "aerolitctl_ansible_generated.yml"
 
 
+def aerolitctl_inventory_file(bundle_path):
+    """Return aerolitctl managed inventory fragment path."""
+    return ansible_inventory_dir(bundle_path) / "90_aerolitctl.ini"
+
+
+def pxe_server_playbook(bundle_path):
+    """Return PXE server playbook path."""
+    return ansible_dir(bundle_path) / "pxe_server.yml"
+
+
+def ansible_controller_playbook(bundle_path):
+    """Return Ansible controller playbook path."""
+    return ansible_dir(bundle_path) / "ansible_controller.yml"
+
+
 def sync_preserve_file(bundle_path):
     """Return collections-hub .sync-preserve path."""
     return collections_hub_path(bundle_path) / ".sync-preserve"
