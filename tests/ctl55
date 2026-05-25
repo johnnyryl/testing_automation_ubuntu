@@ -16,11 +16,12 @@ from .paths import (
     ansible_cfg_template_file,
     ansible_dir,
     ansible_group_vars_dir,
+    ansible_group_vars_all_dir,
     ansible_group_vars_template_dir,
-    ansible_inventory_file,
-    ansible_inventory_template_file,
+    ansible_inventory_dir,
+    ansible_inventory_template_dir,
     collections_hub_path,
-    generated_bootstrap_vars_file,
+    aerolitctl_server_generated_vars_file,
     gitlab_ci_file,
     provision_gitlab_template,
     scheduled_gitlab_template,
@@ -289,7 +290,7 @@ def check_bundle_layout(report, bundle_path):
     check_path(report, "Files directory", Path(bundle_path) / "files", required=True)
     check_path(report, "Extracted ISOs directory", Path(bundle_path) / "extracted_isos", required=True)
 
-    check_path(report, "Ansible inventory template", ansible_inventory_template_file(bundle_path), required=True)
+    check_path(report, "Ansible inventory template", ansible_inventory_template_dir(bundle_path), required=True)
     check_path(report, "Ansible group_vars template", ansible_group_vars_template_dir(bundle_path), required=True)
     check_path(report, "Ansible config template", ansible_cfg_template_file(bundle_path), required=True)
 
@@ -305,9 +306,10 @@ def check_bundle_layout(report, bundle_path):
     check_path(report, "collections-hub .gitlab-ci.yml", gitlab_ci_file(bundle_path), required=False)
 
     check_path(report, "Active ansible.cfg", ansible_cfg_file(bundle_path), required=False)
-    check_path(report, "Active inventory", ansible_inventory_file(bundle_path), required=False)
+    check_path(report, "Active inventory", ansible_inventory_dir(bundle_path), required=False)
     check_path(report, "Active group_vars", ansible_group_vars_dir(bundle_path), required=False)
-    check_path(report, "Generated bootstrap vars", generated_bootstrap_vars_file(bundle_path), required=False)
+    check_path(report, "Active group_vars/all", ansible_group_vars_all_dir(bundle_path), required=False)
+    check_path(report, "Generated server vars", aerolitctl_server_generated_vars_file(bundle_path), required=False)
 
 
 def run_doctor():
