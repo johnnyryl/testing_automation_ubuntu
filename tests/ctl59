@@ -1,0 +1,122 @@
+python3 -m compileall src
+grep -R "aerolit-bundle.yml" src/aerolitctl
+aerolitctl configure init --dry-run --non-interactive --verbose
+aerolitctl configure init --non-interactive --verbose
+aerolitctl bundle show
+aerolitctl bundle validate
+aerolitctl doctor
+
+
+No — that list is a good quick smoke test, but for this branch I would run a little more because we changed paths.py, bundle_manifest.py, initialize.py, bundle.py, and doctor.py.
+
+Run this from the repo root:
+
+set -e
+echo "== 1. Syntax / whitespace sanity =="
+python3 -m compileall src
+git diff --check
+echo "== 2. Confirm manifest filename is centralized =="
+grep -R --exclude="*.pyc" --exclude-dir="__pycache__" "aerolit-bundle.yml" src/aerolitctl || true
+
+Expected for the grep: ideally the literal filename only appears in paths.py. If it appears in comments/docstrings, that may be okay, but initialize.py, bundle.py, doctor.py, and bundle_manifest.py should not be manually building bundle_path / "aerolit-bundle.yml" anymore.
+
+Then run the actual behavior checks:
+
+set -e
+echo "== 3. Backup current important files =="
+mkdir -p /root/aerolit-bundle-manifest-test-backups
+cp -a /etc/aerolit/aerolitctl.yml \
+  /root/aerolit-bundle-manifest-test-backups/aerolitctl.yml.$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
+cp -a /opt/aerolit/aerolit-bundle/aerolit-bundle.yml \
+  /root/aerolit-bundle-manifest-test-backups/aerolit-bundle.yml.$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
+cp -a /opt/aerolit/aerolit-bundle/collections-hub/.sync-preserve \
+  /root/aerolit-bundle-manifest-test-backups/sync-preserve.$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
+cp -a /opt/aerolit/aerolit-bundle/collections-hub/.gitlab-ci.yml \
+  /root/aerolit-bundle-manifest-test-backups/gitlab-ci.yml.$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
+echo "== 4. Dry-run init should not write files =="
+before="$(mktemp)"
+after="$(mktemp)"
+for f in \
+  /etc/aerolit/aerolitctl.yml \
+  /var/lib/aerolit/state.yml \
+  /opt/aerolit/aerolit-bundle/aerolit-bundle.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/.sync-preserve \
+  /opt/aerolit/aerolit-bundle/collections-hub/.gitlab-ci.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+do
+  if [ -e "$f" ]; then sha256sum "$f"; else echo "MISSING  $f"; fi
+done > "$before"
+aerolitctl configure init --dry-run --non-interactive --verbose
+for f in \
+  /etc/aerolit/aerolitctl.yml \
+  /var/lib/aerolit/state.yml \
+  /opt/aerolit/aerolit-bundle/aerolit-bundle.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/.sync-preserve \
+  /opt/aerolit/aerolit-bundle/collections-hub/.gitlab-ci.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+do
+  if [ -e "$f" ]; then sha256sum "$f"; else echo "MISSING  $f"; fi
+done > "$after"
+diff -u "$before" "$after"
+echo "== 5. Real init should create/keep manifest cleanly =="
+aerolitctl configure init --non-interactive --verbose
+test -f /opt/aerolit/aerolit-bundle/aerolit-bundle.yml
+echo "== 6. Bundle commands should understand the manifest =="
+aerolitctl bundle show
+aerolitctl bundle validate
+echo "== 7. Doctor should use manifest validation and not complain manifest is missing =="
+aerolitctl doctor
+echo "== 8. Real init should be idempotent without --force =="
+before2="$(mktemp)"
+after2="$(mktemp)"
+for f in \
+  /etc/aerolit/aerolitctl.yml \
+  /var/lib/aerolit/state.yml \
+  /opt/aerolit/aerolit-bundle/aerolit-bundle.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/.sync-preserve \
+  /opt/aerolit/aerolit-bundle/collections-hub/.gitlab-ci.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+do
+  if [ -e "$f" ]; then sha256sum "$f"; else echo "MISSING  $f"; fi
+done > "$before2"
+aerolitctl configure init --non-interactive --verbose
+for f in \
+  /etc/aerolit/aerolitctl.yml \
+  /var/lib/aerolit/state.yml \
+  /opt/aerolit/aerolit-bundle/aerolit-bundle.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/.sync-preserve \
+  /opt/aerolit/aerolit-bundle/collections-hub/.gitlab-ci.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+do
+  if [ -e "$f" ]; then sha256sum "$f"; else echo "MISSING  $f"; fi
+done > "$after2"
+diff -u "$before2" "$after2"
+echo "== 9. Path helper/import sanity =="
+python3 - <<'PY'
+from pathlib import Path
+from aerolitctl.paths import bundle_manifest_file, bundle_derived_paths
+from aerolitctl.bundle_manifest import render_bundle_manifest, validate_bundle_manifest
+bundle = Path("/opt/aerolit/aerolit-bundle")
+assert bundle_manifest_file(bundle) == bundle / "aerolit-bundle.yml"
+paths = bundle_derived_paths(bundle)
+assert paths["manifest"] == str(bundle / "aerolit-bundle.yml")
+text = render_bundle_manifest()
+assert "kind: AeroLITBundle" in text
+assert "schema_version: 1" in text
+assert "layout_version: 1" in text
+assert "collections_hub: collections-hub" in text
+findings = validate_bundle_manifest(bundle, required=True)
+failures = [message for level, message in findings if level == "failure"]
+if failures:
+    raise SystemExit("manifest validation failures: {}".format(failures))
+print("PASS: manifest helper sanity")
+PY
+echo "== 10. Final sanity =="
+python3 -m compileall src
+git diff --check
+git status
+echo "PASS: bundle manifest branch looks good"
+
+That is the test set I would use before merging this branch.
+
+The key pass conditions are: configure init --dry-run does not change hashes, real configure init creates /opt/aerolit/aerolit-bundle/aerolit-bundle.yml, bundle validate no longer only says “manifest missing,” doctor no longer warns about the manifest being missing after real init, and running init again without --force does not churn the files.
