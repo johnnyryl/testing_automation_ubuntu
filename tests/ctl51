@@ -85,12 +85,12 @@ def confirm_force_overwrite(bundle_path, non_interactive=False):
     print("  - {}".format(sync_preserve_file(bundle_path)))
     print("  - {}".format(gitlab_ci_file(bundle_path)))
     print("  - {}".format(ansible_cfg_file(bundle_path)))
-    print("  - {}".format(ansible_inventory_file(bundle_path)))
+    print("  - {}".format(ansible_inventory_dir(bundle_path)))
     print("  - {}".format(ansible_group_vars_dir(bundle_path)))
-    print("  - {}".format(generated_bootstrap_vars_file(bundle_path)))
+    print("  - {}".format(aerolitctl_server_generated_vars_file(bundle_path)))
     print("")
     print("This may replace local inventory entries, group_vars changes,")
-    print("generated bootstrap vars, or saved aerolitctl configuration values.")
+    print("generated server vars, or saved aerolitctl configuration values.")
     print("")
     print("Backups will be created under:")
     print("  - {}".format(initialization_backup_root(bundle_path)))
@@ -215,7 +215,7 @@ def initialize_collections_hub_ansible(
     bundle_path,
     report,
     backup_root,
-    force=False
+    force=False,
     no_backup=False,
     dry_run=False,
 ):
@@ -450,7 +450,7 @@ def run_configure_init(
 
     print("")
 
-    if dryrun:
+    if dry_run:
         print("AeroLIT initialization dry run complete.")
     else:
         print("AeroLIT initialization complete.")
