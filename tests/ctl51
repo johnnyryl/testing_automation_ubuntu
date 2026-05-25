@@ -182,7 +182,7 @@ def validate_basic_bundle_layout(
     if not skip_ansible_files:
         required_ansible_templates = [
             ansible_cfg_template_file(bundle_path),
-            ansible_inventory_template_file(bundle_path),
+            ansible_inventory_template_dir(bundle_path),
             ansible_group_vars_template_dir(bundle_path),
         ]
 
@@ -215,6 +215,7 @@ def initialize_collections_hub_ansible(
     bundle_path,
     report,
     backup_root,
+    force=False
     no_backup=False,
     dry_run=False,
 ):
@@ -222,10 +223,10 @@ def initialize_collections_hub_ansible(
     collections_hub = collections_hub_path(bundle_path)
 
     copy_path(
-        ansible_inventory_template_file(bundle_path),
-        ansible_inventory_file(bundle_path),
+        ansible_inventory_template_dir(bundle_path),
+        ansible_inventory_dir(bundle_path),
         report,
-        overwrite=True,
+        overwrite=force,
         backup=True,
         dry_run=dry_run,
         backup_root=backup_root,
@@ -237,7 +238,7 @@ def initialize_collections_hub_ansible(
         ansible_group_vars_template_dir(bundle_path),
         ansible_group_vars_dir(bundle_path),
         report,
-        overwrite=True,
+        overwrite=force,
         backup=True,
         dry_run=dry_run,
         backup_root=backup_root,
@@ -249,7 +250,7 @@ def initialize_collections_hub_ansible(
         ansible_cfg_template_file(bundle_path),
         ansible_cfg_file(bundle_path),
         report,
-        overwrite=True,
+        overwrite=force,
         backup=True,
         dry_run=dry_run,
         backup_root=backup_root,
@@ -258,10 +259,10 @@ def initialize_collections_hub_ansible(
     )
 
     write_text_file(
-        generated_bootstrap_vars_file(bundle_path),
-        GENERATED_BOOTSTRAP_VARS_CONTENT,
+        aerolitctl_server_generated_vars_file(bundle_path),
+        AEROLITCTL_SERVER_GENERATED_VARS_CONTENT,
         report,
-        overwrite=True,
+        overwrite=force,
         backup=True,
         dry_run=dry_run,
         backup_root=backup_root,
@@ -276,9 +277,7 @@ def build_gitlab_ci_content(bundle_path):
         [
             fragment_without_last_line(provision_gitlab_template(bundle_path)),
             fragment_without_first_and_last_line(scheduled_gitlab_template(bundle_path)),
-            fragment_without_first_and_last_line(
-                system_update_gitlab_template(bundle_path)
-            ),
+            fragment_without_first_and_last_line(system_update_gitlab_template(bundle_path)),
             fragment_without_first_line(stig_gitlab_template(bundle_path)),
         ]
     )
@@ -288,6 +287,7 @@ def initialize_gitlab_ci(
     bundle_path,
     report,
     backup_root,
+    force=False,
     no_backup=False,
     dry_run=False,
 ):
@@ -299,7 +299,7 @@ def initialize_gitlab_ci(
         gitlab_ci_file(bundle_path),
         content,
         report,
-        overwrite=True,
+        overwrite=force,
         backup=True,
         dry_run=dry_run,
         backup_root=backup_root,
@@ -345,7 +345,6 @@ def run_configure_init(
 ):
     """Run full AeroLIT initialization."""
     report = InitReport(verbose=verbose)
-
     resolved_bundle_path = resolve_bundle_path(
         bundle_path=bundle_path,
         non_interactive=non_interactive,
@@ -358,6 +357,7 @@ def run_configure_init(
 
     print("Initializing AeroLIT environment in: {}".format(collections_hub))
     print("Backups enabled: {}".format(not no_backup))
+    print("Force overwrite: {}".format(force))
     print("Skip preserve file: {}".format(skip_preserve_file))
     print("Skip CI file: {}".format(skip_ci_file))
     print("Skip Ansible files: {}".format(skip_ansible_files))
