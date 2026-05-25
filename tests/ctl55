@@ -1,0 +1,635 @@
+"""System and bundle health checks for aerolitctl."""
+
+import os
+import platform
+import shutil
+import socket
+import subprocess
+from pathlib import Path
+
+from .compat import require_yaml
+from .config import get_bundle_path, load_config
+from .paths import (
+    CONFIG_FILE,
+    STATE_FILE,
+    ansible_cfg_file,
+    ansible_cfg_template_file,
+    ansible_dir,
+    ansible_group_vars_dir,
+    ansible_group_vars_template_dir,
+    ansible_inventory_file,
+    ansible_inventory_template_file,
+    collections_hub_path,
+    generated_bootstrap_vars_file,
+    gitlab_ci_file,
+    provision_gitlab_template,
+    scheduled_gitlab_template,
+    stig_gitlab_template,
+    sync_preserve_file,
+    system_update_gitlab_template,
+    templates_dir,
+)
+
+
+class DoctorReport(object):
+    """Collect doctor check results."""
+
+    def __init__(self):
+        self.ok = []
+        self.warnings = []
+        self.failures = []
+
+    def add_ok(self, message):
+        self.ok.append(message)
+
+    def add_warning(self, message):
+        self.warnings.append(message)
+
+    def add_failure(self, message):
+        self.failures.append(message)
+
+    def print_report(self):
+        print("AeroLIT Doctor")
+        print("")
+
+        for message in self.ok:
+            print("[OK] {}".format(message))
+
+        for message in self.warnings:
+            print("[WARN] {}".format(message))
+
+        for message in self.failures:
+            print("[FAIL] {}".format(message))
+
+        print("")
+        print("Summary:")
+        print("  OK: {}".format(len(self.ok)))
+        print("  Warnings: {}".format(len(self.warnings)))
+        print("  Failures: {}".format(len(self.failures)))
+
+    def exit_code(self):
+        return 1 if self.failures else 0
+
+
+def command_exists(name):
+    """Return True when command exists in PATH."""
+    return shutil.which(name) is not None
+
+
+def run_command(command):
+    """Run a command and return return code and stripped output."""
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+        stdout, stderr = process.communicate()
+        output = (stdout or stderr or "").strip()
+        return process.returncode, output
+    except OSError as exc:
+        return 127, str(exc)
+
+
+def read_os_release():
+    """Return useful OS release string."""
+    path = Path("/etc/os-release")
+
+    if not path.exists():
+        return platform.platform()
+
+    values = {}
+
+    with path.open("r") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            values[key] = value.strip().strip('"')
+
+    pretty = values.get("PRETTY_NAME")
+    if pretty:
+        return pretty
+
+    return platform.platform()
+
+
+def nearest_existing_path(path):
+    """Return nearest existing parent path."""
+    path = Path(path)
+
+    while not path.exists() and path.parent != path:
+        path = path.parent
+
+    return path
+
+
+def gib(bytes_value):
+    """Convert bytes to GiB."""
+    return float(bytes_value) / float(1024 ** 3)
+
+
+def check_path(report, label, path, required=True):
+    """Check path exists."""
+    path = Path(path)
+
+    if path.exists():
+        report.add_ok("{} found: {}".format(label, path))
+        return True
+
+    if required:
+        report.add_failure("{} missing: {}".format(label, path))
+    else:
+        report.add_warning("{} not found: {}".format(label, path))
+
+    return False
+
+
+def check_command(report, command, required=False):
+    """Check command availability."""
+    if command_exists(command):
+        report.add_ok("Command available: {}".format(command))
+        return True
+
+    if required:
+        report.add_failure("Required command missing: {}".format(command))
+    else:
+        report.add_warning("Optional command missing: {}".format(command))
+
+    return False
+
+
+def check_root(report):
+    """Check whether running as root."""
+    if hasattr(os, "geteuid"):
+        if os.geteuid() == 0:
+            report.add_ok("Running as root")
+        else:
+            report.add_warning(
+                "Not running as root. Some deploy/configure actions may require sudo/root."
+            )
+    else:
+        report.add_warning("Could not determine current user privileges")
+
+
+def check_python(report):
+    """Check Python runtime."""
+    version = platform.python_version()
+    report.add_ok("Python runtime: {}".format(version))
+
+    try:
+        require_yaml()
+        report.add_ok("Python YAML support available")
+    except Exception as exc:
+        report.add_failure(str(exc))
+
+
+def check_selinux(report):
+    """Check SELinux state if available."""
+    if not command_exists("getenforce"):
+        report.add_warning("SELinux status unavailable: getenforce not found")
+        return
+
+    code, output = run_command(["getenforce"])
+
+    if code != 0:
+        report.add_warning("SELinux status check failed: {}".format(output))
+        return
+
+    if output == "Enforcing":
+        report.add_warning(
+            "SELinux is Enforcing. Some PXE/container bind mounts may require labels or policy adjustments."
+        )
+    else:
+        report.add_ok("SELinux status: {}".format(output))
+
+
+def check_firewalld(report):
+    """Check firewalld state if available."""
+    if command_exists("firewall-cmd"):
+        code, output = run_command(["firewall-cmd", "--state"])
+        if code == 0:
+            report.add_ok("firewalld status: {}".format(output))
+        else:
+            report.add_warning("firewalld check returned: {}".format(output))
+        return
+
+    if command_exists("systemctl"):
+        code, output = run_command(["systemctl", "is-active", "firewalld"])
+        if code == 0:
+            report.add_ok("firewalld status: {}".format(output))
+        else:
+            report.add_warning("firewalld is not active or status is unavailable")
+        return
+
+    report.add_warning("firewalld status unavailable: firewall-cmd/systemctl not found")
+
+
+def check_disk_space(report, path, label, warn_below_gib=20):
+    """Check disk space under path."""
+    existing_path = nearest_existing_path(path)
+
+    if not existing_path.exists():
+        report.add_warning("{} disk check skipped; path does not exist: {}".format(label, path))
+        return
+
+    try:
+        usage = shutil.disk_usage(str(existing_path))
+    except OSError as exc:
+        report.add_warning("{} disk check failed: {}".format(label, exc))
+        return
+
+    free_gib = gib(usage.free)
+
+    if free_gib < warn_below_gib:
+        report.add_warning(
+            "{} free space is low: {:.1f} GiB free under {}".format(
+                label,
+                free_gib,
+                existing_path,
+            )
+        )
+    else:
+        report.add_ok(
+            "{} free space: {:.1f} GiB free under {}".format(
+                label,
+                free_gib,
+                existing_path,
+            )
+        )
+
+
+def check_port_available(report, bind_address, port):
+    """Check if a TCP port is available for binding."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((bind_address, int(port)))
+        report.add_ok("TCP port available: {}:{}".format(bind_address, port))
+    except socket.error as exc:
+        report.add_failure(
+            "TCP port unavailable: {}:{} ({})".format(bind_address, port, exc)
+        )
+    finally:
+        sock.close()
+
+
+def check_bundle_layout(report, bundle_path):
+    """Check configured bundle layout."""
+    check_path(report, "Bundle root", bundle_path, required=True)
+    check_path(report, "collections-hub", collections_hub_path(bundle_path), required=True)
+    check_path(report, "collections-hub Ansible directory", ansible_dir(bundle_path), required=True)
+    check_path(report, "collections-hub templates directory", templates_dir(bundle_path), required=True)
+
+    check_path(report, "Repos directory", Path(bundle_path) / "repos", required=True)
+    check_path(report, "Files directory", Path(bundle_path) / "files", required=True)
+    check_path(report, "Extracted ISOs directory", Path(bundle_path) / "extracted_isos", required=True)
+
+    check_path(report, "Ansible inventory template", ansible_inventory_template_file(bundle_path), required=True)
+    check_path(report, "Ansible group_vars template", ansible_group_vars_template_dir(bundle_path), required=True)
+    check_path(report, "Ansible config template", ansible_cfg_template_file(bundle_path), required=True)
+
+    check_path(report, "Provision GitLab CI template", provision_gitlab_template(bundle_path), required=True)
+    check_path(report, "Scheduled updater GitLab CI template", scheduled_gitlab_template(bundle_path), required=True)
+    check_path(report, "System update GitLab CI template", system_update_gitlab_template(bundle_path), required=True)
+    check_path(report, "STIG GitLab CI template", stig_gitlab_template(bundle_path), required=True)
+
+    check_path(report, "Compatibility bootstrap.sh", Path(bundle_path) / "bootstrap.sh", required=False)
+    check_path(report, "Bundle manifest", Path(bundle_path) / "aerolit-bundle.yml", required=False)
+
+    check_path(report, "collections-hub .sync-preserve", sync_preserve_file(bundle_path), required=False)
+    check_path(report, "collections-hub .gitlab-ci.yml", gitlab_ci_file(bundle_path), required=False)
+
+    check_path(report, "Active ansible.cfg", ansible_cfg_file(bundle_path), required=False)
+    check_path(report, "Active inventory", ansible_inventory_file(bundle_path), required=False)
+    check_path(report, "Active group_vars", ansible_group_vars_dir(bundle_path), required=False)
+    check_path(report, "Generated bootstrap vars", generated_bootstrap_vars_file(bundle_path), required=False)
+
+
+def run_doctor():
+    """Run AeroLIT doctor checks."""
+    report = DoctorReport()
+
+    print("AeroLIT Doctor")
+    print("Running checks...")
+    print("")
+
+    report.add_ok("Operating system: {}".format(read_os_release()))
+
+    check_root(report)
+    check_python(report)
+
+    check_command(report, "python3", required=True)
+    check_command(report, "dnf", required=False)
+    check_command(report, "yum", required=False)
+    check_command(report, "ansible", required=False)
+    check_command(report, "ansible-playbook", required=False)
+    check_command(report, "podman", required=False)
+    check_command(report, "rsync", required=False)
+
+    check_path(report, "Primary config", CONFIG_FILE, required=True)
+    check_path(report, "Runtime state", STATE_FILE, required=False)
+
+    try:
+        config = load_config()
+    except Exception as exc:
+        report.add_failure("Could not load config: {}".format(exc))
+        report.print_report()
+        return report.exit_code()
+
+    bundle_path = get_bundle_path(config)
+
+    if not bundle_path:
+        report.add_failure("No bundle path configured")
+        report.print_report()
+        return report.exit_code()
+
+    report.add_ok("Configured bundle path: {}".format(bundle_path))
+
+    check_bundle_layout(report, bundle_path)
+
+    pxe_config = config.get("pxe", {})
+    server_config = config.get("server", {})
+    pxe_http_config = server_config.get("pxe_http", {})
+
+    if pxe_config.get("enabled", True):
+        bind_address = pxe_http_config.get("bind_address", "0.0.0.0")
+        port = pxe_http_config.get("port", 18080)
+        check_port_available(report, bind_address, port)
+    else:
+        report.add_warning("PXE is disabled in aerolitctl config")
+
+    check_selinux(report)
+    check_firewalld(report)
+
+    check_disk_space(report, bundle_path, "Bundle path", warn_below_gib=20)
+    check_disk_space(report, "/var/lib/aerolit", "State path", warn_below_gib=2)
+    check_disk_space(report, "/var/log/aerolit", "Log path", warn_below_gib=1)
+
+    print("")
+    report.print_report()
+
+    return report.exit_code()
+
+
+
+
+
+
+
+"""CLI entry point for aerolitctl."""
+
+import argparse
+import sys
+from pathlib import Path
+
+from . import __version__
+from .bundle import show_bundle, validate_bundle
+from .config import get_bundle_path, load_config, set_bundle_path
+from .doctor import run_doctor
+from .initialize import run_configure_init
+
+
+def cmd_version(args):
+    """Print aerolitctl version."""
+    print("aerolitctl {}".format(__version__))
+    return 0
+
+
+def cmd_configure_init(args):
+    """Run full initialization workflow."""
+    return run_configure_init(
+        bundle_path=args.bundle,
+        force=args.force,
+        dry_run=args.dry_run,
+        non_interactive=args.non_interactive,
+        verbose=args.verbose,
+        no_backup=args.no_backup,
+        skip_preserve_file=args.skip_preserve_file,
+        skip_ci_file=args.skip_ci_file,
+        skip_ansible_files=args.skip_ansible_files,
+    )
+
+
+def cmd_path_show(args):
+    """Show configured bundle path."""
+    config = load_config()
+    bundle_path = get_bundle_path(config)
+
+    if not bundle_path:
+        print("No bundle path is configured.", file=sys.stderr)
+        return 1
+
+    print(bundle_path)
+    return 0
+
+
+def cmd_path_set(args):
+    """Set configured bundle path."""
+    new_path = Path(args.path)
+    config, backup_path, changed = set_bundle_path(new_path, backup=not args.no_backup)
+
+    if not changed:
+        print("AeroLIT bundle path already set:")
+        print("  {}".format(get_bundle_path(config)))
+        print("")
+        print("No changes made.")
+        return 0
+
+    print("Updated AeroLIT bundle path:")
+    print("  {}".format(get_bundle_path(config)))
+
+    if backup_path:
+        print("")
+        print("Config backup:")
+        print("  {}".format(backup_path))
+
+    if not new_path.exists():
+        print("")
+        print("WARNING: Bundle path does not currently exist:")
+        print("  {}".format(new_path))
+        print("")
+        print("You can create/place the bundle there, then run:")
+        print("  aerolitctl configure init --bundle {}".format(new_path))
+
+    return 0
+
+
+def cmd_bundle_show(args):
+    """Show configured bundle details."""
+    return show_bundle(bundle_path=args.path)
+
+
+def cmd_bundle_validate(args):
+    """Validate configured bundle layout."""
+    return validate_bundle(bundle_path=args.path)
+
+
+def cmd_doctor(args):
+    """Run doctor checks."""
+    return run_doctor()
+
+
+def build_parser():
+    """Build command-line parser."""
+    parser = argparse.ArgumentParser(
+        prog="aerolitctl",
+        description="Command and control interface for AeroLIT bundles.",
+    )
+
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show more detailed output.",
+    )
+
+    subparsers = parser.add_subparsers(dest="command")
+
+    version_parser = subparsers.add_parser(
+        "version",
+        help="Show aerolitctl version.",
+    )
+    version_parser.set_defaults(func=cmd_version)
+
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Run AeroLIT health checks.",
+    )
+    doctor_parser.set_defaults(func=cmd_doctor)
+
+    configure_parser = subparsers.add_parser(
+        "configure",
+        help="Configure AeroLIT.",
+    )
+    configure_subparsers = configure_parser.add_subparsers(dest="configure_command")
+
+    init_parser = configure_subparsers.add_parser(
+        "init",
+        help="Initialize AeroLIT configuration, state, preserves, CI, and active Ansible files.",
+    )
+    init_parser.add_argument(
+        "--bundle",
+        default=None,
+        help="Path to AeroLIT bundle. Defaults to /opt/aerolit/aerolit-bundle.",
+    )
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing managed files from templates after backing them up.",
+    )
+    init_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would happen without making changes.",
+    )
+    init_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Do not prompt. Use defaults unless options are provided.",
+    )
+    init_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not create initialization backups before replacing files.",
+    )
+    init_parser.add_argument(
+        "--skip-preserve-file",
+        action="store_true",
+        help="Do not create or update collections-hub/.sync-preserve.",
+    )
+    init_parser.add_argument(
+        "--skip-ci-file",
+        action="store_true",
+        help="Do not generate collections-hub/.gitlab-ci.yml.",
+    )
+    init_parser.add_argument(
+        "--skip-ansible-files",
+        action="store_true",
+        help="Do not create or replace ansible/inventory, ansible/group_vars, or ansible/ansible.cfg.",
+    )
+    init_parser.set_defaults(func=cmd_configure_init)
+
+    path_parser = subparsers.add_parser(
+        "path",
+        help="Show or update the configured AeroLIT bundle path.",
+    )
+    path_subparsers = path_parser.add_subparsers(dest="path_command")
+
+    path_show_parser = path_subparsers.add_parser(
+        "show",
+        help="Show configured bundle path.",
+    )
+    path_show_parser.set_defaults(func=cmd_path_show)
+
+    path_set_parser = path_subparsers.add_parser(
+        "set",
+        help="Set configured bundle path.",
+    )
+    path_set_parser.add_argument(
+        "path",
+        help="Path to the AeroLIT bundle.",
+    )
+    path_set_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not back up /etc/aerolit/aerolitctl.yml before updating it.",
+    )
+    path_set_parser.set_defaults(func=cmd_path_set)
+
+    bundle_parser = subparsers.add_parser(
+        "bundle",
+        help="Show or validate the configured AeroLIT bundle.",
+    )
+    bundle_subparsers = bundle_parser.add_subparsers(dest="bundle_command")
+
+    bundle_show_parser = bundle_subparsers.add_parser(
+        "show",
+        help="Show bundle paths and status.",
+    )
+    bundle_show_parser.add_argument(
+        "--path",
+        default=None,
+        help="Inspect a bundle path without changing aerolitctl.yml.",
+    )
+    bundle_show_parser.set_defaults(func=cmd_bundle_show)
+
+    bundle_validate_parser = bundle_subparsers.add_parser(
+        "validate",
+        help="Validate bundle layout and required files.",
+    )
+    bundle_validate_parser.add_argument(
+        "--path",
+        default=None,
+        help="Validate a bundle path without changing aerolitctl.yml.",
+    )
+    bundle_validate_parser.set_defaults(func=cmd_bundle_validate)
+
+    return parser
+
+
+def main(argv=None):
+    """Main entry point."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if not hasattr(args, "func"):
+        parser.print_help()
+        return 2
+
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        print("")
+        print("Cancelled.", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        print("ERROR: {}".format(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
