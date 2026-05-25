@@ -82,9 +82,14 @@ def ansible_group_vars_template_dir(bundle_path):
     return ansible_dir(bundle_path) / "group_vars_template"
 
 
-def generated_bootstrap_vars_file(bundle_path):
-    """Return generated bootstrap vars path inside active group_vars/all."""
-    return ansible_group_vars_all_dir(bundle_path) / "aerolit_bootstrap_generated.yml"
+def aerolitctl_server_generated_vars_file(bundle_path):
+    """Return aerolitctl generated server vars path inside active group_vars/all."""
+    return ansible_group_vars_all_dir(bundle_path) / "aerolitctl_server_generated.yml"
+
+
+def aerolitctl_ansible_generated_vars_file(bundle_path):
+    """Return aerolitctl generated Ansible vars path inside active group_vars/all."""
+    return ansible_group_vars_all_dir(bundle_path) / "aerolitctl_ansible_generated.yml"
 
 
 def sync_preserve_file(bundle_path):
