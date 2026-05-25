@@ -1,4 +1,5 @@
 """Default paths for aerolitctl."""
+
 from pathlib import Path
 
 
@@ -56,13 +57,13 @@ def ansible_cfg_template_file(bundle_path):
     return ansible_dir(bundle_path) / "ansible_template.cfg"
 
 
-def ansible_inventory_file(bundle_path):
-    """Return active inventory path."""
+def ansible_inventory_dir(bundle_path):
+    """Return active Ansible inventory directory path."""
     return ansible_dir(bundle_path) / "inventory"
 
 
-def ansible_inventory_template_file(bundle_path):
-    """Return inventory template path."""
+def ansible_inventory_template_dir(bundle_path):
+    """Return inventory template directory path."""
     return ansible_dir(bundle_path) / "inventory_template"
 
 
@@ -135,7 +136,7 @@ def bundle_derived_paths(bundle_path):
         "manifest": str(bundle_path / "aerolit-bundle.yml"),
         "ansible": str(ansible_dir(bundle_path)),
         "ansible_cfg": str(ansible_cfg_file(bundle_path)),
-        "ansible_inventory": str(ansible_inventory_file(bundle_path)),
+        "ansible_inventory": str(ansible_inventory_dir(bundle_path)),
         "ansible_group_vars": str(ansible_group_vars_dir(bundle_path)),
         "ansible_group_vars_all": str(ansible_group_vars_all_dir(bundle_path)),
         "generated_bootstrap_vars": str(generated_bootstrap_vars_file(bundle_path)),
