@@ -363,6 +363,17 @@ def run_configure_init(
     print("Skip Ansible files: {}".format(skip_ansible_files))
     print("")
 
+    if force:
+        if not confirm_force_overwrite(
+            resolved_bundle_path,
+            non_interactive=non_interactive,
+        ):
+            print("")
+            print("Cancelled. No initialization changes were made.")
+            report.add("skipped", "Force overwrite cancelled by user")
+            report.print_summary()
+            return 130
+
     for directory in required_control_directories():
         ensure_directory(directory, report, dry_run=dry_run)
 
@@ -403,6 +414,7 @@ def run_configure_init(
                 resolved_bundle_path,
                 report,
                 backup_root=project_backup_root,
+                force=force,
                 no_backup=no_backup,
                 dry_run=dry_run,
             )
@@ -414,6 +426,7 @@ def run_configure_init(
                 resolved_bundle_path,
                 report,
                 backup_root=project_backup_root,
+                force=force,
                 no_backup=no_backup,
                 dry_run=dry_run,
             )
@@ -436,7 +449,12 @@ def run_configure_init(
         )
 
     print("")
-    print("AeroLIT initialization complete.")
+
+    if dryrun:
+        print("AeroLIT initialization dry run complete.")
+    else:
+        print("AeroLIT initialization complete.")
+
     print("")
     print("Configured bundle path:")
     print("  {}".format(resolved_bundle_path))
@@ -450,8 +468,11 @@ def run_configure_init(
     print("Active Ansible directory:")
     print("  {}".format(ansible_dir(resolved_bundle_path)))
     print("")
-    print("Generated bootstrap vars:")
-    print("  {}".format(generated_bootstrap_vars_file(resolved_bundle_path)))
+    print("Active group_vars/all directory:")
+    print("  {}".format(ansible_group_vars_all_dir(resolved_bundle_path)))
+    print("")
+    print("Generated server vars:")
+    print("  {}".format(aerolitctl_server_generated_vars_file(resolved_bundle_path)))
     print("")
     print("Preserve manifest:")
     print("  {}".format(sync_preserve_file(resolved_bundle_path)))
