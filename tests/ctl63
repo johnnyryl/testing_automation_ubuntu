@@ -399,6 +399,29 @@ def bundle_manifest_path(args):
     return Path(args.bundle_path) / "aerolit-bundle.yml"
 
 
+def managed_ansible_state_paths(args):
+    """Return aerolitctl-managed Ansible files that should be snapshotted."""
+    group_vars_root = (
+        Path(args.bundle_path)
+        / "collections-hub"
+        / "ansible"
+        / "group_vars"
+    )
+
+    paths = [
+        Path(args.ansible_inventory_path),
+        Path(args.ansible_generated_vars_path),
+        Path(args.ansible_test_group_vars_path),
+    ]
+
+    if group_vars_root.exists():
+        for path in group_vars_root.glob("*/aerolitctl.yml"):
+            if path not in paths:
+                paths.append(path)
+
+    return paths
+
+
 def assert_bundle_manifest_content(args):
     """Assert the bundle manifest exists and contains expected v1 fields."""
     manifest = bundle_manifest_path(args)
@@ -1516,9 +1539,7 @@ def main():
         Path(args.bundle_path) / "collections-hub" / ".sync-preserve",
         Path(args.bundle_path) / "collections-hub" / ".gitlab-ci.yml",
         Path(args.generated_vars_path),
-        Path(args.ansible_inventory_path),
-        Path(args.ansible_generated_vars_path),
-        Path(args.ansible_test_group_vars_path),
+        *managed_ansible_state_paths(args),
     ]
 
     state_snapshot = None
