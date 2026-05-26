@@ -201,6 +201,30 @@ def assert_not_regex(text, pattern, label=None):
         )
 
 
+def assert_path_exists(path, label=None):
+    """Assert a path exists."""
+    path = Path(path)
+    if not path.exists():
+        raise TestFailure(
+            "Missing expected path{}: {}".format(
+                " for {}".format(label) if label else "",
+                path,
+            )
+        )
+
+
+def assert_path_missing(path, label=None):
+    """Assert a path does not exist."""
+    path = Path(path)
+    if path.exists():
+        raise TestFailure(
+            "Unexpected path exists{}: {}".format(
+                " for {}".format(label) if label else "",
+                path,
+            )
+        )
+
+
 def sha256_file(path):
     """Return sha256 line for a path, or MISSING when absent."""
     path = Path(path)
@@ -561,6 +585,10 @@ def test_cli_help_and_parser(args):
         ["aerolitctl", "configure", "init", "--dry-run", "--non-interactive", "--verbose"],
         ["aerolitctl", "configure", "server", "--dry-run", "--mode", "pxe", "--verbose"],
         ["aerolitctl", "configure", "server", "--dry-run", "--mode", "pxe", "--show", "--verbose"],
+        ["aerolitctl", "configure", "ansible", "--help"],
+        ["aerolitctl", "configure", "ansible", "--show"],
+        ["aerolitctl", "configure", "ansible", "--dry-run", "--ensure-standard-groups", "--local-controller"],
+        ["aerolitctl", "configure", "ansible", "--dry-run", "--add-k3s-cluster", "testcluster"],
     ]
 
     help_output = run_cmd(["aerolitctl", "configure", "server", "--help"])
