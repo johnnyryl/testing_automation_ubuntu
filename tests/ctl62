@@ -36,6 +36,11 @@ def cmd_configure_init(args):
     )
 
 
+def cmd_configure_ansible(args):
+    """Run configure ansible."""
+    return run_configure_ansible(args)
+
+
 def cmd_path_show(args):
     """Show configured bundle path."""
     config = load_config()
