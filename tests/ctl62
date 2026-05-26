@@ -511,6 +511,285 @@ def build_parser():
     add_command_verbose(init_parser)
     init_parser.set_defaults(func=cmd_configure_init)
 
+    ansible_parser = configure_subparsers.add_parser(
+        "ansible",
+        help="Safely manage AeroLIT-owned Ansible inventory and generated vars.",
+    )
+    ansible_parser.set_defaults(func=cmd_configure_ansible)
+
+    ansible_parser.add_argument(
+        "--bundle-path",
+        default=None,
+        help="Bundle path. Defaults to configured bundle path.",
+    )
+    ansible_parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Show managed AeroLIT Ansible inventory/configuration.",
+    )
+    ansible_parser.add_argument(
+        "--guided",
+        action="store_true",
+        help="Interactively configure managed Ansible inventory.",
+    )
+    ansible_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without writing files.",
+    )
+    ansible_parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Validate managed Ansible inventory/configuration.",
+    )
+    ansible_parser.add_argument(
+        "--ansible-inventory-check",
+        action="store_true",
+        help="Run ansible-inventory --list when ansible-inventory is available.",
+    )
+    ansible_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow replacement of existing non-aerolitctl-managed output files.",
+    )
+    ansible_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not create timestamped backups before changing managed files.",
+    )
+
+    ansible_parser.add_argument(
+        "--ensure-standard-groups",
+        action="store_true",
+        help="Ensure standard AeroLIT groups exist in the managed inventory.",
+    )
+    ansible_parser.add_argument(
+        "--local-controller",
+        action="store_true",
+        help="Add localhost to ansible_controller and pxe_server with local connection.",
+    )
+
+    ansible_parser.add_argument(
+        "--add-group",
+        action="append",
+        default=[],
+        help="Add/ensure a managed group. Can be used more than once.",
+    )
+    ansible_parser.add_argument(
+        "--remove-group",
+        action="append",
+        default=[],
+        help="Remove a managed group from the aerolitctl-managed inventory.",
+    )
+    ansible_parser.add_argument(
+        "--add-child-group",
+        action="append",
+        nargs=2,
+        default=[],
+        metavar=("PARENT", "CHILD"),
+        help="Add a managed child-group relationship.",
+    )
+    ansible_parser.add_argument(
+        "--remove-child-group",
+        action="append",
+        nargs=2,
+        default=[],
+        metavar=("PARENT", "CHILD"),
+        help="Remove a managed child-group relationship.",
+    )
+
+    ansible_parser.add_argument(
+        "--add-k3s-cluster",
+        action="append",
+        default=[],
+        metavar="CLUSTER",
+        help="Add/ensure a managed K3s cluster group structure.",
+    )
+    ansible_parser.add_argument(
+        "--add-k3s-server",
+        action="append",
+        nargs=2,
+        default=[],
+        metavar=("CLUSTER", "HOST"),
+        help="Add a host to a managed K3s server/control-plane group.",
+    )
+    ansible_parser.add_argument(
+        "--add-k3s-agent",
+        action="append",
+        nargs=2,
+        default=[],
+        metavar=("CLUSTER", "HOST"),
+        help="Add a host to a managed K3s agent/worker group.",
+    )
+
+    ansible_parser.add_argument(
+        "--add-host",
+        action="append",
+        default=[],
+        help="Add/ensure a managed host. Can be used more than once.",
+    )
+    ansible_parser.add_argument(
+        "--remove-host",
+        action="append",
+        default=[],
+        help="Remove a managed host from all aerolitctl-managed groups.",
+    )
+    ansible_parser.add_argument(
+        "--remove-host-from-group",
+        action="append",
+        nargs=2,
+        default=[],
+        metavar=("HOST", "GROUP"),
+        help="Remove a managed host from one managed group.",
+    )
+    ansible_parser.add_argument(
+        "--group",
+        action="append",
+        default=[],
+        help="Group for --add-host or --add-host-range. Can be used more than once.",
+    )
+
+    ansible_parser.add_argument(
+        "--ansible-host",
+        "--ip",
+        dest="ansible_host",
+        default=None,
+        help="Set ansible_host/IP for added host(s).",
+    )
+    ansible_parser.add_argument(
+        "--ansible-user",
+        default=None,
+        help="Set ansible_user for added host(s).",
+    )
+    ansible_parser.add_argument(
+        "--ansible-port",
+        type=int,
+        default=None,
+        help="Set ansible_port for added host(s).",
+    )
+    ansible_parser.add_argument(
+        "--ssh-key",
+        "--private-key",
+        dest="ssh_key",
+        default=None,
+        help="Set ansible_ssh_private_key_file for added host(s).",
+    )
+    ansible_parser.add_argument(
+        "--connection",
+        default=None,
+        help="Set ansible_connection for added host(s), such as ssh or local.",
+    )
+    ansible_parser.add_argument(
+        "--python-interpreter",
+        default=None,
+        help="Set ansible_python_interpreter for added host(s).",
+    )
+
+    ansible_parser.set_defaults(become=None)
+    ansible_parser.add_argument(
+        "--become",
+        dest="become",
+        action="store_true",
+        help="Set ansible_become=true for added host(s).",
+    )
+    ansible_parser.add_argument(
+        "--no-become",
+        dest="become",
+        action="store_false",
+        help="Set ansible_become=false for added host(s).",
+    )
+
+    ansible_parser.add_argument(
+        "--host-var",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Set an extra host var for added host(s).",
+    )
+    ansible_parser.add_argument(
+        "--set-host-var",
+        action="append",
+        nargs=2,
+        default=[],
+        metavar=("HOST", "KEY=VALUE"),
+        help="Set a var on an existing managed host.",
+    )
+    ansible_parser.add_argument(
+        "--remove-host-var",
+        action="append",
+        nargs=2,
+        default=[],
+        metavar=("HOST", "KEY"),
+        help="Remove a var from an existing managed host.",
+    )
+
+    ansible_parser.add_argument(
+        "--set-global-var",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Set a global var in group_vars/all/aerolitctl_ansible_generated.yml.",
+    )
+    ansible_parser.add_argument(
+        "--remove-global-var",
+        action="append",
+        default=[],
+        metavar="KEY",
+        help="Remove a global var from group_vars/all/aerolitctl_ansible_generated.yml.",
+    )
+    ansible_parser.add_argument(
+        "--set-group-var",
+        action="append",
+        nargs=2,
+        default=[],
+        metavar=("GROUP", "KEY=VALUE"),
+        help="Set a var in group_vars/<group>/aerolitctl.yml.",
+    )
+    ansible_parser.add_argument(
+        "--remove-group-var",
+        action="append",
+        nargs=2,
+        default=[],
+        metavar=("GROUP", "KEY"),
+        help="Remove a var from group_vars/<group>/aerolitctl.yml.",
+    )
+
+    ansible_parser.add_argument(
+        "--allow-sensitive-vars",
+        action="store_true",
+        help="Allow sensitive-looking variable names like password/token/secret.",
+    )
+
+    ansible_parser.add_argument(
+        "--add-host-range",
+        default=None,
+        metavar="PREFIX",
+        help="Add generated hosts using PREFIX plus a zero-padded number.",
+    )
+    ansible_parser.add_argument(
+        "--range-start",
+        type=int,
+        default=None,
+        help="Start number for --add-host-range.",
+    )
+    ansible_parser.add_argument(
+        "--range-end",
+        type=int,
+        default=None,
+        help="End number for --add-host-range.",
+    )
+    ansible_parser.add_argument(
+        "--host-number-width",
+        type=int,
+        default=3,
+        help="Zero-padding width for generated host names. Default: 3.",
+    )
+    ansible_parser.add_argument(
+        "--ip-start",
+        default=None,
+        help="Starting IP address for --add-host-range.",
+    )
+
     add_configure_server_parser(configure_subparsers)
     add_deploy_parser(subparsers)
 
