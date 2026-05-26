@@ -25,16 +25,18 @@ from pathlib import Path
 
 from .config import get_bundle_path, load_config
 from .paths import (
+    AEROLITCTL_GROUP_VARS_FILENAME,
     ansible_cfg_file,
     ansible_group_vars_all_dir,
+    ansible_group_vars_dir,
     ansible_inventory_dir,
     aerolitctl_ansible_generated_vars_file,
+    aerolitctl_group_vars_file as path_aerolitctl_group_vars_file,
     aerolitctl_inventory_file,
 )
 
 
 DEFAULT_GROUP = "provisioned"
-GROUP_VARS_FILENAME = "aerolitctl.yml"
 
 STANDARD_GROUPS = [
     "ansible_controller",
@@ -631,13 +633,13 @@ def configured_bundle_path():
 
 def group_vars_root_dir(bundle_path):
     """Return active group_vars root path."""
-    return ansible_group_vars_all_dir(bundle_path).parent
+    return ansible_group_vars_dir(bundle_path)
 
 
 def aerolitctl_group_vars_file(bundle_path, group):
     """Return aerolitctl-managed group_vars file for one group."""
     group = normalize_group_name(group)
-    return group_vars_root_dir(bundle_path) / group / GROUP_VARS_FILENAME
+    return path_aerolitctl_group_vars_file(bundle_path, group)
 
 
 def file_looks_managed(path, managed_kind):
@@ -939,7 +941,7 @@ def load_group_vars(bundle_path, inventory, force=False):
     if not root.exists():
         return
 
-    for path in root.glob("*/{}".format(GROUP_VARS_FILENAME)):
+    for path in root.glob("*/{}".format(AEROLITCTL_GROUP_VARS_FILENAME)):
         group = path.parent.name
 
         if group in RESERVED_GROUP_NAMES:
@@ -1136,7 +1138,7 @@ def existing_managed_group_var_groups(bundle_path):
     if not root.exists():
         return groups
 
-    for path in root.glob("*/{}".format(GROUP_VARS_FILENAME)):
+    for path in root.glob("*/{}".format(AEROLITCTL_GROUP_VARS_FILENAME)):
         group = path.parent.name
 
         if group in RESERVED_GROUP_NAMES:
@@ -1957,7 +1959,7 @@ def guided_common_connection_defaults(inventory, allow_sensitive=False):
     print_guided_section("Connection defaults preview")
 
     if scope_choice == "1":
-        print("  Target: group_vars/{}/{}".format(group, GROUP_VARS_FILENAME))
+        print("  Target: group_vars/{}/{}".format(group, AEROLITCTL_GROUP_VARS_FILENAME))
     else:
         print("  Target: group_vars/all/aerolitctl_ansible_generated.yml")
 
