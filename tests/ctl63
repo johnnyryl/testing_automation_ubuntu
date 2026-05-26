@@ -1514,6 +1514,9 @@ def main():
         Path(args.bundle_path) / "collections-hub" / ".sync-preserve",
         Path(args.bundle_path) / "collections-hub" / ".gitlab-ci.yml",
         Path(args.generated_vars_path),
+        Path(args.ansible_inventory_path),
+        Path(args.ansible_generated_vars_path),
+        Path(args.ansible_test_group_vars_path),
     ]
 
     state_snapshot = None
@@ -1529,6 +1532,9 @@ def main():
     print("State file         : {}".format(args.state_file))
     print("Bundle manifest    : {}".format(bundle_manifest_path(args)))
     print("Generated vars     : {}".format(args.generated_vars_path))
+    print("Ansible inventory  : {}".format(args.ansible_inventory_path))
+    print("Ansible gen vars   : {}".format(args.ansible_generated_vars_path))
+    print("Ansible test vars  : {}".format(args.ansible_test_group_vars_path))
     print("Log dir            : {}".format(args.log_dir))
     print("Local CLI wrapper  : {}".format(args.aerolitctl_wrapper))
     print("Keep state         : {}".format(args.keep_state))
