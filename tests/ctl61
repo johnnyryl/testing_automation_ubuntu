@@ -1108,7 +1108,7 @@ def render_generated_vars(inventory):
 
 
 def render_group_vars(group, variables):
-    """Render an aerolitctl-managed group_vars/<group> file."""
+    """Render an aerolitctl-managed group_vars/<group>/<managed filename> file."""
     group = normalize_group_name(group)
 
     lines = [
