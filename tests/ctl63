@@ -594,6 +594,12 @@ def test_cli_help_and_parser(args):
     help_output = run_cmd(["aerolitctl", "configure", "server", "--help"])
     assert_not_contains(help_output, "NFS/controller", "configure server help")
     assert_contains(help_output, "Ansible Controller / NFS", "configure server help")
+    ansible_help = run_cmd(["aerolitctl", "configure", "ansible", "--help"])
+    assert_contains(ansible_help, "--ensure-standard-groups", "configure ansible help")
+    assert_contains(ansible_help, "--set-global-var", "configure ansible help")
+    assert_contains(ansible_help, "--set-group-var", "configure ansible help")
+    assert_contains(ansible_help, "--add-k3s-cluster", "configure ansible help")
+    assert_contains(ansible_help, "--add-host-range", "configure ansible help")
 
     for command in commands:
         run_cmd(command)
@@ -934,6 +940,291 @@ def test_configure_dry_run_read_only(args, hash_paths):
     assert_hashes_same(before, after, "configure-server-dry-run-read-only")
 
 
+def test_configure_ansible_dry_run_read_only(args, hash_paths):
+    """Confirm configure ansible dry-run operations are read-only."""
+    before = sha256_paths(hash_paths)
+
+    commands = [
+        [
+            "aerolitctl",
+            "configure",
+            "ansible",
+            "--dry-run",
+            "--ensure-standard-groups",
+            "--local-controller",
+        ],
+        [
+            "aerolitctl",
+            "configure",
+            "ansible",
+            "--dry-run",
+            "--add-host",
+            "aerolit-ansible-dry01",
+            "--ansible-host",
+            "192.168.109.151",
+            "--group",
+            "provisioned",
+            "--group",
+            "workstations",
+            "--group",
+            "rhel9",
+            "--ansible-user",
+            "sysadmin",
+            "--become",
+            "--host-var",
+            "ansible_port=22",
+        ],
+        [
+            "aerolitctl",
+            "configure",
+            "ansible",
+            "--dry-run",
+            "--add-host-range",
+            "aerolit-node",
+            "--range-start",
+            "1",
+            "--range-end",
+            "3",
+            "--host-number-width",
+            "2",
+            "--ip-start",
+            "192.168.109.160",
+            "--group",
+            "provisioned",
+            "--group",
+            "rhel9",
+        ],
+        [
+            "aerolitctl",
+            "configure",
+            "ansible",
+            "--dry-run",
+            "--set-global-var",
+            "aerolit_test_global=enabled",
+            "--set-group-var",
+            "aerolit_test_group",
+            "ansible_become=true",
+        ],
+        [
+            "aerolitctl",
+            "configure",
+            "ansible",
+            "--dry-run",
+            "--add-child-group",
+            "aerolit_parent",
+            "aerolit_child",
+            "--add-k3s-cluster",
+            "aerolit_test_cluster",
+        ],
+        [
+            "aerolitctl",
+            "configure",
+            "ansible",
+            "--dry-run",
+            "--add-k3s-server",
+            "aerolit_test_cluster",
+            "aerolit-k3s-server01",
+            "--add-k3s-agent",
+            "aerolit_test_cluster",
+            "aerolit-k3s-agent01",
+        ],
+    ]
+
+    for command in commands:
+        output = run_cmd(command)
+        assert_contains(output, "AeroLIT configure ansible plan", "configure ansible dry-run")
+        assert_contains(
+            output,
+            "Dry run complete. No files were changed.",
+            "configure ansible dry-run",
+        )
+
+    after = sha256_paths(hash_paths)
+    assert_hashes_same(before, after, "configure-ansible-dry-run-read-only")
+
+
+def test_configure_ansible_sensitive_var_guard(args):
+    """Confirm configure ansible refuses sensitive-looking vars by default."""
+    output = run_cmd(
+        [
+            "aerolitctl",
+            "configure",
+            "ansible",
+            "--dry-run",
+            "--set-global-var",
+            "api_token=badvalue",
+        ],
+        expected_rc=1,
+    )
+
+    assert_contains(
+        output,
+        "Refusing to write sensitive-looking variable",
+        "configure ansible sensitive var guard",
+    )
+
+
+def test_real_configure_ansible_writes(args):
+    """Run real configure ansible writes and verify managed files."""
+    inventory_path = Path(args.ansible_inventory_path)
+    generated_path = Path(args.ansible_generated_vars_path)
+    group_vars_path = Path(args.ansible_test_group_vars_path)
+
+    output = run_cmd(
+        [
+            "aerolitctl",
+            "configure",
+            "ansible",
+            "--no-backup",
+            "--ensure-standard-groups",
+            "--local-controller",
+        ]
+    )
+    assert_contains(output, "AeroLIT Ansible configuration saved.", "configure ansible baseline write")
+
+    assert_path_exists(inventory_path, "managed Ansible inventory")
+    assert_path_exists(generated_path, "managed Ansible generated vars")
+
+    inventory_text = read_text(inventory_path)
+    generated_text = read_text(generated_path)
+
+    assert_contains(inventory_text, "# BEGIN MANAGED AEROLITCTL INVENTORY", "managed inventory")
+    assert_contains(inventory_text, "# END MANAGED AEROLITCTL INVENTORY", "managed inventory")
+    assert_contains(inventory_text, "[ansible_controller]", "managed inventory")
+    assert_contains(inventory_text, "[pxe_server]", "managed inventory")
+    assert_regex(inventory_text, r"^localhost\b.*\bansible_connection=local\b", "managed inventory localhost")
+
+    assert_contains(generated_text, "# Generated AeroLIT Ansible variables", "generated Ansible vars")
+    assert_contains(generated_text, "aerolitctl_ansible_generated: true", "generated Ansible vars")
+
+    output = run_cmd(
+        [
+            "aerolitctl",
+            "configure",
+            "ansible",
+            "--no-backup",
+            "--add-host",
+            "aerolit-ansible-test01",
+            "--ansible-host",
+            "192.168.109.151",
+            "--group",
+            "provisioned",
+            "--group",
+            "workstations",
+            "--group",
+            "rhel9",
+            "--set-global-var",
+            "aerolit_test_global=enabled",
+            "--set-group-var",
+            "aerolit_test_group",
+            "ansible_become=true",
+            "--add-child-group",
+            "aerolit_parent",
+            "aerolit_child",
+        ]
+    )
+    assert_contains(output, "AeroLIT Ansible configuration saved.", "configure ansible host/group vars write")
+
+    output = run_cmd(
+        [
+            "aerolitctl",
+            "configure",
+            "ansible",
+            "--no-backup",
+            "--add-k3s-cluster",
+            "aerolit_test_cluster",
+            "--add-k3s-server",
+            "aerolit_test_cluster",
+            "aerolit-k3s-server01",
+            "--add-k3s-agent",
+            "aerolit_test_cluster",
+            "aerolit-k3s-agent01",
+        ]
+    )
+    assert_contains(output, "AeroLIT Ansible configuration saved.", "configure ansible k3s write")
+
+    inventory_text = read_text(inventory_path)
+    generated_text = read_text(generated_path)
+
+    assert_contains(
+        inventory_text,
+        "aerolit-ansible-test01 ansible_host=192.168.109.151",
+        "managed inventory host",
+    )
+    assert_contains(inventory_text, "[provisioned]", "managed inventory provisioned group")
+    assert_contains(inventory_text, "[workstations]", "managed inventory workstations group")
+    assert_contains(inventory_text, "[rhel9]", "managed inventory rhel9 group")
+    assert_contains(inventory_text, "[aerolit_parent:children]", "managed child group")
+    assert_contains(inventory_text, "aerolit_child", "managed child group")
+    assert_contains(inventory_text, "[aerolit_test_cluster:children]", "managed k3s cluster")
+    assert_contains(inventory_text, "server_aerolit_test_cluster", "managed k3s server group")
+    assert_contains(inventory_text, "agent_aerolit_test_cluster", "managed k3s agent group")
+    assert_contains(inventory_text, "aerolit-k3s-server01", "managed k3s server host")
+    assert_contains(inventory_text, "aerolit-k3s-agent01", "managed k3s agent host")
+
+    assert_contains(generated_text, "aerolit_test_global: 'enabled'", "generated global var")
+
+    assert_path_exists(group_vars_path, "managed test group vars")
+    group_vars_text = read_text(group_vars_path)
+    assert_contains(group_vars_text, "# Generated AeroLIT group variables", "managed group vars")
+    assert_contains(group_vars_text, "ansible_become: true", "managed group vars")
+
+    show_output = run_cmd(["aerolitctl", "configure", "ansible", "--show"])
+    assert_contains(show_output, "AeroLIT managed Ansible configuration", "configure ansible show")
+    assert_contains(show_output, "aerolit-ansible-test01", "configure ansible show")
+    assert_contains(show_output, "aerolit_test_global=enabled", "configure ansible show")
+
+    validate_output = run_cmd(["aerolitctl", "configure", "ansible", "--validate"])
+    assert_contains(validate_output, "AeroLIT Ansible validation", "configure ansible validate")
+    assert_contains(validate_output, "Summary:", "configure ansible validate")
+
+    output = run_cmd(
+        [
+            "aerolitctl",
+            "configure",
+            "ansible",
+            "--no-backup",
+            "--remove-host",
+            "aerolit-ansible-test01",
+            "--remove-host",
+            "aerolit-k3s-server01",
+            "--remove-host",
+            "aerolit-k3s-agent01",
+            "--remove-global-var",
+            "aerolit_test_global",
+            "--remove-group-var",
+            "aerolit_test_group",
+            "ansible_become",
+            "--remove-child-group",
+            "aerolit_parent",
+            "aerolit_child",
+            "--remove-group",
+            "aerolit_parent",
+            "--remove-group",
+            "aerolit_child",
+            "--remove-group",
+            "aerolit_test_group",
+            "--remove-group",
+            "aerolit_test_cluster",
+            "--remove-group",
+            "server_aerolit_test_cluster",
+            "--remove-group",
+            "agent_aerolit_test_cluster",
+        ]
+    )
+    assert_contains(output, "AeroLIT Ansible configuration saved.", "configure ansible remove write")
+
+    inventory_text = read_text(inventory_path)
+    generated_text = read_text(generated_path)
+
+    assert_not_contains(inventory_text, "aerolit-ansible-test01", "managed inventory after removal")
+    assert_not_contains(inventory_text, "aerolit-k3s-server01", "managed inventory after removal")
+    assert_not_contains(inventory_text, "aerolit-k3s-agent01", "managed inventory after removal")
+    assert_not_contains(inventory_text, "aerolit_test_cluster", "managed inventory after removal")
+    assert_not_contains(generated_text, "aerolit_test_global", "generated vars after removal")
+    assert_path_missing(group_vars_path, "managed group vars after removal")
+
+
 def test_bundle_manifest_lifecycle(args):
     """Confirm configure init creates/preserves the bundle manifest and commands understand it."""
     bundle_path = Path(args.bundle_path)
@@ -1171,6 +1462,29 @@ def main():
         / "group_vars"
         / "all"
         / "aerolitctl_server_generated.yml"
+    )
+    args.ansible_inventory_path = str(
+        Path(args.bundle_path)
+        / "collections-hub"
+        / "ansible"
+        / "inventory"
+        / "90_aerolitctl.ini"
+    )
+    args.ansible_generated_vars_path = str(
+        Path(args.bundle_path)
+        / "collections-hub"
+        / "ansible"
+        / "group_vars"
+        / "all"
+        / "aerolitctl_ansible_generated.yml"
+    )
+    args.ansible_test_group_vars_path = str(
+        Path(args.bundle_path)
+        / "collections-hub"
+        / "ansible"
+        / "group_vars"
+        / "aerolit_test_group"
+        / "aerolitctl.yml"
     )
     args.log_dir = args.log_dir or "/tmp/aerolitctl-merge-test-{}".format(timestamp())
     args.require_firewalld = not args.no_require_firewalld
