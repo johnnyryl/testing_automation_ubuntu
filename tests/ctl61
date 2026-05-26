@@ -1986,40 +1986,6 @@ def guided_common_connection_defaults(inventory, allow_sensitive=False):
     return True
 
 
-def guided_quick_baseline(inventory, allow_sensitive=False):
-    """Run a quick recommended baseline setup."""
-    print_guided_section(
-        "Quick baseline setup",
-        (
-            "This creates the common AeroLIT groups and can add shared defaults "
-            "for provisioned machines. It is safe to run more than once."
-        ),
-    )
-
-    print("Recommended baseline:")
-    print("  - Standard AeroLIT groups")
-    print("  - localhost in ansible_controller and pxe_server")
-    print("  - Optional shared defaults for the provisioned group")
-    print("")
-
-    if prompt_yes_no("Ensure standard AeroLIT groups?", default=True):
-        apply_standard_groups(inventory)
-        guided_ok("Standard AeroLIT groups are present.")
-
-    if prompt_yes_no("Add localhost to ansible_controller and pxe_server groups?", default=True):
-        apply_local_controller(inventory)
-        guided_ok("localhost is present for local controller/PXE groups.")
-
-    if prompt_yes_no("Set common connection defaults now?", default=True):
-        guided_common_connection_defaults(
-            inventory,
-            allow_sensitive=allow_sensitive,
-        )
-
-    print("")
-    guided_ok("Quick baseline setup complete.")
-
-
 def guided_add_single_host(inventory, allow_sensitive=False, show_header=True):
     """Interactively add one managed host."""
     if show_header:
