@@ -5,7 +5,7 @@ active Ansible layout:
 
   collections-hub/ansible/inventory/90_aerolitctl.ini
   collections-hub/ansible/group_vars/all/aerolitctl_ansible_generated.yml
-  collections-hub/ansible/group_vars/<group>/aerolitctl.yml
+  collections-hub/ansible/group_vars/<group>/<AeroLIT-managed group vars file>
 
 It intentionally does not rewrite existing inventory files, vault vars,
 workstation defaults, user account vars, or template directories.
@@ -1108,7 +1108,7 @@ def render_generated_vars(inventory):
 
 
 def render_group_vars(group, variables):
-    """Render an aerolitctl-managed group_vars/<group>/aerolitctl.yml file."""
+    """Render an aerolitctl-managed group_vars/<group> file."""
     group = normalize_group_name(group)
 
     lines = [
@@ -2531,7 +2531,12 @@ def guided_manage_shared_vars(inventory, allow_sensitive=False):
                 ("1", "Common connection defaults wizard"),
                 ("2", "Set global vars in group_vars/all"),
                 ("3", "Remove global var"),
-                ("4", "Set group vars in group_vars/<group>/aerolitctl.yml"),
+                (
+                    "4",
+                    "Set group vars in group_vars/<group>/{}".format(
+                        AEROLITCTL_GROUP_VARS_FILENAME
+                    ),
+                ),
                 ("5", "Remove group var"),
                 ("b", "Back to main menu"),
             ],
@@ -3161,7 +3166,7 @@ def run_guided(inventory, bundle_path=None, allow_sensitive=False, force=False):
         print("AeroLIT-managed files:")
         print("  - inventory/90_aerolitctl.ini")
         print("  - group_vars/all/aerolitctl_ansible_generated.yml")
-        print("  - group_vars/<group>/aerolitctl.yml")
+        print("  - group_vars/<group>/{}".format(AEROLITCTL_GROUP_VARS_FILENAME))
         print("")
 
     print_guided_tip(
