@@ -1469,55 +1469,1843 @@ def prompt_yes_no(label, default=False):
         print("Please answer yes or no.")
 
 
-def run_guided(inventory):
-    """Interactive configure ansible helper."""
+GUIDED_WIDTH = 76
+
+
+def guided_line(char="=", width=GUIDED_WIDTH):
+    """Return a visual separator line."""
+    return char * width
+
+
+def print_guided_header(title, description=None):
+    """Print a readable guided-mode header."""
     print("")
-    print("AeroLIT configure ansible guided mode")
+    print(guided_line("="))
+    print(title)
+    print(guided_line("="))
+
+    if description:
+        print(description)
+
+    print("")
+
+
+def print_guided_section(title, description=None):
+    """Print a readable guided-mode section header."""
+    print("")
+    print(guided_line("-"))
+    print(title)
+    print(guided_line("-"))
+
+    if description:
+        print(description)
+
+    print("")
+
+
+def guided_info(message):
+    """Print an informational guided-mode message."""
+    print("[INFO] {}".format(message))
+
+
+def guided_ok(message):
+    """Print a success guided-mode message."""
+    print("[OK] {}".format(message))
+
+
+def guided_warn(message):
+    """Print a warning guided-mode message."""
+    print("[WARN] {}".format(message))
+
+
+def guided_error(message):
+    """Print an error guided-mode message."""
+    print("[ERROR] {}".format(message))
+
+
+def guided_sample(values, limit=6):
+    """Return a compact display string for a list of values."""
+    values = list(values)
+
+    if not values:
+        return "none"
+
+    if len(values) <= limit:
+        return ", ".join(values)
+
+    return "{}, ... (+{} more)".format(
+        ", ".join(values[:limit]),
+        len(values) - limit,
+    )
+
+
+def guided_child_link_count(inventory):
+    """Return the number of managed child-group links."""
+    total = 0
+
+    for children in inventory.children.values():
+        total += len(children)
+
+    return total
+
+
+def guided_state_summary(inventory):
+    """Return a one-line summary of the current guided-mode plan."""
+    return (
+        "groups: {groups}, hosts: {hosts}, child links: {children}, "
+        "global vars: {global_vars}, group-var groups: {group_var_groups}"
+    ).format(
+        groups=len(inventory.groups),
+        hosts=len(inventory.all_hosts()),
+        children=guided_child_link_count(inventory),
+        global_vars=len(inventory.global_vars),
+        group_var_groups=len(inventory.group_vars),
+    )
+
+
+def guided_plan_lines(inventory, detail=False):
+    """Return readable current-plan summary lines."""
+    hosts = inventory.all_hosts()
+    host_override_vars = host_specific_var_names(inventory)
+
+    lines = [
+        "Groups: {}".format(len(inventory.groups)),
+        "Hosts: {}".format(len(hosts)),
+        "Child group links: {}".format(guided_child_link_count(inventory)),
+        "Global vars: {}".format(len(inventory.global_vars)),
+        "Group-var groups: {}".format(len(inventory.group_vars)),
+    ]
+
+    if not detail:
+        return lines
+
+    lines.append("")
+    lines.append("Group sample: {}".format(guided_sample(inventory.groups.keys())))
+    lines.append("Host sample: {}".format(guided_sample(hosts)))
+    lines.append("Child parents: {}".format(guided_sample(inventory.children.keys())))
+    lines.append("Group-var groups: {}".format(guided_sample(inventory.group_vars.keys())))
+
+    if host_override_vars:
+        lines.append("Host override vars: {}".format(guided_sample(host_override_vars)))
+        lines.append("Host var guidance: {}".format(HOST_VAR_PREFERENCE_WARNING))
+    else:
+        lines.append("Host override vars: none")
+
+    return lines
+
+
+def print_guided_plan_summary(inventory, detail=False):
+    """Print the current guided-mode plan summary."""
+    print("Current plan:")
+
+    for line in guided_plan_lines(inventory, detail=detail):
+        if line:
+            print("  {}".format(line))
+        else:
+            print("")
+
+
+def print_guided_tip(lines):
+    """Print a small multi-line tip block."""
+    print("")
+    print("Tip:")
+    for line in lines:
+        print("  {}".format(line))
+    print("")
+
+
+def print_guided_examples(lines):
+    """Print a small multi-line examples block."""
+    print("")
+    print("Examples:")
+    for line in lines:
+        print("  {}".format(line))
+    print("")
+
+
+def prompt_required(label, default=None):
+    """Prompt until the user enters a non-empty value."""
+    while True:
+        value = str(prompt(default=default, label=label)).strip()
+
+        if value:
+            return value
+
+        guided_warn("Value cannot be empty.")
+
+
+def prompt_int(label, default=None, minimum=None, maximum=None):
+    """Prompt for an integer with optional bounds."""
+    while True:
+        value = str(prompt(default=default, label=label)).strip()
+
+        try:
+            number = int(value)
+        except ValueError:
+            guided_warn("Please enter a number.")
+            continue
+
+        if minimum is not None and number < minimum:
+            guided_warn("Value must be {} or greater.".format(minimum))
+            continue
+
+        if maximum is not None and number > maximum:
+            guided_warn("Value must be {} or less.".format(maximum))
+            continue
+
+        return number
+
+
+def prompt_csv_values(label, default=None):
+    """Prompt for comma-separated values."""
+    value = str(prompt(default=default, label=label)).strip()
+
+    result = [
+        item.strip()
+        for item in value.split(",")
+        if item.strip()
+    ]
+
+    if result:
+        return result
+
+    if default is not None:
+        return [
+            item.strip()
+            for item in str(default).split(",")
+            if item.strip()
+        ]
+
+    return []
+
+
+def prompt_menu(
+    title,
+    options,
+    default=None,
+    description=None,
+    inventory=None,
+    help_lines=None,
+):
+    """Prompt for a menu choice with consistent formatting and optional help."""
+    print_guided_section(title, description)
+
+    if inventory is not None:
+        print_guided_plan_summary(inventory, detail=False)
+        print("")
+
+    valid_choices = []
+
+    for key, text in options:
+        key_text = str(key)
+        valid_choices.append(key_text.lower())
+        print("  [{}] {}".format(key_text, text))
+
+    if help_lines:
+        print("  [?] What should I choose?")
+
+    print("")
+
+    while True:
+        choice = str(prompt(default=default, label="Select")).strip().lower()
+
+        if help_lines and choice in ("?", "help"):
+            print_guided_tip(help_lines)
+            continue
+
+        if choice in valid_choices:
+            print("")
+            return choice
+
+        expected = list(valid_choices)
+        if help_lines:
+            expected.append("?")
+
+        guided_warn("Please choose one of: {}".format(", ".join(expected)))
+
+
+def guided_parse_var_assignment(value, allow_sensitive=False):
+    """Parse and validate a guided KEY=VALUE variable entry."""
+    try:
+        return parse_var_assignment(value, allow_sensitive=allow_sensitive)
+    except AnsibleConfigError as exc:
+        guided_error(exc)
+        return None, None
+
+
+def guided_parse_host_var(value, allow_sensitive=False):
+    """Parse and validate a guided host KEY=VALUE entry."""
+    try:
+        return parse_key_value(value, allow_sensitive=allow_sensitive)
+    except AnsibleConfigError as exc:
+        guided_error(exc)
+        return None, None
+
+
+def guided_host_exists(inventory, host):
+    """Return True when a host alias already exists in managed inventory."""
+    try:
+        host = normalize_host_name(host)
+    except AnsibleConfigError:
+        return False
+
+    return bool(inventory.host_groups(host))
+
+
+def guided_existing_hosts(inventory, hosts):
+    """Return existing hosts from a proposed list."""
+    existing = []
+
+    for host in hosts:
+        if guided_host_exists(inventory, host) and host not in existing:
+            existing.append(host)
+
+    return existing
+
+
+def guided_confirm_existing_host_update(inventory, host):
+    """Confirm before updating an existing managed host."""
+    if not guided_host_exists(inventory, host):
+        return True
+
+    guided_warn(
+        "Host {} already exists. Adding it again may update its vars or group membership.".format(
+            host
+        )
+    )
+    return prompt_yes_no("Continue updating {}?".format(host), default=False)
+
+
+def guided_confirm_existing_range_update(inventory, hosts):
+    """Confirm before updating any existing hosts in a generated/imported set."""
+    existing = guided_existing_hosts(inventory, hosts)
+
+    if not existing:
+        return True
+
+    guided_warn(
+        "Some hosts already exist and may be updated: {}".format(
+            guided_sample(existing, limit=10)
+        )
+    )
+    return prompt_yes_no("Continue and update existing hosts if needed?", default=False)
+
+
+def guided_collect_yaml_vars(label, allow_sensitive=False, scope="group"):
+    """Collect KEY=VALUE entries for YAML vars files."""
+    variables = OrderedDict()
+
+    if scope == "global":
+        print_guided_tip(
+            [
+                "Global vars are stored under group_vars/all.",
+                "They apply to every host Ansible sees in this inventory.",
+                "Use global vars only for defaults that truly apply everywhere.",
+            ]
+        )
+    else:
+        print_guided_tip(
+            [
+                "Group vars are usually the best place for shared machine defaults.",
+                "Use these for settings shared by a role, OS family, cluster, or provisioned hosts.",
+                HOST_VAR_PREFERENCE_WARNING,
+            ]
+        )
+
+    print("Enter variables as KEY=VALUE.")
+    print("Press Enter on a blank line when done.")
+
+    print_guided_examples(
+        [
+            "ansible_user=aerolit",
+            "ansible_become=true",
+            "ansible_python_interpreter=/usr/bin/python3",
+        ]
+    )
+
+    while True:
+        item = str(prompt(default="", label=label)).strip()
+
+        if not item:
+            break
+
+        key, value = guided_parse_var_assignment(
+            item,
+            allow_sensitive=allow_sensitive,
+        )
+
+        if key:
+            variables[key] = value
+            guided_ok("Added {}".format(display_var_text(key, value)))
+
+    if not variables:
+        guided_info("No variables added.")
+
+    return variables
+
+
+def guided_collect_host_vars(allow_sensitive=False):
+    """Collect per-host inventory variables."""
+    variables = OrderedDict()
+
+    print_guided_tip(
+        [
+            HOST_VAR_PREFERENCE_WARNING,
+            "Use host vars only when one machine needs something different.",
+            "For normal shared defaults, go back and use global vars or group vars.",
+        ]
+    )
+
+    print("Enter host variables as KEY=VALUE.")
+    print("Press Enter on a blank line when done.")
+
+    print_guided_examples(
+        [
+            "ansible_user=root",
+            "ansible_port=22",
+            "ansible_ssh_private_key_file=/path/to/key",
+            "ansible_become=true",
+        ]
+    )
+
+    while True:
+        item = str(prompt(default="", label="Host var KEY=VALUE")).strip()
+
+        if not item:
+            break
+
+        key, value = guided_parse_host_var(
+            item,
+            allow_sensitive=allow_sensitive,
+        )
+
+        if key:
+            variables[key] = value
+            guided_ok("Added {}".format(display_var_text(key, value)))
+
+    if not variables:
+        guided_info("No host vars added.")
+
+    return variables
+
+
+def guided_common_connection_defaults(inventory, allow_sensitive=False):
+    """Beginner-friendly wizard for common Ansible connection defaults."""
+    print_guided_section(
+        "Common connection defaults wizard",
+        (
+            "Use this when you know how Ansible should log in, but you do not "
+            "want to remember the exact Ansible variable names."
+        ),
+    )
+
+    print("Recommended choice:")
+    print("  Put normal provisioned-machine SSH defaults in group vars for provisioned.")
+    print("  Use global vars only when the same setting should apply to every host.")
+    print("")
+
+    scope_choice = prompt_menu(
+        "Where should these defaults be stored?",
+        [
+            ("1", "Group vars for one group, recommended"),
+            ("2", "Global vars in group_vars/all"),
+            ("b", "Cancel"),
+        ],
+        default="1",
+        description=(
+            "Group vars are safer for most AeroLIT use cases because they can apply "
+            "only to provisioned machines, RHEL versions, workstations, or K3s groups."
+        ),
+        help_lines=[
+            "Choose group vars unless you are sure every host should use these values.",
+            "For most users, choose group vars and use the provisioned group.",
+        ],
+    )
+
+    if scope_choice == "b":
+        guided_info("Skipped common connection defaults.")
+        return False
+
+    group = None
+    if scope_choice == "1":
+        group = prompt_required("Group for these defaults", default=DEFAULT_GROUP)
+
+    ssh_user = str(prompt(default="aerolit", label="SSH username")).strip()
+    ssh_port = prompt_int("SSH port", default="22", minimum=1, maximum=65535)
+    become = prompt_yes_no("Use sudo/become?", default=True)
+    python_interpreter = str(
+        prompt(default="/usr/bin/python3", label="Python interpreter")
+    ).strip()
+    private_key = str(
+        prompt(default="", label="Private key path, blank to skip")
+    ).strip()
+
+    variables = OrderedDict()
+
+    if ssh_user:
+        variables["ansible_user"] = ssh_user
+
+    variables["ansible_port"] = str(ssh_port)
+    variables["ansible_become"] = become
+
+    if python_interpreter:
+        variables["ansible_python_interpreter"] = python_interpreter
+
+    if private_key:
+        variables["ansible_ssh_private_key_file"] = private_key
+
+    print_guided_section("Connection defaults preview")
+
+    if scope_choice == "1":
+        print("  Target: group_vars/{}/{}".format(group, GROUP_VARS_FILENAME))
+    else:
+        print("  Target: group_vars/all/aerolitctl_ansible_generated.yml")
+
+    for key, value in variables.items():
+        print("  {}".format(display_var_text(key, value)))
+
+    print("")
+
+    if not prompt_yes_no("Apply these connection defaults?", default=True):
+        guided_info("Skipped common connection defaults.")
+        return False
+
+    try:
+        if scope_choice == "1":
+            for key, value in variables.items():
+                inventory.set_group_var(group, key, value)
+            guided_ok("Updated common connection defaults for group: {}".format(group))
+        else:
+            for key, value in variables.items():
+                inventory.set_global_var(key, value)
+            guided_ok("Updated global common connection defaults.")
+    except AnsibleConfigError as exc:
+        guided_error(exc)
+        return False
+
+    return True
+
+
+def guided_quick_baseline(inventory, allow_sensitive=False):
+    """Run a quick recommended baseline setup."""
+    print_guided_section(
+        "Quick baseline setup",
+        (
+            "This creates the common AeroLIT groups and can add shared defaults "
+            "for provisioned machines. It is safe to run more than once."
+        ),
+    )
+
+    print("Recommended baseline:")
+    print("  - Standard AeroLIT groups")
+    print("  - localhost in ansible_controller and pxe_server")
+    print("  - Optional shared defaults for the provisioned group")
     print("")
 
     if prompt_yes_no("Ensure standard AeroLIT groups?", default=True):
         apply_standard_groups(inventory)
+        guided_ok("Standard AeroLIT groups are present.")
 
     if prompt_yes_no("Add localhost to ansible_controller and pxe_server groups?", default=True):
         apply_local_controller(inventory)
+        guided_ok("localhost is present for local controller/PXE groups.")
 
-    if prompt_yes_no("Add a managed K3s cluster group structure?", default=False):
-        cluster = prompt(default="cluster1", label="K3s cluster name")
-        inventory.add_k3s_cluster(cluster)
+    if prompt_yes_no("Set common connection defaults now?", default=True):
+        guided_common_connection_defaults(
+            inventory,
+            allow_sensitive=allow_sensitive,
+        )
 
-    groups_value = prompt(
-        default="provisioned,workstations",
-        label="Additional groups to ensure, comma-separated",
+    print("")
+    guided_ok("Quick baseline setup complete.")
+
+
+def guided_add_single_host(inventory, allow_sensitive=False, show_header=True):
+    """Interactively add one managed host."""
+    if show_header:
+        print_guided_section(
+            "Add one managed host",
+            (
+                "This adds a host alias to the AeroLIT-managed inventory. "
+                "ansible_host/IP is the address Ansible connects to from the controller."
+            ),
+        )
+
+        print_guided_examples(
+            [
+                "Host alias: rhel9-node01",
+                "ansible_host/IP: 192.168.100.51",
+                "Groups: provisioned,rhel9,workstations",
+            ]
+        )
+
+    host = prompt_required("Host alias")
+
+    if not guided_confirm_existing_host_update(inventory, host):
+        guided_info("Skipped host: {}".format(host))
+        return False
+
+    ansible_host = str(prompt(default="", label="ansible_host/IP, blank to skip")).strip()
+    groups = prompt_csv_values(
+        "Groups, comma-separated",
+        default=DEFAULT_GROUP,
     )
-    for group in [item.strip() for item in groups_value.split(",") if item.strip()]:
-        inventory.ensure_group(group)
 
-    while prompt_yes_no("Add a managed host?", default=False):
-        host = prompt(label="Host alias")
-        ansible_host = prompt(label="ansible_host/IP")
-        group_value = prompt(default=DEFAULT_GROUP, label="Groups, comma-separated")
-        ansible_user = prompt(default="", label="ansible_user, blank to skip")
-        become = prompt_yes_no("Set ansible_become=true for this host?", default=False)
+    variables = OrderedDict()
 
+    if ansible_host:
+        variables["ansible_host"] = ansible_host
+
+    if prompt_yes_no("Add per-host override variables?", default=False):
+        host_vars = guided_collect_host_vars(allow_sensitive=allow_sensitive)
+
+        for key, value in host_vars.items():
+            variables[key] = value
+
+    try:
+        inventory.add_host(host, groups=groups, variables=variables)
+    except AnsibleConfigError as exc:
+        guided_error(exc)
+        return False
+
+    guided_ok("Added/updated host: {}".format(host))
+    return True
+
+
+def guided_add_multiple_hosts(inventory, allow_sensitive=False):
+    """Interactively add hosts one after another."""
+    print_guided_section(
+        "Add multiple managed hosts",
+        "Add hosts one at a time. After each host, you can add another or return to the menu.",
+    )
+
+    while True:
+        added = guided_add_single_host(
+            inventory,
+            allow_sensitive=allow_sensitive,
+            show_header=False,
+        )
+
+        print("")
+
+        if added:
+            if not prompt_yes_no("Add another host?", default=True):
+                break
+        else:
+            if not prompt_yes_no("Try another host?", default=True):
+                break
+
+
+def guided_add_host_range(inventory, allow_sensitive=False):
+    """Interactively add a generated host/IP range."""
+    print_guided_section(
+        "Add generated host range",
+        (
+            "Use this when hostnames and IPs follow a simple pattern. "
+            "AeroLIT will generate aliases and ansible_host values for you."
+        ),
+    )
+
+    print_guided_examples(
+        [
+            "Prefix: node",
+            "Start/end: 1 through 10",
+            "Width: 3",
+            "Starting IP: 192.168.100.101",
+            "Result: node001-node010",
+        ]
+    )
+
+    prefix = prompt_required("Host prefix", default="node")
+    start = prompt_int("Range start number", default="1", minimum=0)
+    end = prompt_int("Range end number", default=str(start), minimum=start)
+    width = prompt_int("Host number width", default="3", minimum=1)
+    ip_start = prompt_required("Starting IP address")
+    groups = prompt_csv_values(
+        "Groups, comma-separated",
+        default=DEFAULT_GROUP,
+    )
+
+    total = end - start + 1
+
+    if total > 512:
+        guided_error("Refusing to generate more than 512 hosts. Requested: {}".format(total))
+        return False
+
+    try:
+        first_ip = ipaddress.ip_address(ip_start)
+        last_ip = first_ip + (total - 1)
+    except ValueError as exc:
+        guided_error("Generated IP range is invalid: {}".format(exc))
+        return False
+
+    hosts = [
+        "{}{}".format(prefix, str(number).zfill(width))
+        for number in range(start, end + 1)
+    ]
+    first_host = hosts[0]
+    last_host = hosts[-1]
+
+    try:
+        for host in hosts:
+            normalize_host_name(host)
+
+        for group in groups:
+            normalize_group_name(group)
+    except AnsibleConfigError as exc:
+        guided_error(exc)
+        return False
+
+    if not guided_confirm_existing_range_update(inventory, hosts):
+        guided_info("Skipped host range.")
+        return False
+
+    base_variables = OrderedDict()
+
+    if prompt_yes_no("Apply per-host override variables to every host in this range?", default=False):
+        host_vars = guided_collect_host_vars(allow_sensitive=allow_sensitive)
+
+        for key, value in host_vars.items():
+            base_variables[key] = value
+
+    print_guided_section("Range preview")
+    print("  First host: {} ansible_host={}".format(first_host, first_ip))
+    print("  Last host:  {} ansible_host={}".format(last_host, last_ip))
+    print("  Groups:     {}".format(", ".join(groups)))
+    print("  Count:      {}".format(total))
+
+    if base_variables:
+        rendered_vars = [
+            display_var_text(key, value)
+            for key, value in base_variables.items()
+        ]
+        print("  Host vars:  {}".format(", ".join(rendered_vars)))
+    else:
+        print("  Host vars:  none")
+
+    print("")
+
+    if not prompt_yes_no("Add this range?", default=True):
+        guided_info("Skipped host range.")
+        return False
+
+    try:
+        for offset, host in enumerate(hosts):
+            variables = OrderedDict(base_variables)
+            variables["ansible_host"] = str(first_ip + offset)
+            inventory.add_host(host, groups=groups, variables=variables)
+    except ValueError as exc:
+        guided_error("Generated IP range is invalid: {}".format(exc))
+        return False
+    except AnsibleConfigError as exc:
+        guided_error(exc)
+        return False
+
+    guided_ok("Added/updated {} hosts.".format(total))
+    return True
+
+
+def guided_parse_import_row(row, header=None, default_groups=None, allow_sensitive=False):
+    """Parse one CSV/text import row into host, ansible_host, groups, and vars."""
+    default_groups = default_groups or [DEFAULT_GROUP]
+
+    if header:
+        mapped = {}
+        for index, key in enumerate(header):
+            if index < len(row):
+                mapped[str(key).strip().lower()] = str(row[index]).strip()
+            else:
+                mapped[str(key).strip().lower()] = ""
+
+        host = (
+            mapped.get("host")
+            or mapped.get("hostname")
+            or mapped.get("name")
+            or mapped.get("alias")
+        )
+        ansible_host = mapped.get("ansible_host") or mapped.get("ip") or mapped.get("address")
+        raw_groups = mapped.get("groups") or mapped.get("group") or ""
         variables = OrderedDict()
 
-        if ansible_host:
-            variables["ansible_host"] = ansible_host
-
-        if ansible_user:
-            variables["ansible_user"] = ansible_user
-
-        if become:
-            variables["ansible_become"] = "true"
-
-        host_groups = [
-            item.strip()
-            for item in group_value.split(",")
-            if item.strip()
+        known_keys = [
+            "host",
+            "hostname",
+            "name",
+            "alias",
+            "ansible_host",
+            "ip",
+            "address",
+            "groups",
+            "group",
         ]
 
-        inventory.add_host(host, groups=host_groups, variables=variables)
+        for key, value in mapped.items():
+            if not value or key in known_keys:
+                continue
 
+            normalized_key = normalize_var_name(key)
+
+            if is_sensitive_var_name(normalized_key) and not allow_sensitive:
+                raise AnsibleConfigError(
+                    "Refusing to import sensitive-looking variable '{}' without --allow-sensitive-vars".format(
+                        normalized_key
+                    )
+                )
+
+            variables[normalized_key] = parse_scalar_value(value)
+
+    else:
+        host = row[0].strip() if len(row) > 0 else ""
+        ansible_host = row[1].strip() if len(row) > 1 else ""
+        raw_groups = ",".join(
+            item.strip()
+            for item in row[2:]
+            if item.strip()
+        ) if len(row) > 2 else ""
+        variables = OrderedDict()
+
+    if not host:
+        raise AnsibleConfigError("Import row is missing a host alias")
+
+    host = normalize_host_name(host)
+
+    if raw_groups:
+        groups = [
+            item.strip()
+            for item in re.split(r"[;,]", raw_groups)
+            if item.strip()
+        ]
+    else:
+        groups = list(default_groups)
+
+    for group in groups:
+        normalize_group_name(group)
+
+    if ansible_host:
+        variables["ansible_host"] = ansible_host
+
+    return host, variables, groups
+
+
+def guided_import_hosts_file(inventory, allow_sensitive=False):
+    """Import managed hosts from a CSV or simple text file."""
+    print_guided_section(
+        "Import hosts from CSV/text file",
+        (
+            "Import several hosts at once. This updates only the in-memory guided plan "
+            "until you finish and save."
+        ),
+    )
+
+    print("Supported formats:")
+    print("  - CSV with header: host,ansible_host,groups")
+    print("  - CSV with optional vars: host,ansible_host,groups,ansible_user,ansible_become")
+    print("  - Simple rows without header: host,ansible_host,groups")
+    print("  - Lines beginning with # are ignored")
+    print("")
+
+    print_guided_examples(
+        [
+            "rhel9-node01,192.168.100.51,provisioned;rhel9;workstations",
+            "rhel9-node02,192.168.100.52,provisioned;rhel9;workstations",
+        ]
+    )
+
+    path_value = prompt_required("Path to CSV/text file")
+    path = Path(path_value)
+
+    if not path.exists():
+        guided_error("File not found: {}".format(path))
+        return False
+
+    default_groups = prompt_csv_values(
+        "Default groups when row has no groups",
+        default=DEFAULT_GROUP,
+    )
+
+    try:
+        import csv
+
+        rows = []
+        with open(str(path), "r", encoding="utf-8", errors="ignore", newline="") as handle:
+            for raw_line in handle:
+                if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+                    continue
+                rows.append(raw_line)
+
+        if not rows:
+            guided_warn("No importable rows found.")
+            return False
+
+        parsed_rows = list(csv.reader(rows))
+    except OSError as exc:
+        guided_error("Could not read import file {}: {}".format(path, exc))
+        return False
+
+    header = None
+    first = [item.strip().lower() for item in parsed_rows[0]]
+
+    if first and first[0] in ("host", "hostname", "name", "alias"):
+        header = first
+        parsed_rows = parsed_rows[1:]
+
+    parsed = []
+    errors = []
+
+    for row_number, row in enumerate(parsed_rows, start=2 if header else 1):
+        try:
+            host, variables, groups = guided_parse_import_row(
+                row,
+                header=header,
+                default_groups=default_groups,
+                allow_sensitive=allow_sensitive,
+            )
+            parsed.append((host, variables, groups))
+        except AnsibleConfigError as exc:
+            errors.append("row {}: {}".format(row_number, exc))
+
+    if errors:
+        guided_error("Import file has invalid rows.")
+        for message in errors[:10]:
+            print("  - {}".format(message))
+        if len(errors) > 10:
+            print("  - ... (+{} more)".format(len(errors) - 10))
+        return False
+
+    if not parsed:
+        guided_warn("No valid hosts found to import.")
+        return False
+
+    hosts = [item[0] for item in parsed]
+
+    if not guided_confirm_existing_range_update(inventory, hosts):
+        guided_info("Skipped host import.")
+        return False
+
+    print_guided_section("Import preview")
+    print("  File:        {}".format(path))
+    print("  Hosts:       {}".format(len(parsed)))
+    print("  Host sample: {}".format(guided_sample(hosts, limit=8)))
+    print("")
+
+    if not prompt_yes_no("Import these hosts?", default=True):
+        guided_info("Skipped host import.")
+        return False
+
+    for host, variables, groups in parsed:
+        inventory.add_host(host, groups=groups, variables=variables)
+
+    guided_ok("Imported/updated {} hosts.".format(len(parsed)))
+    return True
+
+
+def guided_manage_hosts(inventory, allow_sensitive=False):
+    """Menu for host and range management."""
+    while True:
+        choice = prompt_menu(
+            "Manage inventory hosts and ranges",
+            [
+                ("1", "Add one host"),
+                ("2", "Add multiple hosts"),
+                ("3", "Add generated host/IP range"),
+                ("4", "Import hosts from CSV/text file"),
+                ("5", "Remove host"),
+                ("6", "Remove host from one group"),
+                ("b", "Back to main menu"),
+            ],
+            default="b",
+            description=(
+                "Use this section to describe the machines Ansible will manage "
+                "from the controller. Inventory membership goes here; shared defaults "
+                "usually belong in group vars."
+            ),
+            inventory=inventory,
+            help_lines=[
+                "Choose Add one host for a single machine.",
+                "Choose Add generated host/IP range when names and IPs follow a pattern.",
+                "Choose Import hosts when you already have a spreadsheet or text list.",
+                "Use shared defaults for ansible_user/become instead of repeating host vars.",
+            ],
+        )
+
+        if choice == "1":
+            guided_add_single_host(inventory, allow_sensitive=allow_sensitive)
+
+        elif choice == "2":
+            guided_add_multiple_hosts(inventory, allow_sensitive=allow_sensitive)
+
+        elif choice == "3":
+            guided_add_host_range(inventory, allow_sensitive=allow_sensitive)
+
+        elif choice == "4":
+            guided_import_hosts_file(inventory, allow_sensitive=allow_sensitive)
+
+        elif choice == "5":
+            host = prompt_required("Host alias to remove")
+            if not guided_host_exists(inventory, host):
+                guided_warn("Host is not currently managed: {}".format(host))
+
+            if prompt_yes_no("Remove host {} from all managed groups?".format(host), default=False):
+                try:
+                    inventory.remove_host(host)
+                    guided_ok("Removed host: {}".format(host))
+                except AnsibleConfigError as exc:
+                    guided_error(exc)
+            else:
+                guided_info("Skipped host removal.")
+
+        elif choice == "6":
+            host = prompt_required("Host alias")
+            group = prompt_required("Group to remove host from")
+
+            if prompt_yes_no("Remove {} from group {}?".format(host, group), default=False):
+                try:
+                    inventory.remove_host_from_group(host, group)
+                    guided_ok("Removed {} from group {}".format(host, group))
+                except AnsibleConfigError as exc:
+                    guided_error(exc)
+            else:
+                guided_info("Skipped group membership removal.")
+
+        elif choice == "b":
+            return
+
+
+def guided_manage_groups(inventory):
+    """Menu for group and child-group management."""
+    while True:
+        choice = prompt_menu(
+            "Manage groups and child groups",
+            [
+                ("1", "Ensure standard AeroLIT groups"),
+                ("2", "Add group"),
+                ("3", "Remove group"),
+                ("4", "Add child group relationship"),
+                ("5", "Remove child group relationship"),
+                ("b", "Back to main menu"),
+            ],
+            default="b",
+            description=(
+                "Groups are how you target playbooks and organize machines. "
+                "Child groups let one group contain other groups."
+            ),
+            inventory=inventory,
+            help_lines=[
+                "Groups let you run playbooks against logical sets of hosts.",
+                "Examples: provisioned, rhel9, workstations, security_baseline.",
+                "Child groups are advanced but useful when one group should include another.",
+            ],
+        )
+
+        try:
+            if choice == "1":
+                apply_standard_groups(inventory)
+                guided_ok("Ensured standard AeroLIT groups.")
+
+            elif choice == "2":
+                group = prompt_required("Group name")
+                inventory.ensure_group(group)
+                guided_ok("Added/ensured group: {}".format(group))
+
+            elif choice == "3":
+                group = prompt_required("Group name to remove")
+                guided_warn(
+                    "Removing this group also removes managed child links and managed group vars for it."
+                )
+                guided_warn(
+                    "Hosts that only belonged to this group may lose managed host vars after cleanup."
+                )
+
+                if prompt_yes_no("Remove group {}?".format(group), default=False):
+                    inventory.remove_group(group)
+                    guided_ok("Removed group: {}".format(group))
+                else:
+                    guided_info("Skipped group removal.")
+
+            elif choice == "4":
+                print_guided_tip(
+                    [
+                        "A child group relationship means hosts in the child group are also part of the parent group.",
+                        "Example: parent=k3s_cluster child=cluster1",
+                    ]
+                )
+                parent = prompt_required("Parent group")
+                child = prompt_required("Child group")
+                inventory.ensure_child_group(parent, child)
+                guided_ok("Added child relationship: {} -> {}".format(parent, child))
+
+            elif choice == "5":
+                parent = prompt_required("Parent group")
+                child = prompt_required("Child group")
+
+                if prompt_yes_no("Remove child relationship {} -> {}?".format(parent, child), default=False):
+                    inventory.remove_child_group(parent, child)
+                    guided_ok("Removed child relationship: {} -> {}".format(parent, child))
+                else:
+                    guided_info("Skipped child relationship removal.")
+
+            elif choice == "b":
+                return
+
+        except AnsibleConfigError as exc:
+            guided_error(exc)
+
+
+def guided_manage_shared_vars(inventory, allow_sensitive=False):
+    """Menu for global and group variable management."""
+    while True:
+        choice = prompt_menu(
+            "Manage shared Ansible defaults",
+            [
+                ("1", "Common connection defaults wizard"),
+                ("2", "Set global vars in group_vars/all"),
+                ("3", "Remove global var"),
+                ("4", "Set group vars in group_vars/<group>/aerolitctl.yml"),
+                ("5", "Remove group var"),
+                ("b", "Back to main menu"),
+            ],
+            default="b",
+            description=(
+                "This is the preferred place for shared Ansible settings like "
+                "ansible_user, ansible_become, ansible_port, and Python interpreter."
+            ),
+            inventory=inventory,
+            help_lines=[
+                "Use the common connection defaults wizard if you are not sure what to type.",
+                "Use group vars for most provisioned-machine defaults.",
+                "Use global vars only for defaults that truly apply to every host.",
+            ],
+        )
+
+        try:
+            if choice == "1":
+                guided_common_connection_defaults(
+                    inventory,
+                    allow_sensitive=allow_sensitive,
+                )
+
+            elif choice == "2":
+                print_guided_section(
+                    "Set global vars",
+                    (
+                        "Global vars apply to every host Ansible sees. "
+                        "For provisioned-machine defaults, group vars are usually safer."
+                    ),
+                )
+                variables = guided_collect_yaml_vars(
+                    "Global var KEY=VALUE",
+                    allow_sensitive=allow_sensitive,
+                    scope="global",
+                )
+
+                for key, value in variables.items():
+                    inventory.set_global_var(key, value)
+
+                if variables:
+                    guided_ok("Updated global vars.")
+
+            elif choice == "3":
+                key = prompt_required("Global var name to remove")
+
+                if prompt_yes_no("Remove global var {}?".format(key), default=False):
+                    inventory.remove_global_var(key)
+                    guided_ok("Removed global var if present: {}".format(key))
+                else:
+                    guided_info("Skipped global var removal.")
+
+            elif choice == "4":
+                print_guided_section(
+                    "Set group vars",
+                    (
+                        "Group vars are usually the best fit for machine defaults. "
+                        "Example: set ansible_user and ansible_become for the provisioned group."
+                    ),
+                )
+                group = prompt_required("Group name", default=DEFAULT_GROUP)
+                variables = guided_collect_yaml_vars(
+                    "Group var for {} KEY=VALUE".format(group),
+                    allow_sensitive=allow_sensitive,
+                    scope="group",
+                )
+
+                for key, value in variables.items():
+                    inventory.set_group_var(group, key, value)
+
+                if variables:
+                    guided_ok("Updated group vars for: {}".format(group))
+
+            elif choice == "5":
+                group = prompt_required("Group name", default=DEFAULT_GROUP)
+                key = prompt_required("Group var name to remove")
+
+                if prompt_yes_no("Remove group var {} from {}?".format(key, group), default=False):
+                    inventory.remove_group_var(group, key)
+                    guided_ok("Removed group var if present: {} from {}".format(key, group))
+                else:
+                    guided_info("Skipped group var removal.")
+
+            elif choice == "b":
+                return
+
+        except AnsibleConfigError as exc:
+            guided_error(exc)
+
+
+def guided_add_k3s_host(
+    inventory,
+    role,
+    allow_sensitive=False,
+    cluster_default="cluster1",
+    locked_cluster=None,
+    show_header=True,
+):
+    """Interactively add one K3s server/agent host."""
+    role = normalize_k3s_role(role)
+
+    if show_header:
+        print_guided_section(
+            "Add K3s {} host".format(role),
+            (
+                "This creates or uses the managed K3s cluster group structure "
+                "and adds the host to the correct server/agent role group."
+            ),
+        )
+
+    if locked_cluster:
+        cluster = locked_cluster
+        print("Cluster: {}".format(cluster))
+    else:
+        cluster = prompt_required("K3s cluster name", default=cluster_default)
+
+    host = prompt_required("Host alias")
+
+    if not guided_confirm_existing_host_update(inventory, host):
+        guided_info("Skipped host: {}".format(host))
+        return False
+
+    ansible_host = str(prompt(default="", label="ansible_host/IP, blank to skip")).strip()
+
+    variables = OrderedDict()
+
+    if ansible_host:
+        variables["ansible_host"] = ansible_host
+
+    if prompt_yes_no("Add per-host override variables?", default=False):
+        host_vars = guided_collect_host_vars(allow_sensitive=allow_sensitive)
+
+        for key, value in host_vars.items():
+            variables[key] = value
+
+    try:
+        inventory.add_k3s_host(
+            cluster,
+            role,
+            host,
+            variables=variables,
+        )
+    except AnsibleConfigError as exc:
+        guided_error(exc)
+        return False
+
+    guided_ok("Added/updated K3s {} host {} to cluster {}".format(role, host, cluster))
+    return True
+
+
+def guided_manage_k3s(inventory, allow_sensitive=False):
+    """Menu for K3s cluster management."""
+    while True:
+        choice = prompt_menu(
+            "Manage K3s clusters",
+            [
+                ("1", "Add K3s cluster group structure"),
+                ("2", "Add K3s server/control-plane host"),
+                ("3", "Add K3s agent/worker host"),
+                ("4", "Add several K3s hosts to one cluster"),
+                ("b", "Back to main menu"),
+            ],
+            default="b",
+            description=(
+                "AeroLIT creates a reusable group structure such as "
+                "k3s_cluster -> cluster1 -> server_cluster1 / agent_cluster1."
+            ),
+            inventory=inventory,
+            help_lines=[
+                "Choose cluster structure first if you only want groups for now.",
+                "Choose server/control-plane for K3s server nodes.",
+                "Choose agent/worker for K3s worker nodes.",
+            ],
+        )
+
+        try:
+            if choice == "1":
+                cluster = prompt_required("K3s cluster name", default="cluster1")
+                inventory.add_k3s_cluster(cluster)
+                guided_ok("Added/ensured K3s cluster structure: {}".format(cluster))
+
+            elif choice == "2":
+                guided_add_k3s_host(
+                    inventory,
+                    "server",
+                    allow_sensitive=allow_sensitive,
+                )
+
+            elif choice == "3":
+                guided_add_k3s_host(
+                    inventory,
+                    "agent",
+                    allow_sensitive=allow_sensitive,
+                )
+
+            elif choice == "4":
+                cluster = prompt_required("K3s cluster name", default="cluster1")
+                inventory.add_k3s_cluster(cluster)
+                guided_ok("Using K3s cluster: {}".format(cluster))
+
+                while True:
+                    role_choice = prompt_menu(
+                        "Add K3s host to {}".format(cluster),
+                        [
+                            ("1", "Server/control-plane host"),
+                            ("2", "Agent/worker host"),
+                            ("b", "Stop adding K3s hosts"),
+                        ],
+                        default="b",
+                        inventory=inventory,
+                        help_lines=[
+                            "A K3s cluster normally needs at least one server/control-plane host.",
+                            "Agent/worker hosts run workloads and join the server nodes.",
+                        ],
+                    )
+
+                    if role_choice == "1":
+                        guided_add_k3s_host(
+                            inventory,
+                            "server",
+                            allow_sensitive=allow_sensitive,
+                            locked_cluster=cluster,
+                            show_header=False,
+                        )
+
+                    elif role_choice == "2":
+                        guided_add_k3s_host(
+                            inventory,
+                            "agent",
+                            allow_sensitive=allow_sensitive,
+                            locked_cluster=cluster,
+                            show_header=False,
+                        )
+
+                    elif role_choice == "b":
+                        break
+
+            elif choice == "b":
+                return
+
+        except AnsibleConfigError as exc:
+            guided_error(exc)
+
+
+def guided_show_rhel_workstation_example():
+    """Show a beginner-friendly RHEL workstation inventory layout example."""
+    print_guided_section(
+        "Example: RHEL workstation layout",
+        "This is a common way to group provisioned RHEL workstation machines.",
+    )
+
+    print("Example groups for one workstation:")
+    print("  provisioned")
+    print("  workstations")
+    print("  rhel9")
+    print("  security_baseline")
+    print("")
+    print("Example host:")
+    print("  rhel9-ws001 ansible_host=192.168.100.51")
+    print("")
+    print("Example group vars for provisioned:")
+    print("  ansible_user=aerolit")
+    print("  ansible_become=true")
+    print("  ansible_python_interpreter=/usr/bin/python3")
+    print("")
+    print("Why this layout works:")
+    print("  - provisioned targets every machine AeroLIT provisions")
+    print("  - rhel9 targets OS-specific playbooks")
+    print("  - workstations targets workstation behavior")
+    print("  - security_baseline targets hardening/compliance playbooks")
+
+
+def guided_show_what_should_i_choose():
+    """Show high-level guided-mode decision help."""
+    print_guided_section("What should I choose?")
+
+    print("Use this pattern for most environments:")
+    print("")
+    print("  1. Recommended first-time setup")
+    print("     Use this when starting from an empty or mostly empty inventory.")
+    print("")
+    print("  2. Manage inventory hosts and ranges")
+    print("     Use this to add host aliases, IP addresses, and group membership.")
+    print("")
+    print("  3. Manage shared Ansible defaults")
+    print("     Use this for ansible_user, ansible_become, SSH port, and Python path.")
+    print("")
+    print("  4. Manage groups and child groups")
+    print("     Use this when you need extra groups or group relationships.")
+    print("")
+    print("  5. Manage K3s clusters")
+    print("     Use this when the provisioned machines will form K3s clusters.")
+    print("")
+    print("Best beginner rule:")
+    print("  Inventory should mostly contain hostnames, IPs, and group membership.")
+    print("  group_vars should contain shared connection/default behavior.")
+
+
+def guided_show_examples_menu():
+    """Show guided examples/help menu."""
+    while True:
+        choice = prompt_menu(
+            "Examples and help",
+            [
+                ("1", "What should I choose?"),
+                ("2", "Show RHEL workstation group layout example"),
+                ("3", "Show CSV/text import examples"),
+                ("b", "Back to main menu"),
+            ],
+            default="b",
+            description="Use this section when you are unsure what the guided options mean.",
+        )
+
+        if choice == "1":
+            guided_show_what_should_i_choose()
+
+        elif choice == "2":
+            guided_show_rhel_workstation_example()
+
+        elif choice == "3":
+            print_guided_section("CSV/text import examples")
+            print("Header CSV:")
+            print("  host,ansible_host,groups,ansible_user,ansible_become")
+            print("  rhel9-node01,192.168.100.51,provisioned;rhel9,aerolit,true")
+            print("")
+            print("Simple CSV/text:")
+            print("  rhel9-node01,192.168.100.51,provisioned;rhel9;workstations")
+            print("  rhel9-node02,192.168.100.52,provisioned;rhel9;workstations")
+            print("")
+
+        elif choice == "b":
+            return
+
+
+def guided_print_managed_file_paths(bundle_path):
+    """Print the AeroLIT-managed file paths that will be written."""
+    if bundle_path is None:
+        guided_warn("Bundle path is not available, so file paths cannot be shown.")
+        return
+
+    print("AeroLIT-managed output paths:")
+    print("  Inventory:         {}".format(aerolitctl_inventory_file(bundle_path)))
+    print("  Global vars:       {}".format(aerolitctl_ansible_generated_vars_file(bundle_path)))
+    print("  Group vars root:   {}".format(group_vars_root_dir(bundle_path)))
+    print("")
+
+
+def guided_run_ansible_inventory_check(bundle_path):
+    """Run ansible-inventory against the saved inventory on disk."""
+    print_guided_section(
+        "Run ansible-inventory --list",
+        (
+            "This checks the currently saved inventory files on disk. "
+            "Unsaved guided changes are validated separately before saving."
+        ),
+    )
+
+    if bundle_path is None:
+        guided_warn("A bundle path is required for ansible-inventory checks.")
+        return False
+
+    if shutil.which("ansible-inventory") is None:
+        guided_warn("ansible-inventory was not found in PATH.")
+        return False
+
+    inventory_dir = ansible_inventory_dir(bundle_path)
+    cfg_file = ansible_cfg_file(bundle_path)
+
+    env = os.environ.copy()
+    if cfg_file.exists():
+        env["ANSIBLE_CONFIG"] = str(cfg_file)
+
+    code, stdout, stderr = command_output(
+        [
+            "ansible-inventory",
+            "-i",
+            str(inventory_dir),
+            "--list",
+        ],
+        env=env,
+    )
+
+    if code == 0:
+        guided_ok("ansible-inventory --list completed successfully.")
+        return True
+
+    guided_warn("ansible-inventory --list returned rc={}.".format(code))
+    print(stderr or stdout)
+    return False
+
+
+def guided_run_ansible_ping(bundle_path):
+    """Optionally run ansible ping against saved inventory on disk."""
+    print_guided_section(
+        "Run optional ansible ping check",
+        (
+            "This runs ansible -m ping against the currently saved inventory on disk. "
+            "It may contact managed hosts over SSH."
+        ),
+    )
+
+    if bundle_path is None:
+        guided_warn("A bundle path is required for ansible ping checks.")
+        return False
+
+    if shutil.which("ansible") is None:
+        guided_warn("ansible was not found in PATH.")
+        return False
+
+    guided_warn(
+        "This uses currently saved files on disk, not unsaved guided changes."
+    )
+
+    if not prompt_yes_no("Continue with ansible ping?", default=False):
+        guided_info("Skipped ansible ping check.")
+        return False
+
+    limit = str(prompt(default="all", label="Host/group limit")).strip() or "all"
+
+    inventory_dir = ansible_inventory_dir(bundle_path)
+    cfg_file = ansible_cfg_file(bundle_path)
+
+    env = os.environ.copy()
+    if cfg_file.exists():
+        env["ANSIBLE_CONFIG"] = str(cfg_file)
+
+    code, stdout, stderr = command_output(
+        [
+            "ansible",
+            "-i",
+            str(inventory_dir),
+            limit,
+            "-m",
+            "ping",
+        ],
+        env=env,
+    )
+
+    if code == 0:
+        guided_ok("ansible ping completed successfully.")
+        print(stdout)
+        return True
+
+    guided_warn("ansible ping returned rc={}.".format(code))
+    print(stderr or stdout)
+    return False
+
+
+def guided_tools_menu(bundle_path):
+    """Menu for optional saved-inventory test commands."""
+    while True:
+        choice = prompt_menu(
+            "Validation and test tools",
+            [
+                ("1", "Run ansible-inventory --list against saved inventory"),
+                ("2", "Run optional ansible ping check against saved inventory"),
+                ("b", "Back to main menu"),
+            ],
+            default="b",
+            description=(
+                "These tools run against inventory files currently saved on disk. "
+                "Use guided validation before saving to check the in-memory plan."
+            ),
+            help_lines=[
+                "Use ansible-inventory --list to catch parser problems.",
+                "Use ansible ping only when hosts should be reachable over SSH.",
+                "Save guided changes first if you want these tools to use the new plan.",
+            ],
+        )
+
+        if choice == "1":
+            guided_run_ansible_inventory_check(bundle_path)
+
+        elif choice == "2":
+            guided_run_ansible_ping(bundle_path)
+
+        elif choice == "b":
+            return
+
+
+def guided_recommended_first_time_setup(inventory, allow_sensitive=False):
+    """Run a beginner-focused first-time setup flow."""
+    print_guided_section(
+        "Recommended first-time setup",
+        (
+            "This walks through the most common first setup path: groups, local "
+            "controller entries, shared connection defaults, and initial hosts."
+        ),
+    )
+
+    if prompt_yes_no("Ensure standard AeroLIT groups?", default=True):
+        apply_standard_groups(inventory)
+        guided_ok("Standard AeroLIT groups are present.")
+
+    if prompt_yes_no("Add localhost to ansible_controller and pxe_server groups?", default=True):
+        apply_local_controller(inventory)
+        guided_ok("localhost is present for local controller/PXE groups.")
+
+    if prompt_yes_no("Configure common SSH/become defaults for provisioned machines?", default=True):
+        guided_common_connection_defaults(
+            inventory,
+            allow_sensitive=allow_sensitive,
+        )
+
+    while True:
+        host_choice = prompt_menu(
+            "Add initial managed machines",
+            [
+                ("1", "Add one host"),
+                ("2", "Add multiple hosts one at a time"),
+                ("3", "Add generated host/IP range"),
+                ("4", "Import hosts from CSV/text file"),
+                ("s", "Skip adding hosts for now"),
+            ],
+            default="s",
+            description="Choose how you want to add the machines Ansible will manage.",
+            inventory=inventory,
+            help_lines=[
+                "Choose one host if you are testing.",
+                "Choose generated range when hostnames and IPs follow a pattern.",
+                "Choose import when you already have a list from a spreadsheet or text file.",
+            ],
+        )
+
+        if host_choice == "1":
+            guided_add_single_host(inventory, allow_sensitive=allow_sensitive)
+            break
+
+        if host_choice == "2":
+            guided_add_multiple_hosts(inventory, allow_sensitive=allow_sensitive)
+            break
+
+        if host_choice == "3":
+            guided_add_host_range(inventory, allow_sensitive=allow_sensitive)
+            break
+
+        if host_choice == "4":
+            guided_import_hosts_file(inventory, allow_sensitive=allow_sensitive)
+            break
+
+        if host_choice == "s":
+            guided_info("Skipped adding hosts.")
+            break
+
+    print_guided_section("Recommended setup summary")
+    print_guided_plan_summary(inventory, detail=True)
+    print("")
+    guided_ok("Recommended first-time setup complete.")
+
+
+def guided_validate_current_plan(bundle_path, inventory, force=False):
+    """Validate the current in-memory guided plan."""
+    if bundle_path is None:
+        guided_warn("Validation needs a bundle path; skipping file-path validation.")
+        return True
+
+    report = validate_managed_inventory(
+        bundle_path,
+        inventory,
+        run_ansible_inventory=False,
+        force=force,
+        check_files=True,
+    )
+    report.print_report()
+
+    return not bool(report.errors)
+
+
+def guided_finish_confirmation(inventory, bundle_path=None, force=False):
+    """Review, optionally validate, show paths, and confirm saving guided changes."""
+    print_guided_section("Finish guided mode")
+    print("Review the current plan before saving.")
+    print("")
+
+    print_guided_plan_summary(inventory, detail=True)
+    print("")
+
+    if bundle_path is not None:
+        guided_print_managed_file_paths(bundle_path)
+
+        if prompt_yes_no("Validate this plan before saving?", default=True):
+            if not guided_validate_current_plan(
+                bundle_path,
+                inventory,
+                force=force,
+            ):
+                guided_warn("Fix validation failures before saving.")
+                return False
+    else:
+        guided_warn("No bundle path was provided, so guided validation is limited.")
+
+    print("")
+    if prompt_yes_no("Save this guided configuration?", default=True):
+        guided_ok("Guided mode complete.")
+        return True
+
+    guided_info("Returning to the main menu.")
+    return False
+
+
+def run_guided(inventory, bundle_path=None, allow_sensitive=False, force=False):
+    """Interactive menu-driven configure ansible helper."""
+    print_guided_header(
+        "AeroLIT configure ansible guided mode",
+        (
+            "Build the Ansible inventory, groups, K3s cluster structure, "
+            "and shared variables used by the Ansible controller."
+        ),
+    )
+
+    print("What this configures:")
+    print("  - Machines Ansible manages from the controller")
+    print("  - Inventory host aliases and ansible_host/IP values")
+    print("  - Groups, child groups, and K3s cluster group structure")
+    print("  - Shared Ansible defaults in group_vars/all or group_vars/<group>")
+    print("")
+    print("What this does not configure:")
+    print("  - Server bootstrap networking")
+    print("  - Vault files")
+    print("  - Existing user inventory files")
+    print("  - Existing workstation defaults or templates")
+    print("")
+
+    if bundle_path is not None:
+        guided_print_managed_file_paths(bundle_path)
+    else:
+        print("AeroLIT-managed files:")
+        print("  - inventory/90_aerolitctl.ini")
+        print("  - group_vars/all/aerolitctl_ansible_generated.yml")
+        print("  - group_vars/<group>/aerolitctl.yml")
+        print("")
+
+    print_guided_tip(
+        [
+            HOST_VAR_PREFERENCE_WARNING,
+            "A good default pattern is: inventory for membership/IPs, group_vars for shared defaults.",
+        ]
+    )
+
+    quick_default = not bool(
+        inventory.groups
+        or inventory.all_hosts()
+        or inventory.global_vars
+        or inventory.group_vars
+        or inventory.children
+    )
+
+    if quick_default:
+        if prompt_yes_no("Run recommended first-time setup now?", default=True):
+            guided_recommended_first_time_setup(
+                inventory,
+                allow_sensitive=allow_sensitive,
+            )
+
+    while True:
+        choice = prompt_menu(
+            "AeroLIT configure ansible main menu",
+            [
+                ("1", "Recommended first-time setup"),
+                ("2", "Manage inventory hosts and ranges"),
+                ("3", "Manage groups and child groups"),
+                ("4", "Manage shared Ansible defaults"),
+                ("5", "Manage K3s clusters"),
+                ("6", "Examples and help"),
+                ("7", "Review current plan"),
+                ("8", "Validate current plan"),
+                ("9", "Validation/test tools for saved inventory"),
+                ("f", "Finish guided mode and save"),
+                ("q", "Cancel guided mode without saving"),
+            ],
+            default="f",
+            description="Choose a section. You can move between sections before saving.",
+            inventory=inventory,
+            help_lines=[
+                "Start with Recommended first-time setup if you are not sure.",
+                "Use inventory hosts/ranges for host aliases, IPs, and group membership.",
+                "Use shared defaults for ansible_user, become, SSH port, and Python.",
+                "Use Examples and help to see a RHEL workstation layout.",
+            ],
+        )
+
+        if choice == "1":
+            guided_recommended_first_time_setup(
+                inventory,
+                allow_sensitive=allow_sensitive,
+            )
+
+        elif choice == "2":
+            guided_manage_hosts(
+                inventory,
+                allow_sensitive=allow_sensitive,
+            )
+
+        elif choice == "3":
+            guided_manage_groups(inventory)
+
+        elif choice == "4":
+            guided_manage_shared_vars(
+                inventory,
+                allow_sensitive=allow_sensitive,
+            )
+
+        elif choice == "5":
+            guided_manage_k3s(
+                inventory,
+                allow_sensitive=allow_sensitive,
+            )
+
+        elif choice == "6":
+            guided_show_examples_menu()
+
+        elif choice == "7":
+            print_guided_section("Current guided plan")
+
+            if bundle_path is not None:
+                print_inventory_summary(bundle_path, inventory)
+            else:
+                print_guided_plan_summary(inventory, detail=True)
+
+        elif choice == "8":
+            guided_validate_current_plan(
+                bundle_path,
+                inventory,
+                force=force,
+            )
+
+        elif choice == "9":
+            guided_tools_menu(bundle_path)
+
+        elif choice == "f":
+            if guided_finish_confirmation(
+                inventory,
+                bundle_path=bundle_path,
+                force=force,
+            ):
+                return True
+
+        elif choice == "q":
+            print_guided_section("Cancel guided mode")
+
+            if prompt_yes_no("Cancel guided mode and do not save these guided changes?", default=False):
+                guided_warn("Guided mode cancelled. No guided changes were saved.")
+                return False
+
+            guided_info("Returning to the main menu.")
 
 def scan_existing_inventory_aliases(inventory_dir, managed_inventory_file):
     """Return host aliases found outside the aerolitctl-managed inventory."""
