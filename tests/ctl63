@@ -1561,11 +1561,14 @@ def main():
         ("standardized source wording", lambda: test_standardized_source_wording(args)),
         ("configure server --show mode behavior", lambda: test_configure_show_modes(args, hash_paths)),
         ("configure server dry-run mode behavior", lambda: test_configure_dry_run_modes(args, hash_paths)),
+        ("configure ansible dry-run read-only", lambda: test_configure_ansible_dry_run_read_only(args, hash_paths)),
+        ("configure ansible sensitive var guard", lambda: test_configure_ansible_sensitive_var_guard(args)),
     ]
 
     if not args.skip_write_tests:
         tests.extend(
             [
+                ("real configure ansible managed writes", lambda: test_real_configure_ansible_writes(args)),
                 ("real configure server mode writes", lambda: test_real_configure_modes(args)),
                 ("deploy server mode dry-run matrix", lambda: test_deploy_mode_matrix(args)),
                 ("deploy server skip flags", lambda: test_deploy_skip_flags(args)),
