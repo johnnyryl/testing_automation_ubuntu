@@ -12,6 +12,7 @@ from .initialize import run_configure_init
 from .server import run_configure_server
 from .deploy_server import run_deploy_server
 from .status import run_status
+from .ansible import run_configure_ansible
 
 
 def cmd_version(args):
