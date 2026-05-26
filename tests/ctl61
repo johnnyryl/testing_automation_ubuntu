@@ -3307,6 +3307,7 @@ def run_guided(inventory, bundle_path=None, allow_sensitive=False, force=False):
 
             guided_info("Returning to the main menu.")
 
+
 def scan_existing_inventory_aliases(inventory_dir, managed_inventory_file):
     """Return host aliases found outside the aerolitctl-managed inventory."""
     inventory_dir = Path(inventory_dir)
