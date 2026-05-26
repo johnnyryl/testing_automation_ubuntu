@@ -790,6 +790,7 @@ def build_parser():
         help="Starting IP address for --add-host-range.",
     )
 
+    add_command_verbose(ansible_parser)
     add_configure_server_parser(configure_subparsers)
     add_deploy_parser(subparsers)
 
