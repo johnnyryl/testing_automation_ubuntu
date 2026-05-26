@@ -2341,6 +2341,9 @@ def guided_import_hosts_file(inventory, allow_sensitive=False):
     except OSError as exc:
         guided_error("Could not read import file {}: {}".format(path, exc))
         return False
+    except csv.Error as exc:
+        guided_error("Could not parse import file {} as CSV/text: {}".format(path, exc))
+        return False
 
     header = None
     first = [item.strip().lower() for item in parsed_rows[0]]
