@@ -3692,7 +3692,15 @@ def run_configure_ansible(args):
         inventory = load_managed_state(bundle_path, force=force)
 
     if getattr(args, "guided", False):
-        run_guided(inventory)
+        guided_result = run_guided(
+            inventory,
+            bundle_path=bundle_path,
+            allow_sensitive=getattr(args, "allow_sensitive_vars", False),
+            force=force,
+        )
+
+        if not guided_result:
+            return 0
 
     apply_cli_changes(inventory, args)
 
