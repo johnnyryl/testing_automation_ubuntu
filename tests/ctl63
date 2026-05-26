@@ -12,6 +12,7 @@ This is a broad manual smoke/regression test for the work around:
 - show vs dry-run safety behavior
 - configure init dry-run behavior
 - bundle manifest creation/validation/idempotency behavior
+- configure ansible managed inventory/group_vars behavior
 
 It intentionally runs real `aerolitctl configure server` commands because those
 are the only way to confirm saved config and generated vars behavior. By default
