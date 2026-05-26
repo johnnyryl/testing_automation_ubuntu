@@ -1620,7 +1620,7 @@ def main():
 
         if state_snapshot is not None and not args.keep_state:
             print("")
-            print("Restoring saved AeroLIT config/generated-vars/manifest state...")
+            print("Restoring saved AeroLIT config/generated-vars/manifest/Ansible state...")
             try:
                 restore_snapshot(state_snapshot)
                 print("State restored.")
