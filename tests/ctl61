@@ -1,0 +1,2004 @@
+"""AeroLIT Ansible inventory/configuration planning helpers.
+
+`aerolitctl configure ansible` safely manages only AeroLIT-owned files inside the
+active Ansible layout:
+
+  collections-hub/ansible/inventory/90_aerolitctl.ini
+  collections-hub/ansible/group_vars/all/aerolitctl_ansible_generated.yml
+  collections-hub/ansible/group_vars/<group>/aerolitctl.yml
+
+It intentionally does not rewrite existing inventory files, vault vars,
+workstation defaults, user account vars, or template directories.
+"""
+
+from __future__ import print_function
+
+import datetime
+import ipaddress
+import os
+import re
+import shlex
+import shutil
+import subprocess
+from collections import OrderedDict
+from pathlib import Path
+
+from .config import get_bundle_path, load_config
+from .paths import (
+    ansible_cfg_file,
+    ansible_group_vars_all_dir,
+    ansible_inventory_dir,
+    aerolitctl_ansible_generated_vars_file,
+    aerolitctl_inventory_file,
+)
+
+
+DEFAULT_GROUP = "provisioned"
+GROUP_VARS_FILENAME = "aerolitctl.yml"
+
+STANDARD_GROUPS = [
+    "ansible_controller",
+    "pxe_server",
+    "provisioned",
+    "workstations",
+    "rhel7",
+    "rhel8",
+    "rhel9",
+    "rhel10",
+    "security_baseline",
+    "security_luks",
+    "k3s_cluster",
+    "server",
+    "agent",
+]
+
+LOCAL_CONTROLLER_GROUPS = [
+    "ansible_controller",
+    "pxe_server",
+]
+
+RESERVED_GROUP_NAMES = [
+    "all",
+    "ungrouped",
+]
+
+RESERVED_VAR_PREFIXES = [
+    "aerolitctl_ansible_",
+]
+
+MANAGED_HEADER = "# BEGIN MANAGED AEROLITCTL INVENTORY"
+MANAGED_FOOTER = "# END MANAGED AEROLITCTL INVENTORY"
+GENERATED_VARS_MARKER = "# Generated AeroLIT Ansible variables"
+GROUP_VARS_MARKER = "# Generated AeroLIT group variables"
+
+SENSITIVE_VAR_WORDS = [
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "vault",
+    "api_key",
+    "private_key",
+    "ssh_key",
+]
+
+SAFE_SENSITIVE_LOOKING_VARS = [
+    "ansible_ssh_private_key_file",
+]
+
+HOST_VAR_PREFERENCE_WARNING = (
+    "Prefer --set-global-var or --set-group-var for shared Ansible defaults. "
+    "Use host vars only for per-host overrides."
+)
+
+
+class AnsibleConfigError(Exception):
+    """Raised when configure ansible input is invalid."""
+
+
+class AnsibleReport(object):
+    """Collect configure ansible validation results."""
+
+    def __init__(self):
+        self.ok = []
+        self.warnings = []
+        self.errors = []
+
+    def add_ok(self, message):
+        self.ok.append(message)
+
+    def add_warning(self, message):
+        self.warnings.append(message)
+
+    def add_error(self, message):
+        self.errors.append(message)
+
+    def print_report(self):
+        print("AeroLIT Ansible validation")
+        print("")
+
+        for message in self.ok:
+            print("[OK] {}".format(message))
+
+        for message in self.warnings:
+            print("[WARN] {}".format(message))
+
+        for message in self.errors:
+            print("[FAIL] {}".format(message))
+
+        print("")
+        print("Summary:")
+        print("  OK: {}".format(len(self.ok)))
+        print("  Warnings: {}".format(len(self.warnings)))
+        print("  Failures: {}".format(len(self.errors)))
+
+    def exit_code(self):
+        return 1 if self.errors else 0
+
+
+class ManagedInventory(object):
+    """In-memory representation of aerolitctl-managed Ansible state."""
+
+    def __init__(self):
+        self.groups = OrderedDict()
+        self.children = OrderedDict()
+        self.host_vars = OrderedDict()
+        self.global_vars = OrderedDict()
+        self.group_vars = OrderedDict()
+
+    def ensure_group(self, group):
+        group = normalize_group_name(group)
+        if group not in self.groups:
+            self.groups[group] = []
+        return group
+
+    def remove_group(self, group):
+        group = normalize_group_name(group)
+
+        if group in self.groups:
+            del self.groups[group]
+
+        if group in self.group_vars:
+            del self.group_vars[group]
+
+        if group in self.children:
+            del self.children[group]
+
+        for parent in list(self.children.keys()):
+            self.children[parent] = [
+                child for child in self.children[parent] if child != group
+            ]
+            if not self.children[parent]:
+                del self.children[parent]
+
+        self.prune_orphan_host_vars()
+
+    def ensure_child_group(self, parent, child):
+        parent = self.ensure_group(parent)
+        child = self.ensure_group(child)
+
+        if parent == child:
+            raise AnsibleConfigError(
+                "A group cannot be a child of itself: {}".format(parent)
+            )
+
+        if parent not in self.children:
+            self.children[parent] = []
+
+        if child not in self.children[parent]:
+            self.children[parent].append(child)
+
+    def remove_child_group(self, parent, child):
+        parent = normalize_group_name(parent)
+        child = normalize_group_name(child)
+
+        if parent not in self.children:
+            return
+
+        self.children[parent] = [
+            item for item in self.children[parent] if item != child
+        ]
+
+        if not self.children[parent]:
+            del self.children[parent]
+
+    def add_k3s_cluster(self, cluster):
+        """Create a managed K3s cluster child-group structure."""
+        cluster = normalize_group_name(cluster)
+        server_group = k3s_role_group_name("server", cluster)
+        agent_group = k3s_role_group_name("agent", cluster)
+
+        self.ensure_child_group("k3s_cluster", cluster)
+        self.ensure_child_group(cluster, server_group)
+        self.ensure_child_group(cluster, agent_group)
+        self.ensure_child_group("server", server_group)
+        self.ensure_child_group("agent", agent_group)
+
+    def add_k3s_host(self, cluster, role, host, variables=None):
+        """Add a host to a managed K3s server/agent cluster group."""
+        role = normalize_k3s_role(role)
+        cluster = normalize_group_name(cluster)
+        self.add_k3s_cluster(cluster)
+        self.add_host(
+            host,
+            groups=[k3s_role_group_name(role, cluster)],
+            variables=variables or {},
+        )
+
+    def add_host(self, host, groups=None, variables=None):
+        host = normalize_host_name(host)
+        variables = variables or {}
+
+        if host not in self.host_vars:
+            self.host_vars[host] = OrderedDict()
+
+        for key, value in variables.items():
+            self.host_vars[host][normalize_var_name(key)] = value
+
+        if not groups:
+            groups = [DEFAULT_GROUP]
+
+        for group in groups:
+            group = self.ensure_group(group)
+            if host not in self.groups[group]:
+                self.groups[group].append(host)
+
+    def remove_host(self, host):
+        host = normalize_host_name(host)
+
+        for group in list(self.groups.keys()):
+            self.groups[group] = [
+                item for item in self.groups[group] if item != host
+            ]
+
+        if host in self.host_vars:
+            del self.host_vars[host]
+
+    def remove_host_from_group(self, host, group):
+        host = normalize_host_name(host)
+        group = normalize_group_name(group)
+
+        if group in self.groups:
+            self.groups[group] = [
+                item for item in self.groups[group] if item != host
+            ]
+
+        self.prune_orphan_host_vars()
+
+    def set_host_var(self, host, key, value):
+        host = normalize_host_name(host)
+        key = normalize_var_name(key)
+
+        if not self.host_groups(host):
+            self.add_host(host, groups=[DEFAULT_GROUP], variables={})
+
+        if host not in self.host_vars:
+            self.host_vars[host] = OrderedDict()
+
+        self.host_vars[host][key] = value
+
+    def remove_host_var(self, host, key):
+        host = normalize_host_name(host)
+        key = normalize_var_name(key)
+
+        if host in self.host_vars and key in self.host_vars[host]:
+            del self.host_vars[host][key]
+
+    def set_global_var(self, key, value):
+        key = normalize_var_name(key)
+        self.global_vars[key] = value
+
+    def remove_global_var(self, key):
+        key = normalize_var_name(key)
+        if key in self.global_vars:
+            del self.global_vars[key]
+
+    def set_group_var(self, group, key, value):
+        group = self.ensure_group(group)
+        key = normalize_var_name(key)
+
+        if group not in self.group_vars:
+            self.group_vars[group] = OrderedDict()
+
+        self.group_vars[group][key] = value
+
+    def remove_group_var(self, group, key):
+        group = normalize_group_name(group)
+        key = normalize_var_name(key)
+
+        if group in self.group_vars and key in self.group_vars[group]:
+            del self.group_vars[group][key]
+
+        if group in self.group_vars and not self.group_vars[group]:
+            del self.group_vars[group]
+
+    def prune_orphan_host_vars(self):
+        """Drop host_vars for hosts that are no longer in any managed group."""
+        grouped_hosts = set()
+
+        for hosts in self.groups.values():
+            for host in hosts:
+                grouped_hosts.add(host)
+
+        for host in list(self.host_vars.keys()):
+            if host not in grouped_hosts:
+                del self.host_vars[host]
+
+    def host_groups(self, host):
+        host = normalize_host_name(host)
+        result = []
+
+        for group, hosts in self.groups.items():
+            if host in hosts:
+                result.append(group)
+
+        return result
+
+    def all_hosts(self):
+        hosts = []
+
+        for group, group_hosts in self.groups.items():
+            for host in group_hosts:
+                if host not in hosts:
+                    hosts.append(host)
+
+        return hosts
+
+    def all_child_groups(self):
+        """Return all groups that appear as children."""
+        result = []
+
+        for children in self.children.values():
+            for child in children:
+                if child not in result:
+                    result.append(child)
+
+        return result
+
+
+def normalize_group_name(value):
+    """Validate and return an Ansible group name."""
+    value = str(value).strip()
+
+    if not value:
+        raise AnsibleConfigError("Group name cannot be empty")
+
+    if value in RESERVED_GROUP_NAMES:
+        raise AnsibleConfigError(
+            "'{}' is an Ansible reserved group. Use --set-global-var for all-host defaults.".format(
+                value
+            )
+        )
+
+    if not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$", value):
+        raise AnsibleConfigError(
+            "Invalid group name '{}'. Use letters, numbers, underscore, dash, or dot.".format(
+                value
+            )
+        )
+
+    return value
+
+
+def normalize_host_name(value):
+    """Validate and return an Ansible host alias."""
+    value = str(value).strip()
+
+    if not value:
+        raise AnsibleConfigError("Host name cannot be empty")
+
+    if not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_.:-]*$", value):
+        raise AnsibleConfigError(
+            "Invalid host name '{}'. Use letters, numbers, underscore, dash, dot, colon.".format(
+                value
+            )
+        )
+
+    return value
+
+
+def normalize_var_name(value):
+    """Validate and return an Ansible variable name."""
+    value = str(value).strip()
+
+    if not value:
+        raise AnsibleConfigError("Variable name cannot be empty")
+
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", value):
+        raise AnsibleConfigError(
+            "Invalid variable name '{}'. Use a normal Ansible/Python variable name.".format(
+                value
+            )
+        )
+
+    return value
+
+
+def normalize_k3s_role(value):
+    """Normalize K3s role names accepted by configure ansible."""
+    value = str(value).strip().lower()
+
+    if value in ("server", "servers", "control", "control_plane", "control-plane"):
+        return "server"
+
+    if value in ("agent", "agents", "worker", "workers"):
+        return "agent"
+
+    raise AnsibleConfigError(
+        "Invalid K3s role '{}'. Use server or agent.".format(value)
+    )
+
+
+def k3s_role_group_name(role, cluster):
+    """Return the managed role group name for a K3s cluster."""
+    role = normalize_k3s_role(role)
+    cluster = normalize_group_name(cluster)
+    return "{}_{}".format(role, cluster)
+
+
+def is_sensitive_var_name(key):
+    """Return True when a var name looks like it may hold a secret."""
+    lowered = key.lower()
+
+    if lowered in SAFE_SENSITIVE_LOOKING_VARS:
+        return False
+
+    return any(word in lowered for word in SENSITIVE_VAR_WORDS)
+
+
+def is_reserved_var_name(key):
+    """Return True when a var name is reserved for aerolitctl metadata."""
+    lowered = key.lower()
+    return any(lowered.startswith(prefix) for prefix in RESERVED_VAR_PREFIXES)
+
+
+def parse_scalar_value(value):
+    """Parse simple CLI scalar text into a YAML-friendly value."""
+    value = str(value).strip()
+    lowered = value.lower()
+
+    if lowered in ("true", "yes", "on"):
+        return True
+
+    if lowered in ("false", "no", "off"):
+        return False
+
+    return value
+
+
+def parse_key_value(value, allow_sensitive=False):
+    """Parse KEY=VALUE syntax for inventory-style host vars."""
+    if "=" not in value:
+        raise AnsibleConfigError("Expected KEY=VALUE, got: {}".format(value))
+
+    key, raw_value = value.split("=", 1)
+    key = normalize_var_name(key)
+
+    if is_sensitive_var_name(key) and not allow_sensitive:
+        raise AnsibleConfigError(
+            "Refusing to write sensitive-looking variable '{}'. "
+            "Use --allow-sensitive-vars only if you intentionally want this in "
+            "the aerolitctl-managed inventory/generated vars.".format(key)
+        )
+
+    return key, raw_value.strip()
+
+
+def parse_var_assignment(value, allow_sensitive=False):
+    """Parse KEY=VALUE syntax for YAML variable files."""
+    key, raw_value = parse_key_value(value, allow_sensitive=allow_sensitive)
+
+    if is_reserved_var_name(key):
+        raise AnsibleConfigError(
+            "Variable '{}' is reserved for aerolitctl metadata.".format(key)
+        )
+
+    return key, parse_scalar_value(raw_value)
+
+
+def bool_text(value):
+    """Return Ansible-friendly boolean text."""
+    return "true" if value else "false"
+
+
+def yaml_quote(value):
+    """Quote a scalar as a YAML string."""
+    value = str(value)
+    return "'" + value.replace("'", "''") + "'"
+
+
+def yaml_value(value):
+    """Render a simple YAML scalar value."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+
+    if value is None:
+        return "null"
+
+    return yaml_quote(value)
+
+
+def inventory_value_quote(value):
+    """Quote an INI inventory value when it contains unsafe characters."""
+    if isinstance(value, bool):
+        return bool_text(value)
+
+    value = str(value)
+
+    if not value:
+        return "''"
+
+    if re.search(r"\s|#|'|\"", value):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return '"{}"'.format(escaped)
+
+    return value
+
+
+def inventory_var_text(key, value):
+    """Render one host var for INI inventory."""
+    return "{}={}".format(key, inventory_value_quote(value))
+
+
+def display_var_text(key, value):
+    """Render a variable for terminal display, masking sensitive-looking values."""
+    if is_sensitive_var_name(key):
+        return "{}=<redacted>".format(key)
+
+    if isinstance(value, bool):
+        value = bool_text(value)
+
+    return "{}={}".format(key, value)
+
+
+def host_specific_var_names(inventory):
+    """Return host vars that are more specific than host identity/address."""
+    names = []
+
+    for variables in inventory.host_vars.values():
+        for key in variables.keys():
+            if key == "ansible_host":
+                continue
+            if key not in names:
+                names.append(key)
+
+    return names
+
+
+def host_var_options_requested(args):
+    """Return True when CLI options are setting host-specific overrides."""
+    if getattr(args, "host_var", None):
+        return True
+
+    if getattr(args, "set_host_var", None):
+        return True
+
+    if getattr(args, "ansible_user", None):
+        return True
+
+    if getattr(args, "ansible_port", None):
+        return True
+
+    if getattr(args, "ssh_key", None):
+        return True
+
+    if getattr(args, "connection", None):
+        return True
+
+    if getattr(args, "python_interpreter", None):
+        return True
+
+    if getattr(args, "become", None) is not None:
+        return True
+
+    return False
+
+
+def timestamp():
+    """Return a filesystem-safe timestamp."""
+    return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def read_text(path):
+    """Read text while tolerating non-UTF8 bytes."""
+    with open(str(path), "r", encoding="utf-8", errors="ignore") as handle:
+        return handle.read()
+
+
+def write_text(path, content):
+    """Write text and create parent directories."""
+    path = Path(path)
+
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True)
+
+    with open(str(path), "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
+def configured_bundle_path():
+    """Return configured bundle path from aerolitctl config."""
+    config = load_config()
+    bundle_path = get_bundle_path(config)
+
+    if not bundle_path:
+        raise AnsibleConfigError(
+            "No bundle path is configured. Run: aerolitctl configure init"
+        )
+
+    return Path(bundle_path)
+
+
+def group_vars_root_dir(bundle_path):
+    """Return active group_vars root path."""
+    return ansible_group_vars_all_dir(bundle_path).parent
+
+
+def aerolitctl_group_vars_file(bundle_path, group):
+    """Return aerolitctl-managed group_vars file for one group."""
+    group = normalize_group_name(group)
+    return group_vars_root_dir(bundle_path) / group / GROUP_VARS_FILENAME
+
+
+def file_looks_managed(path, managed_kind):
+    """Return True when an existing file appears safe for aerolitctl to update."""
+    path = Path(path)
+
+    if not path.exists():
+        return True
+
+    content = read_text(path)
+
+    if managed_kind == "inventory":
+        return MANAGED_HEADER in content and MANAGED_FOOTER in content
+
+    if managed_kind == "generated_vars":
+        return (
+            GENERATED_VARS_MARKER in content
+            and "aerolitctl_ansible_generated:" in content
+        )
+
+    if managed_kind == "group_vars":
+        return GROUP_VARS_MARKER in content
+
+    return False
+
+
+def ensure_file_is_safe_to_update(path, managed_kind, force=False):
+    """Refuse to overwrite a non-managed file unless force=True."""
+    path = Path(path)
+
+    if force or not path.exists():
+        return
+
+    if file_looks_managed(path, managed_kind):
+        return
+
+    raise AnsibleConfigError(
+        "{} exists but does not look like an aerolitctl-managed {} file. "
+        "Refusing to overwrite it without --force: {}".format(
+            path,
+            managed_kind.replace("_", " "),
+            path,
+        )
+    )
+
+
+def backup_file(path, dry_run=False, no_backup=False, label=None):
+    """Create a timestamped backup next to an existing file."""
+    path = Path(path)
+    label = label or str(path)
+
+    if no_backup or not path.exists():
+        return None
+
+    backup_path = path.with_name(
+        "{}.aerolit-backup-{}".format(path.name, timestamp())
+    )
+
+    if dry_run:
+        print("Would back up {} to {}".format(label, backup_path))
+        return backup_path
+
+    shutil.copy2(str(path), str(backup_path))
+    print("Backed up {} to {}".format(label, backup_path))
+    return backup_path
+
+
+def write_if_changed(
+    path,
+    content,
+    dry_run=False,
+    label=None,
+    managed_kind=None,
+    force=False,
+    no_backup=False,
+):
+    """Create/update a file only when content differs."""
+    path = Path(path)
+    label = label or str(path)
+
+    exists = path.exists()
+    current = read_text(path) if exists else None
+
+    if current == content:
+        print("Already current: {}".format(label))
+        return "unchanged"
+
+    if managed_kind:
+        ensure_file_is_safe_to_update(path, managed_kind, force=force)
+
+    if dry_run:
+        if exists:
+            backup_file(path, dry_run=True, no_backup=no_backup, label=label)
+            print("Would update: {}".format(label))
+            return "would_update"
+
+        print("Would create: {}".format(label))
+        return "would_create"
+
+    backup_file(path, dry_run=False, no_backup=no_backup, label=label)
+    write_text(path, content)
+
+    if exists:
+        print("Updated: {}".format(label))
+        return "updated"
+
+    print("Created: {}".format(label))
+    return "created"
+
+
+def remove_if_exists(
+    path,
+    dry_run=False,
+    label=None,
+    managed_kind=None,
+    force=False,
+    no_backup=False,
+):
+    """Remove an aerolitctl-managed file when it is no longer needed."""
+    path = Path(path)
+    label = label or str(path)
+
+    if not path.exists():
+        return "absent"
+
+    if managed_kind:
+        ensure_file_is_safe_to_update(path, managed_kind, force=force)
+
+    if dry_run:
+        backup_file(path, dry_run=True, no_backup=no_backup, label=label)
+        print("Would remove: {}".format(label))
+        return "would_remove"
+
+    backup_file(path, dry_run=False, no_backup=no_backup, label=label)
+    path.unlink()
+    print("Removed: {}".format(label))
+    return "removed"
+
+
+def split_inventory_line(line):
+    """Split an inventory line while honoring simple quoted values."""
+    try:
+        return shlex.split(line, comments=False, posix=True)
+    except ValueError as exc:
+        raise AnsibleConfigError(
+            "Could not parse managed inventory line '{}': {}".format(line, exc)
+        )
+
+
+def load_managed_inventory(path):
+    """Load the aerolitctl-managed inventory file if it exists."""
+    inventory = ManagedInventory()
+    path = Path(path)
+
+    if not path.exists():
+        return inventory
+
+    if not file_looks_managed(path, "inventory"):
+        raise AnsibleConfigError(
+            "Managed inventory path exists but is missing aerolitctl markers. "
+            "Use --force to replace it, or move it first: {}".format(path)
+        )
+
+    current_section = None
+    current_section_type = "hosts"
+
+    for raw_line in read_text(path).splitlines():
+        line = raw_line.strip()
+
+        if not line or line.startswith("#"):
+            continue
+
+        section_match = re.match(r"^\[([^\]]+)\]$", line)
+        if section_match:
+            section_name = section_match.group(1).strip()
+
+            if section_name.endswith(":vars"):
+                current_section = normalize_group_name(section_name[:-5])
+                current_section_type = "vars"
+                inventory.ensure_group(current_section)
+            elif section_name.endswith(":children"):
+                current_section = normalize_group_name(section_name[:-9])
+                current_section_type = "children"
+                inventory.ensure_group(current_section)
+            else:
+                current_section = normalize_group_name(section_name)
+                current_section_type = "hosts"
+                inventory.ensure_group(current_section)
+
+            continue
+
+        if current_section is None:
+            continue
+
+        parts = split_inventory_line(line)
+        if not parts:
+            continue
+
+        if current_section_type == "children":
+            inventory.ensure_child_group(current_section, parts[0])
+            continue
+
+        if current_section_type == "vars":
+            key, value = parse_var_assignment(line, allow_sensitive=True)
+            inventory.set_group_var(current_section, key, value)
+            continue
+
+        if current_section_type != "hosts":
+            continue
+
+        host = parts[0]
+        variables = OrderedDict()
+
+        for part in parts[1:]:
+            if "=" not in part:
+                continue
+
+            key, value = parse_key_value(part, allow_sensitive=True)
+            variables[key] = value
+
+        inventory.add_host(host, groups=[current_section], variables=variables)
+
+    inventory.prune_orphan_host_vars()
+    return inventory
+
+
+def _load_yaml_mapping(path):
+    """Load a simple YAML mapping from path."""
+    path = Path(path)
+
+    try:
+        import yaml
+    except ImportError:
+        yaml = None
+
+    if yaml is not None:
+        try:
+            with open(str(path), "r", encoding="utf-8") as handle:
+                data = yaml.safe_load(handle) or {}
+        except Exception as exc:
+            raise AnsibleConfigError(
+                "Could not parse YAML vars file {}: {}".format(path, exc)
+            )
+
+        if not isinstance(data, dict):
+            raise AnsibleConfigError(
+                "YAML vars file should contain a mapping: {}".format(path)
+            )
+
+        return data
+
+    data = OrderedDict()
+    for raw_line in read_text(path).splitlines():
+        if not raw_line or raw_line.lstrip().startswith("#"):
+            continue
+
+        if raw_line.startswith(" ") or ":" not in raw_line:
+            continue
+
+        key, raw_value = raw_line.split(":", 1)
+        key = key.strip()
+        raw_value = raw_value.strip()
+
+        if not key or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            continue
+
+        if raw_value.startswith("'") and raw_value.endswith("'"):
+            raw_value = raw_value[1:-1].replace("''", "'")
+
+        data[key] = parse_scalar_value(raw_value)
+
+    return data
+
+
+def load_global_vars(path, inventory, force=False):
+    """Load existing aerolitctl-managed global vars into inventory."""
+    path = Path(path)
+
+    if not path.exists():
+        return
+
+    if not file_looks_managed(path, "generated_vars"):
+        return
+
+    data = _load_yaml_mapping(path)
+
+    for key, value in data.items():
+        if is_reserved_var_name(key):
+            continue
+
+        key = normalize_var_name(key)
+        inventory.global_vars[key] = value
+
+
+def load_group_vars(bundle_path, inventory, force=False):
+    """Load existing aerolitctl-managed group vars into inventory."""
+    root = group_vars_root_dir(bundle_path)
+
+    if not root.exists():
+        return
+
+    for path in root.glob("*/{}".format(GROUP_VARS_FILENAME)):
+        group = path.parent.name
+
+        if group in RESERVED_GROUP_NAMES:
+            continue
+
+        if not file_looks_managed(path, "group_vars"):
+            continue
+
+        group = inventory.ensure_group(group)
+        data = _load_yaml_mapping(path)
+
+        for key, value in data.items():
+            if is_reserved_var_name(key):
+                continue
+
+            key = normalize_var_name(key)
+            inventory.set_group_var(group, key, value)
+
+
+def load_managed_state(bundle_path, force=False):
+    """Load all aerolitctl-managed Ansible state from active files."""
+    inventory = load_managed_inventory(aerolitctl_inventory_file(bundle_path))
+    load_global_vars(
+        aerolitctl_ansible_generated_vars_file(bundle_path),
+        inventory,
+        force=force,
+    )
+    load_group_vars(bundle_path, inventory, force=force)
+    return inventory
+
+
+def render_managed_inventory(inventory):
+    """Render the aerolitctl-managed INI inventory file."""
+    lines = [
+        MANAGED_HEADER,
+        "# Generated by aerolitctl configure ansible.",
+        "# This file is safe for aerolitctl to update.",
+        "# Existing inventory files and group_vars are not modified.",
+        "# Host/group vars are stored in aerolitctl-managed YAML files.",
+        "# {}".format(HOST_VAR_PREFERENCE_WARNING),
+        "",
+    ]
+
+    for parent, children in inventory.children.items():
+        if not children:
+            continue
+
+        lines.append("[{}:children]".format(parent))
+        for child in children:
+            lines.append(child)
+        lines.append("")
+
+    for group, hosts in inventory.groups.items():
+        lines.append("[{}]".format(group))
+
+        for host in hosts:
+            variables = inventory.host_vars.get(host, OrderedDict())
+            rendered = [host]
+
+            for key, value in variables.items():
+                rendered.append(inventory_var_text(key, value))
+
+            lines.append(" ".join(rendered))
+
+        lines.append("")
+
+    lines.append(MANAGED_FOOTER)
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def render_yaml_vars(variables):
+    """Render a mapping of variables as YAML lines."""
+    lines = []
+
+    for key, value in variables.items():
+        lines.append("{}: {}".format(key, yaml_value(value)))
+
+    return lines
+
+
+def render_generated_vars(inventory):
+    """Render aerolitctl_ansible_generated.yml."""
+    groups = list(inventory.groups.keys())
+    hosts = inventory.all_hosts()
+
+    lines = [
+        "---",
+        GENERATED_VARS_MARKER,
+        "# Created by aerolitctl configure ansible.",
+        "# This file lives in group_vars/all, so non-metadata vars here apply globally.",
+        "# Do not store secrets in this file.",
+        "",
+        "aerolitctl_ansible_generated: true",
+        "aerolitctl_ansible_managed_inventory: 'inventory/90_aerolitctl.ini'",
+        "",
+        "aerolitctl_ansible_standard_groups:",
+    ]
+
+    for group in STANDARD_GROUPS:
+        lines.append("  - {}".format(yaml_quote(group)))
+
+    lines.append("")
+
+    if groups:
+        lines.append("aerolitctl_ansible_managed_groups:")
+        for group in groups:
+            lines.append("  - {}".format(yaml_quote(group)))
+    else:
+        lines.append("aerolitctl_ansible_managed_groups: []")
+
+    lines.append("")
+
+    if inventory.children:
+        lines.append("aerolitctl_ansible_managed_children:")
+        for parent, children in inventory.children.items():
+            if children:
+                lines.append("  {}:".format(yaml_quote(parent)))
+                for child in children:
+                    lines.append("    - {}".format(yaml_quote(child)))
+            else:
+                lines.append("  {}: []".format(yaml_quote(parent)))
+    else:
+        lines.append("aerolitctl_ansible_managed_children: {}")
+
+    lines.append("")
+
+    if hosts:
+        lines.append("aerolitctl_ansible_managed_hosts:")
+        for host in hosts:
+            lines.append("  {}:".format(yaml_quote(host)))
+
+            host_groups = inventory.host_groups(host)
+            if host_groups:
+                lines.append("    groups:")
+                for group in host_groups:
+                    lines.append("      - {}".format(yaml_quote(group)))
+            else:
+                lines.append("    groups: []")
+
+            variables = inventory.host_vars.get(host, OrderedDict())
+            if variables:
+                lines.append("    vars:")
+                for key, value in variables.items():
+                    lines.append("      {}: {}".format(key, yaml_value(value)))
+            else:
+                lines.append("    vars: {}")
+    else:
+        lines.append("aerolitctl_ansible_managed_hosts: {}")
+
+    lines.append("")
+    lines.append("# AeroLIT-managed global Ansible defaults")
+    lines.append("# These are active Ansible variables because this file is under group_vars/all.")
+    lines.append("# {}".format(HOST_VAR_PREFERENCE_WARNING))
+
+    if inventory.global_vars:
+        lines.extend(render_yaml_vars(inventory.global_vars))
+    else:
+        lines.append("# No global defaults are currently managed by aerolitctl.")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_group_vars(group, variables):
+    """Render an aerolitctl-managed group_vars/<group>/aerolitctl.yml file."""
+    group = normalize_group_name(group)
+
+    lines = [
+        "---",
+        GROUP_VARS_MARKER,
+        "# Created by aerolitctl configure ansible.",
+        "# Managed group: {}".format(group),
+        "# This file lives under group_vars/{}, so vars here apply to that group.".format(group),
+        "# Do not store secrets in this file.",
+        "",
+    ]
+
+    if variables:
+        lines.extend(render_yaml_vars(variables))
+    else:
+        lines.append("# No group defaults are currently managed by aerolitctl.")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def existing_managed_group_var_groups(bundle_path):
+    """Return groups with an existing aerolitctl-managed group vars file."""
+    root = group_vars_root_dir(bundle_path)
+    groups = []
+
+    if not root.exists():
+        return groups
+
+    for path in root.glob("*/{}".format(GROUP_VARS_FILENAME)):
+        group = path.parent.name
+
+        if group in RESERVED_GROUP_NAMES:
+            continue
+
+        if file_looks_managed(path, "group_vars"):
+            groups.append(group)
+
+    return groups
+
+
+def write_group_var_files(bundle_path, inventory, dry_run=False, force=False, no_backup=False):
+    """Write or remove aerolitctl-managed group vars files."""
+    groups = []
+
+    for group in existing_managed_group_var_groups(bundle_path):
+        if group not in groups:
+            groups.append(group)
+
+    for group in inventory.group_vars.keys():
+        if group not in groups:
+            groups.append(group)
+
+    for group in groups:
+        path = aerolitctl_group_vars_file(bundle_path, group)
+        variables = inventory.group_vars.get(group, OrderedDict())
+        label = "group vars {}".format(group)
+
+        if variables:
+            write_if_changed(
+                path,
+                render_group_vars(group, variables),
+                dry_run=dry_run,
+                label=label,
+                managed_kind="group_vars",
+                force=force,
+                no_backup=no_backup,
+            )
+        else:
+            remove_if_exists(
+                path,
+                dry_run=dry_run,
+                label=label,
+                managed_kind="group_vars",
+                force=force,
+                no_backup=no_backup,
+            )
+
+
+def build_host_variables(args):
+    """Build host variables from CLI args."""
+    variables = OrderedDict()
+
+    ansible_host = getattr(args, "ansible_host", None)
+    if ansible_host:
+        variables["ansible_host"] = ansible_host
+
+    ansible_user = getattr(args, "ansible_user", None)
+    if ansible_user:
+        variables["ansible_user"] = ansible_user
+
+    ansible_port = getattr(args, "ansible_port", None)
+    if ansible_port:
+        variables["ansible_port"] = str(ansible_port)
+
+    ssh_key = getattr(args, "ssh_key", None)
+    if ssh_key:
+        variables["ansible_ssh_private_key_file"] = ssh_key
+
+    connection = getattr(args, "connection", None)
+    if connection:
+        variables["ansible_connection"] = connection
+
+    python_interpreter = getattr(args, "python_interpreter", None)
+    if python_interpreter:
+        variables["ansible_python_interpreter"] = python_interpreter
+
+    become = getattr(args, "become", None)
+    if become is not None:
+        variables["ansible_become"] = bool_text(become)
+
+    for item in getattr(args, "host_var", None) or []:
+        key, value = parse_key_value(
+            item,
+            allow_sensitive=getattr(args, "allow_sensitive_vars", False),
+        )
+        variables[key] = value
+
+    return variables
+
+
+def parse_cluster_host_item(item):
+    """Return cluster/host pair from argparse nargs=2 or cluster:host syntax."""
+    if isinstance(item, (list, tuple)):
+        if len(item) != 2:
+            raise AnsibleConfigError(
+                "K3s host helper expects CLUSTER HOST, got: {}".format(item)
+            )
+        return item[0], item[1]
+
+    value = str(item)
+    if ":" not in value:
+        raise AnsibleConfigError(
+            "K3s host helper expects CLUSTER:HOST or CLUSTER HOST, got: {}".format(
+                value
+            )
+        )
+
+    cluster, host = value.split(":", 1)
+    return cluster, host
+
+
+def add_host_range(inventory, args):
+    """Add a generated host range."""
+    prefix = getattr(args, "add_host_range", None)
+    if not prefix:
+        return
+
+    start = getattr(args, "range_start", None)
+    end = getattr(args, "range_end", None)
+    ip_start = getattr(args, "ip_start", None)
+    width = getattr(args, "host_number_width", 3)
+
+    if start is None or end is None:
+        raise AnsibleConfigError(
+            "--add-host-range requires --range-start and --range-end"
+        )
+
+    if start < 0 or end < 0:
+        raise AnsibleConfigError("--range-start and --range-end must be zero or greater")
+
+    if end < start:
+        raise AnsibleConfigError("--range-end must be greater than or equal to --range-start")
+
+    if width < 1:
+        raise AnsibleConfigError("--host-number-width must be 1 or greater")
+
+    if not ip_start:
+        raise AnsibleConfigError("--add-host-range requires --ip-start")
+
+    total = end - start + 1
+    if total > 512:
+        raise AnsibleConfigError(
+            "Refusing to generate more than 512 hosts at once. Requested: {}".format(
+                total
+            )
+        )
+
+    try:
+        first_ip = ipaddress.ip_address(ip_start)
+    except ValueError as exc:
+        raise AnsibleConfigError("Invalid --ip-start: {}".format(exc))
+
+    groups = getattr(args, "group", None) or [DEFAULT_GROUP]
+    base_variables = build_host_variables(args)
+
+    for offset, number in enumerate(range(start, end + 1)):
+        host = "{}{}".format(prefix, str(number).zfill(width))
+        variables = OrderedDict(base_variables)
+
+        try:
+            variables["ansible_host"] = str(first_ip + offset)
+        except ValueError as exc:
+            raise AnsibleConfigError("Generated IP range is invalid: {}".format(exc))
+
+        inventory.add_host(host, groups=groups, variables=variables)
+
+
+def apply_standard_groups(inventory):
+    """Ensure standard AeroLIT groups exist."""
+    for group in STANDARD_GROUPS:
+        inventory.ensure_group(group)
+
+
+def apply_local_controller(inventory):
+    """Ensure localhost is present for controller/PXE local groups."""
+    inventory.add_host(
+        "localhost",
+        groups=LOCAL_CONTROLLER_GROUPS,
+        variables=OrderedDict(
+            [
+                ("ansible_connection", "local"),
+            ]
+        ),
+    )
+
+
+def apply_cli_changes(inventory, args):
+    """Apply requested CLI changes to the managed inventory."""
+    if getattr(args, "ensure_standard_groups", False):
+        apply_standard_groups(inventory)
+
+    if getattr(args, "local_controller", False):
+        apply_local_controller(inventory)
+
+    for item in getattr(args, "set_global_var", None) or []:
+        key, value = parse_var_assignment(
+            item,
+            allow_sensitive=getattr(args, "allow_sensitive_vars", False),
+        )
+        inventory.set_global_var(key, value)
+
+    for key in getattr(args, "remove_global_var", None) or []:
+        inventory.remove_global_var(key)
+
+    for group in getattr(args, "add_group", None) or []:
+        inventory.ensure_group(group)
+
+    for group in getattr(args, "remove_group", None) or []:
+        inventory.remove_group(group)
+
+    for item in getattr(args, "add_child_group", None) or []:
+        parent, child = item
+        inventory.ensure_child_group(parent, child)
+
+    for item in getattr(args, "remove_child_group", None) or []:
+        parent, child = item
+        inventory.remove_child_group(parent, child)
+
+    for cluster in getattr(args, "add_k3s_cluster", None) or []:
+        inventory.add_k3s_cluster(cluster)
+
+    groups = getattr(args, "group", None) or [DEFAULT_GROUP]
+    variables = build_host_variables(args)
+
+    for host in getattr(args, "add_host", None) or []:
+        inventory.add_host(host, groups=groups, variables=variables)
+
+    for item in getattr(args, "add_k3s_server", None) or []:
+        cluster, host = parse_cluster_host_item(item)
+        inventory.add_k3s_host(cluster, "server", host, variables=variables)
+
+    for item in getattr(args, "add_k3s_agent", None) or []:
+        cluster, host = parse_cluster_host_item(item)
+        inventory.add_k3s_host(cluster, "agent", host, variables=variables)
+
+    add_host_range(inventory, args)
+
+    for item in getattr(args, "remove_host_from_group", None) or []:
+        host, group = item
+        inventory.remove_host_from_group(host, group)
+
+    for host in getattr(args, "remove_host", None) or []:
+        inventory.remove_host(host)
+
+    for item in getattr(args, "set_host_var", None) or []:
+        host, raw_key_value = item
+        key, value = parse_key_value(
+            raw_key_value,
+            allow_sensitive=getattr(args, "allow_sensitive_vars", False),
+        )
+        inventory.set_host_var(host, key, value)
+
+    for item in getattr(args, "set_group_var", None) or []:
+        group, raw_key_value = item
+        key, value = parse_var_assignment(
+            raw_key_value,
+            allow_sensitive=getattr(args, "allow_sensitive_vars", False),
+        )
+        inventory.set_group_var(group, key, value)
+
+    for item in getattr(args, "remove_host_var", None) or []:
+        host, key = item
+        inventory.remove_host_var(host, key)
+
+    for item in getattr(args, "remove_group_var", None) or []:
+        group, key = item
+        inventory.remove_group_var(group, key)
+
+    inventory.prune_orphan_host_vars()
+
+
+def has_write_actions(args):
+    """Return True if CLI args request a managed-file change."""
+    action_fields = [
+        "guided",
+        "ensure_standard_groups",
+        "local_controller",
+        "set_global_var",
+        "remove_global_var",
+        "add_group",
+        "remove_group",
+        "add_child_group",
+        "remove_child_group",
+        "add_k3s_cluster",
+        "add_k3s_server",
+        "add_k3s_agent",
+        "add_host",
+        "remove_host",
+        "remove_host_from_group",
+        "add_host_range",
+        "set_host_var",
+        "set_group_var",
+        "remove_host_var",
+        "remove_group_var",
+    ]
+
+    for field in action_fields:
+        value = getattr(args, field, None)
+        if value:
+            return True
+
+    return False
+
+
+def prompt(default=None, label=None):
+    """Prompt for a value."""
+    if default is None:
+        value = input("{}: ".format(label)).strip()
+    else:
+        value = input("{} [{}]: ".format(label, default)).strip()
+        if not value:
+            value = default
+
+    return value
+
+
+def prompt_yes_no(label, default=False):
+    """Prompt for yes/no."""
+    suffix = "[Y/n]" if default else "[y/N]"
+
+    while True:
+        value = input("{} {}: ".format(label, suffix)).strip().lower()
+        if not value:
+            return default
+        if value in ("y", "yes"):
+            return True
+        if value in ("n", "no"):
+            return False
+        print("Please answer yes or no.")
+
+
+def run_guided(inventory):
+    """Interactive configure ansible helper."""
+    print("")
+    print("AeroLIT configure ansible guided mode")
+    print("")
+
+    if prompt_yes_no("Ensure standard AeroLIT groups?", default=True):
+        apply_standard_groups(inventory)
+
+    if prompt_yes_no("Add localhost to ansible_controller and pxe_server groups?", default=True):
+        apply_local_controller(inventory)
+
+    if prompt_yes_no("Add a managed K3s cluster group structure?", default=False):
+        cluster = prompt(default="cluster1", label="K3s cluster name")
+        inventory.add_k3s_cluster(cluster)
+
+    groups_value = prompt(
+        default="provisioned,workstations",
+        label="Additional groups to ensure, comma-separated",
+    )
+    for group in [item.strip() for item in groups_value.split(",") if item.strip()]:
+        inventory.ensure_group(group)
+
+    while prompt_yes_no("Add a managed host?", default=False):
+        host = prompt(label="Host alias")
+        ansible_host = prompt(label="ansible_host/IP")
+        group_value = prompt(default=DEFAULT_GROUP, label="Groups, comma-separated")
+        ansible_user = prompt(default="", label="ansible_user, blank to skip")
+        become = prompt_yes_no("Set ansible_become=true for this host?", default=False)
+
+        variables = OrderedDict()
+
+        if ansible_host:
+            variables["ansible_host"] = ansible_host
+
+        if ansible_user:
+            variables["ansible_user"] = ansible_user
+
+        if become:
+            variables["ansible_become"] = "true"
+
+        host_groups = [
+            item.strip()
+            for item in group_value.split(",")
+            if item.strip()
+        ]
+
+        inventory.add_host(host, groups=host_groups, variables=variables)
+
+
+def scan_existing_inventory_aliases(inventory_dir, managed_inventory_file):
+    """Return host aliases found outside the aerolitctl-managed inventory."""
+    inventory_dir = Path(inventory_dir)
+    managed_inventory_file = Path(managed_inventory_file)
+    aliases = {}
+
+    if not inventory_dir.exists():
+        return aliases
+
+    for path in inventory_dir.rglob("*.ini"):
+        if path == managed_inventory_file:
+            continue
+
+        try:
+            content = read_text(path)
+        except OSError:
+            continue
+
+        current_section_type = "hosts"
+
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+
+            if not line or line.startswith("#"):
+                continue
+
+            section_match = re.match(r"^\[([^\]]+)\]$", line)
+            if section_match:
+                section_name = section_match.group(1).strip()
+                if section_name.endswith(":vars") or section_name.endswith(":children"):
+                    current_section_type = "non_hosts"
+                else:
+                    current_section_type = "hosts"
+                continue
+
+            if current_section_type != "hosts":
+                continue
+
+            if "=" in line and " " not in line:
+                continue
+
+            try:
+                parts = split_inventory_line(line)
+            except AnsibleConfigError:
+                continue
+
+            if not parts:
+                continue
+
+            alias = parts[0].strip()
+
+            if not alias or alias.startswith("#"):
+                continue
+
+            aliases.setdefault(alias, []).append(path)
+
+    return aliases
+
+
+def command_output(command, env=None):
+    """Return rc/stdout/stderr for a command."""
+    try:
+        process = subprocess.Popen(
+            command,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+        stdout, stderr = process.communicate()
+        return process.returncode, stdout or "", stderr or ""
+    except OSError as exc:
+        return 127, "", str(exc)
+
+
+def detect_child_cycles(children):
+    """Return child-group cycle descriptions, if any."""
+    cycles = []
+    visiting = set()
+    visited = set()
+
+    def visit(node, path):
+        if node in visiting:
+            cycle_start = path.index(node) if node in path else 0
+            cycle = path[cycle_start:]
+            rendered = " -> ".join(cycle)
+            if rendered not in cycles:
+                cycles.append(rendered)
+            return
+
+        if node in visited:
+            return
+
+        visiting.add(node)
+        for child in children.get(node, []):
+            visit(child, path + [child])
+        visiting.remove(node)
+        visited.add(node)
+
+    for parent in children.keys():
+        visit(parent, [parent])
+
+    return cycles
+
+
+def validate_managed_inventory(
+    bundle_path,
+    inventory,
+    run_ansible_inventory=False,
+    force=False,
+    check_files=True,
+):
+    """Validate managed Ansible configuration."""
+    bundle_path = Path(bundle_path)
+    report = AnsibleReport()
+
+    inventory_dir = ansible_inventory_dir(bundle_path)
+    managed_inventory = aerolitctl_inventory_file(bundle_path)
+    group_vars_all = ansible_group_vars_all_dir(bundle_path)
+    generated_vars = aerolitctl_ansible_generated_vars_file(bundle_path)
+    cfg_file = ansible_cfg_file(bundle_path)
+
+    if inventory_dir.exists():
+        report.add_ok("Inventory directory found: {}".format(inventory_dir))
+    else:
+        report.add_error("Inventory directory missing: {}".format(inventory_dir))
+
+    if cfg_file.exists():
+        report.add_ok("ansible.cfg found: {}".format(cfg_file))
+    else:
+        report.add_warning("ansible.cfg not found: {}".format(cfg_file))
+
+    if group_vars_all.exists():
+        report.add_ok("group_vars/all directory found: {}".format(group_vars_all))
+    else:
+        report.add_error("group_vars/all directory missing: {}".format(group_vars_all))
+
+    if check_files:
+        if managed_inventory.exists():
+            if file_looks_managed(managed_inventory, "inventory"):
+                report.add_ok("Managed inventory file found: {}".format(managed_inventory))
+            elif force:
+                report.add_warning(
+                    "Managed inventory path will be replaced with --force: {}".format(
+                        managed_inventory
+                    )
+                )
+            else:
+                report.add_error(
+                    "Managed inventory path exists but is missing aerolitctl markers: {}".format(
+                        managed_inventory
+                    )
+                )
+        else:
+            report.add_warning("Managed inventory file not created yet: {}".format(managed_inventory))
+
+        if generated_vars.exists():
+            if file_looks_managed(generated_vars, "generated_vars"):
+                report.add_ok("Generated Ansible vars file found: {}".format(generated_vars))
+            elif force:
+                report.add_warning(
+                    "Generated Ansible vars path will be replaced with --force: {}".format(
+                        generated_vars
+                    )
+                )
+            else:
+                report.add_error(
+                    "Generated Ansible vars path exists but is missing aerolitctl markers: {}".format(
+                        generated_vars
+                    )
+                )
+        else:
+            report.add_warning("Generated Ansible vars file not created yet: {}".format(generated_vars))
+
+        for group in inventory.group_vars.keys():
+            path = aerolitctl_group_vars_file(bundle_path, group)
+            if path.exists() and not file_looks_managed(path, "group_vars"):
+                if force:
+                    report.add_warning(
+                        "Group vars path will be replaced with --force: {}".format(path)
+                    )
+                else:
+                    report.add_error(
+                        "Group vars path exists but is missing aerolitctl markers: {}".format(path)
+                    )
+
+    existing_aliases = scan_existing_inventory_aliases(inventory_dir, managed_inventory)
+
+    for host in inventory.all_hosts():
+        variables = inventory.host_vars.get(host, OrderedDict())
+        connection = variables.get("ansible_connection")
+
+        if host != "localhost" and connection != "local" and "ansible_host" not in variables:
+            report.add_warning("Managed host has no ansible_host/IP: {}".format(host))
+
+        if host in existing_aliases:
+            report.add_warning(
+                "Managed host '{}' also appears in existing inventory file(s): {}".format(
+                    host,
+                    ", ".join(str(path) for path in existing_aliases[host]),
+                )
+            )
+
+    for host in inventory.host_vars.keys():
+        if not inventory.host_groups(host):
+            report.add_error("Managed host vars are orphaned for host: {}".format(host))
+
+    host_specific_vars = host_specific_var_names(inventory)
+    if host_specific_vars:
+        report.add_warning(
+            "{} Host-specific vars found: {}".format(
+                HOST_VAR_PREFERENCE_WARNING,
+                ", ".join(host_specific_vars),
+            )
+        )
+
+    for parent, children in inventory.children.items():
+        if parent not in inventory.groups:
+            report.add_error("Child-group parent is missing as managed group: {}".format(parent))
+
+        for child in children:
+            if child not in inventory.groups:
+                report.add_error(
+                    "Child-group '{}' references missing managed group: {}".format(
+                        parent,
+                        child,
+                    )
+                )
+
+    for cycle in detect_child_cycles(inventory.children):
+        report.add_error("Managed child-group cycle detected: {}".format(cycle))
+
+    child_parent_groups = set(inventory.children.keys())
+    child_groups = set(inventory.all_child_groups())
+
+    for group in inventory.groups.keys():
+        has_hosts = bool(inventory.groups[group])
+        has_children = group in child_parent_groups
+        is_child = group in child_groups
+        has_vars = group in inventory.group_vars and bool(inventory.group_vars[group])
+
+        if not has_hosts and not has_children and not is_child and not has_vars:
+            report.add_warning("Managed group is empty: {}".format(group))
+
+    if run_ansible_inventory:
+        if shutil.which("ansible-inventory") is None:
+            report.add_warning("ansible-inventory not found; inventory parser check skipped")
+        else:
+            env = os.environ.copy()
+            if cfg_file.exists():
+                env["ANSIBLE_CONFIG"] = str(cfg_file)
+
+            code, stdout, stderr = command_output(
+                [
+                    "ansible-inventory",
+                    "-i",
+                    str(inventory_dir),
+                    "--list",
+                ],
+                env=env,
+            )
+
+            if code == 0:
+                report.add_ok("ansible-inventory --list completed successfully")
+            else:
+                report.add_warning(
+                    "ansible-inventory --list returned rc={}:\n{}".format(
+                        code,
+                        stderr or stdout,
+                    )
+                )
+
+    return report
+
+
+def print_inventory_summary(bundle_path, inventory):
+    """Print a readable summary of managed Ansible state."""
+    bundle_path = Path(bundle_path)
+
+    print("AeroLIT managed Ansible configuration")
+    print("")
+    print("{:<28} {}".format("Bundle path:", bundle_path))
+    print("{:<28} {}".format("Inventory directory:", ansible_inventory_dir(bundle_path)))
+    print("{:<28} {}".format("Managed inventory:", aerolitctl_inventory_file(bundle_path)))
+    print("{:<28} {}".format("Generated vars:", aerolitctl_ansible_generated_vars_file(bundle_path)))
+    print("{:<28} {}".format("Ansible config:", ansible_cfg_file(bundle_path)))
+    print("")
+    print("Host var guidance:")
+    print("  {}".format(HOST_VAR_PREFERENCE_WARNING))
+    print("")
+
+    print("Managed global vars:")
+    if inventory.global_vars:
+        for key, value in inventory.global_vars.items():
+            print("  - {}".format(display_var_text(key, value)))
+    else:
+        print("  none")
+
+    print("")
+    print("Managed group vars:")
+    if inventory.group_vars:
+        for group, variables in inventory.group_vars.items():
+            rendered = [
+                display_var_text(key, value)
+                for key, value in variables.items()
+            ]
+            print("  - {}: {}".format(group, ", ".join(rendered) if rendered else "none"))
+    else:
+        print("  none")
+
+    print("")
+    print("Managed child groups:")
+    if inventory.children:
+        for parent, children in inventory.children.items():
+            print("  - {} -> {}".format(parent, ", ".join(children) if children else "none"))
+    else:
+        print("  none")
+
+    print("")
+    print("Managed groups:")
+    if inventory.groups:
+        for group, hosts in inventory.groups.items():
+            child_count = len(inventory.children.get(group, []))
+            var_count = len(inventory.group_vars.get(group, {}))
+            print(
+                "  - {} (hosts: {}, children: {}, vars: {})".format(
+                    group,
+                    len(hosts),
+                    child_count,
+                    var_count,
+                )
+            )
+    else:
+        print("  none")
+
+    print("")
+    print("Managed hosts:")
+    hosts = inventory.all_hosts()
+    if hosts:
+        for host in hosts:
+            groups = inventory.host_groups(host)
+            variables = inventory.host_vars.get(host, OrderedDict())
+            print("  - {}".format(host))
+            print("      groups: {}".format(", ".join(groups) if groups else "none"))
+
+            if variables:
+                rendered_vars = [
+                    display_var_text(key, value)
+                    for key, value in variables.items()
+                ]
+                print("      vars: {}".format(", ".join(rendered_vars)))
+            else:
+                print("      vars: none")
+    else:
+        print("  none")
+
+
+def run_configure_ansible(args):
+    """Run aerolitctl configure ansible."""
+    bundle_path = getattr(args, "bundle_path", None)
+
+    if bundle_path:
+        bundle_path = Path(bundle_path)
+    else:
+        bundle_path = configured_bundle_path()
+
+    inventory_file = aerolitctl_inventory_file(bundle_path)
+    generated_vars_file = aerolitctl_ansible_generated_vars_file(bundle_path)
+    force = getattr(args, "force", False)
+
+    if inventory_file.exists() and not file_looks_managed(inventory_file, "inventory"):
+        if not force:
+            raise AnsibleConfigError(
+                "{} exists but is not marked as aerolitctl-managed. "
+                "Move it, add the managed markers, or rerun with --force to replace it.".format(
+                    inventory_file
+                )
+            )
+        inventory = ManagedInventory()
+        load_global_vars(generated_vars_file, inventory, force=force)
+        load_group_vars(bundle_path, inventory, force=force)
+    else:
+        inventory = load_managed_state(bundle_path, force=force)
+
+    if getattr(args, "guided", False):
+        run_guided(inventory)
+
+    apply_cli_changes(inventory, args)
+
+    show_only = getattr(args, "show", False)
+    validate_requested = getattr(args, "validate", False)
+    dry_run = getattr(args, "dry_run", False)
+    no_backup = getattr(args, "no_backup", False)
+
+    if not has_write_actions(args) and not show_only and not validate_requested:
+        show_only = True
+
+    if show_only:
+        print_inventory_summary(bundle_path, inventory)
+
+    if has_write_actions(args):
+        print("")
+        print("AeroLIT configure ansible plan")
+        print("")
+        print("{:<28} {}".format("Dry run:", dry_run))
+        print("{:<28} {}".format("Bundle path:", bundle_path))
+        print("{:<28} {}".format("Managed inventory:", inventory_file))
+        print("{:<28} {}".format("Generated vars:", generated_vars_file))
+        print("{:<28} {}".format("Group vars root:", group_vars_root_dir(bundle_path)))
+        print("{:<28} {}".format("Backups enabled:", not no_backup))
+        print("{:<28} {}".format("Force overwrite:", force))
+
+        if host_var_options_requested(args):
+            print("")
+            print("Host var guidance:")
+            print("  {}".format(HOST_VAR_PREFERENCE_WARNING))
+
+        print("")
+
+        pre_write_report = validate_managed_inventory(
+            bundle_path,
+            inventory,
+            run_ansible_inventory=False,
+            force=force,
+            check_files=True,
+        )
+
+        if pre_write_report.errors:
+            print("")
+            print("Refusing to write invalid managed Ansible configuration.")
+            print("")
+            pre_write_report.print_report()
+            return pre_write_report.exit_code()
+
+        inventory_content = render_managed_inventory(inventory)
+        generated_vars_content = render_generated_vars(inventory)
+
+        write_if_changed(
+            inventory_file,
+            inventory_content,
+            dry_run=dry_run,
+            label="managed inventory",
+            managed_kind="inventory",
+            force=force,
+            no_backup=no_backup,
+        )
+        write_if_changed(
+            generated_vars_file,
+            generated_vars_content,
+            dry_run=dry_run,
+            label="generated Ansible vars/global vars",
+            managed_kind="generated_vars",
+            force=force,
+            no_backup=no_backup,
+        )
+        write_group_var_files(
+            bundle_path,
+            inventory,
+            dry_run=dry_run,
+            force=force,
+            no_backup=no_backup,
+        )
+
+        if dry_run:
+            print("")
+            print("Dry run complete. No files were changed.")
+        else:
+            print("")
+            print("AeroLIT Ansible configuration saved.")
+
+    if validate_requested or has_write_actions(args) or show_only:
+        print("")
+        report = validate_managed_inventory(
+            bundle_path,
+            inventory,
+            run_ansible_inventory=getattr(args, "ansible_inventory_check", False),
+            force=force,
+            check_files=True,
+        )
+        report.print_report()
+        return report.exit_code()
+
+    return 0
