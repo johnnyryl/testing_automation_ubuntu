@@ -1,0 +1,219 @@
+"""Default paths for aerolitctl."""
+
+from pathlib import Path
+
+
+DEFAULT_BUNDLE_PATH = Path("/opt/aerolit/aerolit-bundle")
+
+CONFIG_DIR = Path("/etc/aerolit")
+CONFIG_FILE = CONFIG_DIR / "aerolitctl.yml"
+
+AEROLITCTL_GROUP_VARS_FILENAME = "aerolitctl.yml"
+
+OVERRIDES_DIR = CONFIG_DIR / "overrides"
+OVERRIDE_KICKSTARTS_DIR = OVERRIDES_DIR / "kickstarts"
+
+STATE_DIR = Path("/var/lib/aerolit")
+STATE_FILE = STATE_DIR / "state.yml"
+RENDERED_DIR = STATE_DIR / "rendered"
+BACKUP_DIR = STATE_DIR / "backups"
+
+LOG_DIR = Path("/var/log/aerolit")
+
+
+def required_control_directories():
+    """Return non-bundle directories required by aerolitctl."""
+    return [
+        CONFIG_DIR,
+        OVERRIDES_DIR,
+        OVERRIDE_KICKSTARTS_DIR,
+        STATE_DIR,
+        RENDERED_DIR,
+        BACKUP_DIR,
+        LOG_DIR,
+    ]
+
+
+def bundle_manifest_file(bundle_path):
+    """Return the AeroLIT bundle manifest file path."""
+    return Path(bundle_path) / "aerolit-bundle.yml"
+
+
+def bundle_repos_dir(bundle_path):
+    """Return bundle repos directory."""
+    return Path(bundle_path) / "repos"
+
+
+def bundle_files_dir(bundle_path):
+    """Return bundle files directory."""
+    return Path(bundle_path) / "files"
+
+
+def bundle_extracted_isos_dir(bundle_path):
+    """Return bundle extracted ISOs directory."""
+    return Path(bundle_path) / "extracted_isos"
+
+
+def bundle_bootstrap_file(bundle_path):
+    """Return compatibility bootstrap.sh path."""
+    return Path(bundle_path) / "bootstrap.sh"
+
+
+def collections_hub_path(bundle_path):
+    """Return collections-hub path for a bundle."""
+    return Path(bundle_path) / "collections-hub"
+
+
+def ansible_dir(bundle_path):
+    """Return active collections-hub Ansible directory."""
+    return collections_hub_path(bundle_path) / "ansible"
+
+
+def templates_dir(bundle_path):
+    """Return collections-hub templates directory."""
+    return collections_hub_path(bundle_path) / "templates"
+
+
+def ansible_cfg_file(bundle_path):
+    """Return active ansible.cfg path."""
+    return ansible_dir(bundle_path) / "ansible.cfg"
+
+
+def ansible_cfg_template_file(bundle_path):
+    """Return ansible.cfg template path."""
+    return ansible_dir(bundle_path) / "ansible_template.cfg"
+
+
+def ansible_inventory_dir(bundle_path):
+    """Return active Ansible inventory directory path."""
+    return ansible_dir(bundle_path) / "inventory"
+
+
+def ansible_inventory_template_dir(bundle_path):
+    """Return inventory template directory path."""
+    return ansible_dir(bundle_path) / "inventory_template"
+
+
+def ansible_group_vars_dir(bundle_path):
+    """Return active group_vars directory."""
+    return ansible_dir(bundle_path) / "group_vars"
+
+
+def ansible_group_vars_all_dir(bundle_path):
+    """Return active group_vars/all directory."""
+    return ansible_group_vars_dir(bundle_path) / "all"
+
+
+def ansible_group_vars_template_dir(bundle_path):
+    """Return group_vars template directory."""
+    return ansible_dir(bundle_path) / "group_vars_template"
+
+
+def aerolitctl_server_generated_vars_file(bundle_path):
+    """Return aerolitctl generated server vars path inside active group_vars/all."""
+    return ansible_group_vars_all_dir(bundle_path) / "aerolitctl_server_generated.yml"
+
+
+def aerolitctl_ansible_generated_vars_file(bundle_path):
+    """Return aerolitctl generated Ansible vars path inside active group_vars/all."""
+    return ansible_group_vars_all_dir(bundle_path) / "aerolitctl_ansible_generated.yml"
+
+
+def aerolitctl_group_vars_file(bundle_path, group):
+    """Return aerolitctl managed group vars file path for one group."""
+    return (
+        ansible_group_vars_dir(bundle_path)
+        / str(group)
+        / AEROLITCTL_GROUP_VARS_FILENAME
+    )
+
+
+def aerolitctl_inventory_file(bundle_path):
+    """Return aerolitctl managed inventory fragment path."""
+    return ansible_inventory_dir(bundle_path) / "90_aerolitctl.ini"
+
+
+def pxe_server_playbook(bundle_path):
+    """Return PXE server playbook path."""
+    return ansible_dir(bundle_path) / "pxe_server.yml"
+
+
+def ansible_controller_playbook(bundle_path):
+    """Return Ansible controller playbook path."""
+    return ansible_dir(bundle_path) / "ansible_controller.yml"
+
+
+def sync_preserve_file(bundle_path):
+    """Return collections-hub .sync-preserve path."""
+    return collections_hub_path(bundle_path) / ".sync-preserve"
+
+
+def gitlab_ci_file(bundle_path):
+    """Return collections-hub .gitlab-ci.yml path."""
+    return collections_hub_path(bundle_path) / ".gitlab-ci.yml"
+
+
+def provision_gitlab_template(bundle_path):
+    """Return provision workstation GitLab CI template path."""
+    return (
+        templates_dir(bundle_path)
+        / "provision-workstation-config"
+        / "gitlab-ci-template.yml"
+    )
+
+
+def scheduled_gitlab_template(bundle_path):
+    """Return scheduled network updater GitLab CI template path."""
+    return (
+        templates_dir(bundle_path)
+        / "scheduled-network-updater"
+        / "gitlab-ci-template.yml"
+    )
+
+
+def system_update_gitlab_template(bundle_path):
+    """Return system update GitLab CI template path."""
+    return templates_dir(bundle_path) / "system-update" / "gitlab-ci-template.yml"
+
+
+def stig_gitlab_template(bundle_path):
+    """Return STIG compliance GitLab CI template path."""
+    return templates_dir(bundle_path) / "stig-compliance" / "gitlab-ci-template.yml"
+
+
+def initialization_backup_root(bundle_path):
+    """Return collections-hub initialization backup root."""
+    return collections_hub_path(bundle_path) / ".initialization-backups"
+
+
+def bundle_derived_paths(bundle_path):
+    """Return standard paths derived from the bundle root."""
+    bundle_path = Path(bundle_path)
+
+    return {
+        "bundle": str(bundle_path),
+        "manifest": str(bundle_manifest_file(bundle_path)),
+        "collections_hub": str(collections_hub_path(bundle_path)),
+        "repos": str(bundle_repos_dir(bundle_path)),
+        "files": str(bundle_files_dir(bundle_path)),
+        "extracted_isos": str(bundle_extracted_isos_dir(bundle_path)),
+        "bootstrap": str(bundle_bootstrap_file(bundle_path)),
+        "ansible": str(ansible_dir(bundle_path)),
+        "ansible_cfg": str(ansible_cfg_file(bundle_path)),
+        "ansible_inventory": str(ansible_inventory_dir(bundle_path)),
+        "ansible_group_vars": str(ansible_group_vars_dir(bundle_path)),
+        "ansible_group_vars_all": str(ansible_group_vars_all_dir(bundle_path)),
+        "aerolitctl_inventory": str(aerolitctl_inventory_file(bundle_path)),
+        "aerolitctl_group_vars_filename": AEROLITCTL_GROUP_VARS_FILENAME,
+        "aerolitctl_server_generated_vars": str(
+            aerolitctl_server_generated_vars_file(bundle_path)
+        ),
+        "aerolitctl_ansible_generated_vars": str(
+            aerolitctl_ansible_generated_vars_file(bundle_path)
+        ),
+        "pxe_server_playbook": str(pxe_server_playbook(bundle_path)),
+        "ansible_controller_playbook": str(ansible_controller_playbook(bundle_path)),
+        "sync_preserve": str(sync_preserve_file(bundle_path)),
+        "gitlab_ci": str(gitlab_ci_file(bundle_path)),
+        "initialization_backups": str(initialization_backup_root(bundle_path)),
+    }
