@@ -14,10 +14,12 @@ This is a broad manual smoke/regression test for the work around:
 - bundle manifest creation/validation/idempotency behavior
 - configure ansible managed inventory/group_vars behavior
 
-It intentionally runs real `aerolitctl configure server` commands because those
-are the only way to confirm saved config and generated vars behavior. By default
-it restores the original config, state, generated vars, manifest, sync files, CI file,
-and managed Ansible files before exiting.
+It intentionally runs real `aerolitctl configure server`,
+`aerolitctl configure ansible`, and `aerolitctl configure init` commands because
+those are the only way to confirm saved config, generated vars, managed Ansible
+files, and bundle manifest behavior. By default it restores the original config,
+state, generated vars, manifest, sync files, CI file, and managed Ansible files
+before exiting.
 
 Recommended location:
   tools/aerolitctl_merge_readiness.py
@@ -1433,7 +1435,7 @@ def build_parser():
     parser.add_argument(
         "--skip-write-tests",
         action="store_true",
-        help="Skip real configure server and real configure init write tests.",
+        help="Skip real configure ansible, configure server, and configure init write tests.",
     )
     parser.add_argument(
         "--no-require-firewalld",
