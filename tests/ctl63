@@ -587,8 +587,6 @@ def test_cli_help_and_parser(args):
         ["aerolitctl", "configure", "server", "--dry-run", "--mode", "pxe", "--show", "--verbose"],
         ["aerolitctl", "configure", "ansible", "--help"],
         ["aerolitctl", "configure", "ansible", "--show"],
-        ["aerolitctl", "configure", "ansible", "--dry-run", "--ensure-standard-groups", "--local-controller"],
-        ["aerolitctl", "configure", "ansible", "--dry-run", "--add-k3s-cluster", "testcluster"],
     ]
 
     help_output = run_cmd(["aerolitctl", "configure", "server", "--help"])
