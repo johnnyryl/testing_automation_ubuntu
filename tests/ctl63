@@ -15,7 +15,8 @@ This is a broad manual smoke/regression test for the work around:
 
 It intentionally runs real `aerolitctl configure server` commands because those
 are the only way to confirm saved config and generated vars behavior. By default
-it restores the original config/generated vars before exiting.
+it restores the original config, state, generated vars, manifest, sync files, CI file,
+and managed Ansible files before exiting.
 
 Recommended location:
   tools/aerolitctl_merge_readiness.py
