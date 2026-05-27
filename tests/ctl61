@@ -49,7 +49,7 @@ STANDARD_GROUPS = [
     "rhel10",
     "security_baseline",
     "security_luks",
-    "k3s_cluster",
+    "kubernetes_cluster",
     "server",
     "agent",
 ]
@@ -204,26 +204,26 @@ class ManagedInventory(object):
         if not self.children[parent]:
             del self.children[parent]
 
-    def add_k3s_cluster(self, cluster):
-        """Create a managed K3s cluster child-group structure."""
+    def add_kubernetes_cluster(self, cluster):
+        """Create a managed Kubernetes cluster child-group structure."""
         cluster = normalize_group_name(cluster)
-        server_group = k3s_role_group_name("server", cluster)
-        agent_group = k3s_role_group_name("agent", cluster)
+        server_group = kubernetes_role_group_name("server", cluster)
+        agent_group = kubernetes_role_group_name("agent", cluster)
 
-        self.ensure_child_group("k3s_cluster", cluster)
+        self.ensure_child_group("kubernetes_cluster", cluster)
         self.ensure_child_group(cluster, server_group)
         self.ensure_child_group(cluster, agent_group)
         self.ensure_child_group("server", server_group)
         self.ensure_child_group("agent", agent_group)
 
-    def add_k3s_host(self, cluster, role, host, variables=None):
-        """Add a host to a managed K3s server/agent cluster group."""
-        role = normalize_k3s_role(role)
+    def add_kubernetes_host(self, cluster, role, host, variables=None):
+        """Add a host to a managed Kubernetes server/agent cluster group."""
+        role = normalize_kubernetes_role(role)
         cluster = normalize_group_name(cluster)
-        self.add_k3s_cluster(cluster)
+        self.add_kubernetes_cluster(cluster)
         self.add_host(
             host,
-            groups=[k3s_role_group_name(role, cluster)],
+            groups=[kubernetes_role_group_name(role, cluster)],
             variables=variables or {},
         )
 
@@ -416,8 +416,8 @@ def normalize_var_name(value):
     return value
 
 
-def normalize_k3s_role(value):
-    """Normalize K3s role names accepted by configure ansible."""
+def normalize_kubernetes_role(value):
+    """Normalize Kubernetes role names accepted by configure ansible."""
     value = str(value).strip().lower()
 
     if value in ("server", "servers", "control", "control_plane", "control-plane"):
@@ -427,13 +427,13 @@ def normalize_k3s_role(value):
         return "agent"
 
     raise AnsibleConfigError(
-        "Invalid K3s role '{}'. Use server or agent.".format(value)
+        "Invalid Kubernetes role '{}'. Use server or agent.".format(value)
     )
 
 
-def k3s_role_group_name(role, cluster):
-    """Return the managed role group name for a K3s cluster."""
-    role = normalize_k3s_role(role)
+def kubernetes_role_group_name(role, cluster):
+    """Return the managed role group name for a Kubernetes cluster."""
+    role = normalize_kubernetes_role(role)
     cluster = normalize_group_name(cluster)
     return "{}_{}".format(role, cluster)
 
@@ -1235,14 +1235,14 @@ def parse_cluster_host_item(item):
     if isinstance(item, (list, tuple)):
         if len(item) != 2:
             raise AnsibleConfigError(
-                "K3s host helper expects CLUSTER HOST, got: {}".format(item)
+                "Kubernetes host helper expects CLUSTER HOST, got: {}".format(item)
             )
         return item[0], item[1]
 
     value = str(item)
     if ":" not in value:
         raise AnsibleConfigError(
-            "K3s host helper expects CLUSTER:HOST or CLUSTER HOST, got: {}".format(
+            "Kubernetes host helper expects CLUSTER:HOST or CLUSTER HOST, got: {}".format(
                 value
             )
         )
@@ -1358,8 +1358,8 @@ def apply_cli_changes(inventory, args):
         parent, child = item
         inventory.remove_child_group(parent, child)
 
-    for cluster in getattr(args, "add_k3s_cluster", None) or []:
-        inventory.add_k3s_cluster(cluster)
+    for cluster in getattr(args, "add_kubernetes_cluster", None) or []:
+        inventory.add_kubernetes_cluster(cluster)
 
     groups = getattr(args, "group", None) or [DEFAULT_GROUP]
     variables = build_host_variables(args)
@@ -1367,13 +1367,13 @@ def apply_cli_changes(inventory, args):
     for host in getattr(args, "add_host", None) or []:
         inventory.add_host(host, groups=groups, variables=variables)
 
-    for item in getattr(args, "add_k3s_server", None) or []:
+    for item in getattr(args, "add_kubernetes_server", None) or []:
         cluster, host = parse_cluster_host_item(item)
-        inventory.add_k3s_host(cluster, "server", host, variables=variables)
+        inventory.add_kubernetes_host(cluster, "server", host, variables=variables)
 
-    for item in getattr(args, "add_k3s_agent", None) or []:
+    for item in getattr(args, "add_kubernetes_agent", None) or []:
         cluster, host = parse_cluster_host_item(item)
-        inventory.add_k3s_host(cluster, "agent", host, variables=variables)
+        inventory.add_kubernetes_host(cluster, "agent", host, variables=variables)
 
     add_host_range(inventory, args)
 
@@ -1423,9 +1423,9 @@ def has_write_actions(args):
         "remove_group",
         "add_child_group",
         "remove_child_group",
-        "add_k3s_cluster",
-        "add_k3s_server",
-        "add_k3s_agent",
+        "add_kubernetes_cluster",
+        "add_kubernetes_server",
+        "add_kubernetes_agent",
         "add_host",
         "remove_host",
         "remove_host_from_group",
@@ -1916,7 +1916,7 @@ def guided_common_connection_defaults(inventory, allow_sensitive=False):
         default="1",
         description=(
             "Group vars are safer for most AeroLIT use cases because they can apply "
-            "only to provisioned machines, RHEL versions, workstations, or K3s groups."
+            "only to provisioned machines, RHEL versions, workstations, or Kubernetes groups."
         ),
         help_lines=[
             "Choose group vars unless you are sure every host should use these values.",
@@ -2497,7 +2497,7 @@ def guided_manage_groups(inventory):
                 print_guided_tip(
                     [
                         "A child group relationship means hosts in the child group are also part of the parent group.",
-                        "Example: parent=k3s_cluster child=cluster1",
+                        "Example: parent=kubernetes_cluster child=cluster1",
                     ]
                 )
                 parent = prompt_required("Parent group")
@@ -2627,7 +2627,7 @@ def guided_manage_shared_vars(inventory, allow_sensitive=False):
             guided_error(exc)
 
 
-def guided_add_k3s_host(
+def guided_add_kubernetes_host(
     inventory,
     role,
     allow_sensitive=False,
@@ -2635,14 +2635,14 @@ def guided_add_k3s_host(
     locked_cluster=None,
     show_header=True,
 ):
-    """Interactively add one K3s server/agent host."""
-    role = normalize_k3s_role(role)
+    """Interactively add one Kubernetes server/agent host."""
+    role = normalize_kubernetes_role(role)
 
     if show_header:
         print_guided_section(
-            "Add K3s {} host".format(role),
+            "Add Kubernetes {} host".format(role),
             (
-                "This creates or uses the managed K3s cluster group structure "
+                "This creates or uses the managed Kubernetes cluster group structure "
                 "and adds the host to the correct server/agent role group."
             ),
         )
@@ -2651,7 +2651,7 @@ def guided_add_k3s_host(
         cluster = locked_cluster
         print("Cluster: {}".format(cluster))
     else:
-        cluster = prompt_required("K3s cluster name", default=cluster_default)
+        cluster = prompt_required("Kubernetes cluster name", default=cluster_default)
 
     host = prompt_required("Host alias")
 
@@ -2673,7 +2673,7 @@ def guided_add_k3s_host(
             variables[key] = value
 
     try:
-        inventory.add_k3s_host(
+        inventory.add_kubernetes_host(
             cluster,
             role,
             host,
@@ -2683,78 +2683,78 @@ def guided_add_k3s_host(
         guided_error(exc)
         return False
 
-    guided_ok("Added/updated K3s {} host {} to cluster {}".format(role, host, cluster))
+    guided_ok("Added/updated Kubernetes {} host {} to cluster {}".format(role, host, cluster))
     return True
 
 
-def guided_manage_k3s(inventory, allow_sensitive=False):
-    """Menu for K3s cluster management."""
+def guided_manage_kubernetes(inventory, allow_sensitive=False):
+    """Menu for Kubernetes cluster management."""
     while True:
         choice = prompt_menu(
-            "Manage K3s clusters",
+            "Manage Kubernetes clusters",
             [
-                ("1", "Add K3s cluster group structure"),
-                ("2", "Add K3s server/control-plane host"),
-                ("3", "Add K3s agent/worker host"),
-                ("4", "Add several K3s hosts to one cluster"),
+                ("1", "Add Kubernetes cluster group structure"),
+                ("2", "Add Kubernetes server/control-plane host"),
+                ("3", "Add Kubernetes agent/worker host"),
+                ("4", "Add several Kubernetes hosts to one cluster"),
                 ("b", "Back to main menu"),
             ],
             default="b",
             description=(
                 "AeroLIT creates a reusable group structure such as "
-                "k3s_cluster -> cluster1 -> server_cluster1 / agent_cluster1."
+                "kubernetes_cluster -> cluster1 -> server_cluster1 / agent_cluster1."
             ),
             inventory=inventory,
             help_lines=[
                 "Choose cluster structure first if you only want groups for now.",
-                "Choose server/control-plane for K3s server nodes.",
-                "Choose agent/worker for K3s worker nodes.",
+                "Choose server/control-plane for Kubernetes server nodes.",
+                "Choose agent/worker for Kubernetes worker nodes.",
             ],
         )
 
         try:
             if choice == "1":
-                cluster = prompt_required("K3s cluster name", default="cluster1")
-                inventory.add_k3s_cluster(cluster)
-                guided_ok("Added/ensured K3s cluster structure: {}".format(cluster))
+                cluster = prompt_required("Kubernetes cluster name", default="cluster1")
+                inventory.add_kubernetes_cluster(cluster)
+                guided_ok("Added/ensured Kubernetes cluster structure: {}".format(cluster))
 
             elif choice == "2":
-                guided_add_k3s_host(
+                guided_add_kubernetes_host(
                     inventory,
                     "server",
                     allow_sensitive=allow_sensitive,
                 )
 
             elif choice == "3":
-                guided_add_k3s_host(
+                guided_add_kubernetes_host(
                     inventory,
                     "agent",
                     allow_sensitive=allow_sensitive,
                 )
 
             elif choice == "4":
-                cluster = prompt_required("K3s cluster name", default="cluster1")
-                inventory.add_k3s_cluster(cluster)
-                guided_ok("Using K3s cluster: {}".format(cluster))
+                cluster = prompt_required("Kubernetes cluster name", default="cluster1")
+                inventory.add_kubernetes_cluster(cluster)
+                guided_ok("Using Kubernetes cluster: {}".format(cluster))
 
                 while True:
                     role_choice = prompt_menu(
-                        "Add K3s host to {}".format(cluster),
+                        "Add Kubernetes host to {}".format(cluster),
                         [
                             ("1", "Server/control-plane host"),
                             ("2", "Agent/worker host"),
-                            ("b", "Stop adding K3s hosts"),
+                            ("b", "Stop adding Kubernetes hosts"),
                         ],
                         default="b",
                         inventory=inventory,
                         help_lines=[
-                            "A K3s cluster normally needs at least one server/control-plane host.",
+                            "A Kubernetes cluster normally needs at least one server/control-plane host.",
                             "Agent/worker hosts run workloads and join the server nodes.",
                         ],
                     )
 
                     if role_choice == "1":
-                        guided_add_k3s_host(
+                        guided_add_kubernetes_host(
                             inventory,
                             "server",
                             allow_sensitive=allow_sensitive,
@@ -2763,7 +2763,7 @@ def guided_manage_k3s(inventory, allow_sensitive=False):
                         )
 
                     elif role_choice == "2":
-                        guided_add_k3s_host(
+                        guided_add_kubernetes_host(
                             inventory,
                             "agent",
                             allow_sensitive=allow_sensitive,
@@ -2827,8 +2827,8 @@ def guided_show_what_should_i_choose():
     print("  4. Manage groups and child groups")
     print("     Use this when you need extra groups or group relationships.")
     print("")
-    print("  5. Manage K3s clusters")
-    print("     Use this when the provisioned machines will form K3s clusters.")
+    print("  5. Manage Kubernetes clusters")
+    print("     Use this when the provisioned machines will form Kubernetes clusters.")
     print("")
     print("Best beginner rule:")
     print("  Inventory should mostly contain hostnames, IPs, and group membership.")
@@ -3142,7 +3142,7 @@ def run_guided(inventory, bundle_path=None, allow_sensitive=False, force=False):
     print_guided_header(
         "AeroLIT configure ansible guided mode",
         (
-            "Build the Ansible inventory, groups, K3s cluster structure, "
+            "Build the Ansible inventory, groups, Kubernetes cluster structure, "
             "and shared variables used by the Ansible controller."
         ),
     )
@@ -3150,7 +3150,7 @@ def run_guided(inventory, bundle_path=None, allow_sensitive=False, force=False):
     print("What this configures:")
     print("  - Machines Ansible manages from the controller")
     print("  - Inventory host aliases and ansible_host/IP values")
-    print("  - Groups, child groups, and K3s cluster group structure")
+    print("  - Groups, child groups, and Kubernetes cluster group structure")
     print("  - Shared Ansible defaults in group_vars/all or group_vars/<group>")
     print("")
     print("What this does not configure:")
@@ -3215,7 +3215,7 @@ def run_guided(inventory, bundle_path=None, allow_sensitive=False, force=False):
                 ("2", "Manage inventory hosts and ranges"),
                 ("3", "Manage groups and child groups"),
                 ("4", "Manage shared Ansible defaults"),
-                ("5", "Manage K3s clusters"),
+                ("5", "Manage Kubernetes clusters"),
                 ("6", "Examples and help"),
                 ("7", "Review current plan"),
                 ("8", "Validate current plan"),
@@ -3256,7 +3256,7 @@ def run_guided(inventory, bundle_path=None, allow_sensitive=False, force=False):
             )
 
         elif choice == "5":
-            guided_manage_k3s(
+            guided_manage_kubernetes(
                 inventory,
                 allow_sensitive=allow_sensitive,
             )
