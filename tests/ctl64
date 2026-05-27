@@ -13,6 +13,12 @@ AEROLITCTL_GROUP_VARS_FILENAME = "aerolitctl.yml"
 OVERRIDES_DIR = CONFIG_DIR / "overrides"
 OVERRIDE_KICKSTARTS_DIR = OVERRIDES_DIR / "kickstarts"
 
+AEROLITCTL_PXE_GENERATED_VARS_FILENAME = "aerolitctl_pxe_generated.yml"
+
+PXE_OVERRIDES_DIR = OVERRIDES_DIR / "pxe"
+PXE_OVERRIDE_PROFILES_DIR = PXE_OVERRIDES_DIR / "profiles"
+PXE_OVERRIDE_TEMPLATES_DIR = PXE_OVERRIDES_DIR / "templates"
+
 STATE_DIR = Path("/var/lib/aerolit")
 STATE_FILE = STATE_DIR / "state.yml"
 RENDERED_DIR = STATE_DIR / "rendered"
@@ -27,6 +33,9 @@ def required_control_directories():
         CONFIG_DIR,
         OVERRIDES_DIR,
         OVERRIDE_KICKSTARTS_DIR,
+        PXE_OVERRIDES_DIR,
+        PXE_OVERRIDE_PROFILES_DIR,
+        PXE_OVERRIDE_TEMPLATES_DIR,
         STATE_DIR,
         RENDERED_DIR,
         BACKUP_DIR,
@@ -117,6 +126,36 @@ def aerolitctl_server_generated_vars_file(bundle_path):
 def aerolitctl_ansible_generated_vars_file(bundle_path):
     """Return aerolitctl generated Ansible vars path inside active group_vars/all."""
     return ansible_group_vars_all_dir(bundle_path) / "aerolitctl_ansible_generated.yml"
+
+
+def aerolitctl_pxe_generated_vars_file(bundle_path):
+    """Return aerolitctl generated PXE vars path inside active group_vars/all."""
+    return (
+        ansible_group_vars_all_dir(bundle_path)
+        / AEROLITCTL_PXE_GENERATED_VARS_FILENAME
+    )
+
+
+def aerolitctl_pxe_overrides_dir():
+    """Return host-side aerolitctl PXE override root."""
+    return PXE_OVERRIDES_DIR
+
+
+def aerolitctl_pxe_profile_overrides_dir():
+    """Return host-side aerolitctl PXE profile override directory."""
+    return PXE_OVERRIDE_PROFILES_DIR
+
+
+def aerolitctl_pxe_template_overrides_dir():
+    """Return host-side aerolitctl PXE template override directory."""
+    return PXE_OVERRIDE_TEMPLATES_DIR
+
+
+def aerolitctl_pxe_profile_file(profile_id):
+    """Return host-side aerolitctl-managed PXE profile override file."""
+    return aerolitctl_pxe_profile_overrides_dir() / "{}.yml".format(
+        str(profile_id).strip()
+    )
 
 
 def aerolitctl_group_vars_file(bundle_path, group):
@@ -210,6 +249,16 @@ def bundle_derived_paths(bundle_path):
         ),
         "aerolitctl_ansible_generated_vars": str(
             aerolitctl_ansible_generated_vars_file(bundle_path)
+        ),
+        "aerolitctl_pxe_generated_vars": str(
+            aerolitctl_pxe_generated_vars_file(bundle_path)
+        ),
+        "aerolitctl_pxe_overrides": str(aerolitctl_pxe_overrides_dir()),
+        "aerolitctl_pxe_profile_overrides": str(
+            aerolitctl_pxe_profile_overrides_dir()
+        ),
+        "aerolitctl_pxe_template_overrides": str(
+            aerolitctl_pxe_template_overrides_dir()
         ),
         "pxe_server_playbook": str(pxe_server_playbook(bundle_path)),
         "ansible_controller_playbook": str(ansible_controller_playbook(bundle_path)),
