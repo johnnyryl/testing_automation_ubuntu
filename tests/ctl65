@@ -1900,6 +1900,31 @@ def print_pxe_status_summary(bundle_path):
 
     print("PXE configuration:")
     print(
+        "  Configured: {}".format(
+            "yes" if snapshot["configured"] else "no"
+        )
+    )
+
+    if not snapshot["configured"]:
+        print("  Profiles enabled: not configured yet")
+        print(
+            "  PXE overrides: {} ({})".format(
+                snapshot["override_root"],
+                "present" if snapshot["override_root_present"] else "missing",
+            )
+        )
+        print(
+            "  PXE generated vars: {} ({})".format(
+                snapshot["generated_vars"],
+                "present but not aerolitctl-managed"
+                if snapshot["generated_vars_present"]
+                else "missing",
+            )
+        )
+        print("  PXE content role mount: not configured")
+        return
+
+    print(
         "  Profiles enabled: {}".format(
             ", ".join(snapshot["enabled_profiles"])
             if snapshot["enabled_profiles"]
@@ -1958,6 +1983,23 @@ def pxe_doctor_lines(bundle_path):
     """Return PXE doctor checks as (level, message) tuples."""
     snapshot = pxe_status_snapshot(bundle_path)
     lines = []
+
+    if not snapshot["configured"] and not snapshot["generated_vars_present"]:
+        lines.append(
+            (
+                "WARN",
+                "PXE configuration has not been saved yet. Run: aerolitctl configure pxe --guided",
+            )
+        )
+        lines.append(
+            (
+                "WARN",
+                "PXE generated vars not created yet: {}".format(
+                    snapshot["generated_vars"]
+                ),
+            )
+        )
+        return lines
 
     if snapshot["generated_vars_managed"]:
         lines.append(
