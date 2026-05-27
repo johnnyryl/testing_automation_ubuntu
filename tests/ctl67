@@ -1,0 +1,530 @@
+"""Read-only status reporting for aerolitctl."""
+
+from pathlib import Path
+
+from .config import get_bundle_path, load_config
+from .paths import (
+    CONFIG_FILE,
+    aerolitctl_server_generated_vars_file,
+    ansible_controller_playbook,
+    collections_hub_path,
+    pxe_server_playbook,
+)
+from .server import (
+    DEFAULT_HTTP_PORT,
+    interface_has_ip,
+    interface_ipv4_addresses,
+    is_probably_virtual_interface,
+)
+
+
+def print_status_value(label, value):
+    """Print an aligned status value."""
+    if value is None or value == "":
+        value = "not set"
+
+    print("  {:<31}: {}".format(label, value))
+
+
+def yes_no(value):
+    """Return yes/no text."""
+    return "yes" if bool(value) else "no"
+
+
+def yaml_scalar_text(value):
+    """Return simple YAML scalar text used by generated vars."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+
+    if value is None:
+        return "null"
+
+    return str(value)
+
+
+def generated_var_present(content, key, value):
+    """Return True if a generated var key/value line appears current."""
+    return "{}: {}".format(key, yaml_scalar_text(value)) in content
+
+
+def present_missing(path):
+    """Return present/missing text for a path."""
+    return "present" if Path(path).exists() else "missing"
+
+
+def path_with_state(path):
+    """Return path plus present/missing state."""
+    if not path:
+        return "not set"
+
+    path = Path(path)
+    return "{} ({})".format(path, present_missing(path))
+
+
+def interface_state(interface, server_ip=None):
+    """Return readable interface state."""
+    if not interface:
+        return "not set"
+
+    interface_path = Path("/sys/class/net") / interface
+    if not interface_path.exists():
+        return "{} (missing on this host)".format(interface)
+
+    values = ["present"]
+
+    addresses = interface_ipv4_addresses(interface)
+    if addresses:
+        values.append("IPv4: {}".format(", ".join(addresses)))
+    else:
+        values.append("no IPv4 detected")
+
+    if is_probably_virtual_interface(interface):
+        values.append("likely virtual/container")
+
+    if server_ip:
+        try:
+            if interface_has_ip(interface, server_ip):
+                values.append("planned IP already present")
+            else:
+                values.append("planned IP not present")
+        except ValueError:
+            values.append("planned IP invalid")
+
+    return "{} ({})".format(interface, "; ".join(values))
+
+
+def server_mode_enabled(mode, target):
+    """Infer enabled state from server mode."""
+    mode = str(mode or "").strip().lower()
+
+    if target == "pxe":
+        return mode in ("full", "pxe")
+
+    if target == "controller":
+        return mode in ("full", "controller")
+
+    return False
+
+
+def pxe_enabled_from_config(server, pxe):
+    """Return whether PXE should be considered enabled."""
+    mode = server.get("mode")
+
+    if mode:
+        return server_mode_enabled(mode, "pxe")
+
+    return bool(pxe.get("enabled", False))
+
+
+def controller_enabled_from_config(server):
+    """Return whether controller/NFS should be considered enabled."""
+    mode = server.get("mode")
+
+    if mode:
+        return server_mode_enabled(mode, "controller")
+
+    nfs = server.get("nfs", {}) or {}
+    return bool(nfs.get("enabled", False))
+
+
+def nfs_enabled_from_config(server):
+    """Return whether NFS should be considered enabled."""
+    nfs = server.get("nfs", {}) or {}
+    return bool(controller_enabled_from_config(server) and nfs.get("enabled", True))
+
+
+def generated_vars_look_current(generated_vars_path, config):
+    """Return True if generated vars appear to match key saved config values."""
+    generated_vars_path = Path(generated_vars_path)
+
+    if not generated_vars_path.exists():
+        return False
+
+    try:
+        content = generated_vars_path.read_text()
+    except IOError:
+        return False
+
+    server = config.get("server", {}) or {}
+    pxe = config.get("pxe", {}) or {}
+    nfs = server.get("nfs", {}) or {}
+
+    mode = server.get("mode")
+    pxe_enabled = pxe_enabled_from_config(server, pxe)
+    controller_enabled = controller_enabled_from_config(server)
+    nfs_enabled = nfs_enabled_from_config(server)
+
+    expected = []
+
+    if mode:
+        expected.append(("aerolit_server_mode", mode))
+
+    expected.append(("aerolit_pxe_enabled", pxe_enabled))
+    expected.append(("aerolit_controller_enabled", controller_enabled))
+    expected.append(("aerolit_nfs_enabled", nfs_enabled))
+
+    if server.get("interface"):
+        expected.append(("aerolit_server_interface", server.get("interface")))
+
+    if server.get("ip_address"):
+        expected.append(("aerolit_server_ip_address", server.get("ip_address")))
+
+    if server.get("prefix"):
+        expected.append(("aerolit_server_prefix", server.get("prefix")))
+
+    if pxe_enabled:
+        if pxe.get("dhcp_start"):
+            expected.append(("pxe_dhcp_start", pxe.get("dhcp_start")))
+        if pxe.get("dhcp_end"):
+            expected.append(("pxe_dhcp_end", pxe.get("dhcp_end")))
+        if pxe.get("dhcp_netmask"):
+            expected.append(("pxe_dhcp_netmask", pxe.get("dhcp_netmask")))
+
+    if nfs_enabled:
+        if nfs.get("export_path"):
+            expected.append(("aerolit_nfs_export_path", nfs.get("export_path")))
+        if nfs.get("allowed_clients"):
+            expected.append(
+                ("aerolit_nfs_allowed_clients", nfs.get("allowed_clients"))
+            )
+        if nfs.get("target_mount_path"):
+            expected.append(("path_for_ansible", nfs.get("target_mount_path")))
+
+    for key, value in expected:
+        if not generated_var_present(content, key, value):
+            return False
+
+    return True
+
+
+def collect_status_findings(config, bundle_path):
+    """Collect status findings and next recommended command."""
+    findings = []
+    next_command = None
+
+    config_path = Path(CONFIG_FILE)
+
+    if not config_path.exists():
+        findings.append("Config file is missing: {}".format(config_path))
+        next_command = "aerolitctl configure init"
+        return findings, next_command
+
+    if not bundle_path:
+        findings.append("No bundle path is configured.")
+        next_command = "aerolitctl path set /opt/aerolit/aerolit-bundle"
+        return findings, next_command
+
+    bundle_path = Path(bundle_path)
+    collections_hub = collections_hub_path(bundle_path)
+    ansible_dir = collections_hub / "ansible"
+    server_generated_vars = aerolitctl_server_generated_vars_file(bundle_path)
+
+    if not bundle_path.exists():
+        findings.append("Bundle path is missing: {}".format(bundle_path))
+        next_command = "create/place the bundle, then run aerolitctl bundle validate"
+        return findings, next_command
+
+    if not collections_hub.exists():
+        findings.append(
+            "collections-hub directory is missing: {}".format(collections_hub)
+        )
+
+    if not ansible_dir.exists():
+        findings.append("Ansible directory is missing: {}".format(ansible_dir))
+
+    server = config.get("server", {}) or {}
+    pxe = config.get("pxe", {}) or {}
+    nfs = server.get("nfs", {}) or {}
+
+    mode = server.get("mode")
+    interface = server.get("interface")
+    server_ip = server.get("ip_address")
+
+    pxe_enabled = pxe_enabled_from_config(server, pxe)
+    controller_enabled = controller_enabled_from_config(server)
+    nfs_enabled = nfs_enabled_from_config(server)
+
+    if not mode:
+        findings.append("Server mode is not configured.")
+
+    if not interface:
+        findings.append("Server interface is not configured.")
+
+    if not server_ip:
+        findings.append("Server IP is not configured.")
+
+    if interface and not (Path("/sys/class/net") / interface).exists():
+        findings.append(
+            "Configured interface is not present on this host: {}".format(interface)
+        )
+
+    if (
+        pxe_enabled
+        and server_ip
+        and pxe.get("server_ip")
+        and pxe.get("server_ip") != server_ip
+    ):
+        findings.append(
+            "PXE server_ip does not match server.ip_address: {} != {}".format(
+                pxe.get("server_ip"),
+                server_ip,
+            )
+        )
+
+    if (
+        pxe_enabled
+        and interface
+        and pxe.get("interface")
+        and pxe.get("interface") != interface
+    ):
+        findings.append(
+            "PXE interface does not match server.interface: {} != {}".format(
+                pxe.get("interface"),
+                interface,
+            )
+        )
+
+    if (
+        nfs_enabled
+        and nfs.get("server_ip")
+        and server_ip
+        and nfs.get("server_ip") != server_ip
+    ):
+        findings.append(
+            "NFS server_ip does not match server.ip_address: {} != {}".format(
+                nfs.get("server_ip"),
+                server_ip,
+            )
+        )
+
+    if not server_generated_vars.exists():
+        findings.append(
+            "Generated server vars file is missing: {}".format(server_generated_vars)
+        )
+    elif not generated_vars_look_current(server_generated_vars, config):
+        findings.append(
+            "Generated server vars file may be stale or incomplete: {}".format(
+                server_generated_vars
+            )
+        )
+
+    if pxe_enabled:
+        pxe_playbook = pxe_server_playbook(bundle_path)
+        if not pxe_playbook.exists():
+            findings.append("PXE playbook is missing: {}".format(pxe_playbook))
+
+        if not pxe.get("dhcp_start"):
+            findings.append("PXE DHCP start is not configured.")
+
+        if not pxe.get("dhcp_end"):
+            findings.append("PXE DHCP end is not configured.")
+
+        if not pxe.get("dhcp_netmask"):
+            findings.append("PXE DHCP netmask is not configured.")
+
+    if controller_enabled:
+        controller_playbook = ansible_controller_playbook(bundle_path)
+        if not controller_playbook.exists():
+            findings.append(
+                "Ansible controller playbook is missing: {}".format(
+                    controller_playbook
+                )
+            )
+
+    if nfs_enabled:
+        if not nfs.get("export_path"):
+            findings.append("NFS export path is not configured.")
+
+        if not nfs.get("allow_all_clients", False) and not nfs.get("allowed_clients"):
+            findings.append("NFS allowed clients is not configured.")
+
+    if findings:
+        if next_command is None:
+            next_command = "aerolitctl configure server --guided"
+    else:
+        next_command = "aerolitctl deploy server --dry-run"
+
+    return findings, next_command
+
+
+def run_status(verbose=False):
+    """Show AeroLIT configuration and deployment readiness."""
+    print("")
+    print("AeroLIT status")
+    print("")
+    print("This command is read-only. It does not change files or services.")
+    print("")
+
+    config_path = Path(CONFIG_FILE)
+
+    try:
+        config = load_config()
+    except Exception as exc:
+        print_status_value("Config file", "{} (error)".format(config_path))
+        print("")
+        print("ERROR: unable to read AeroLIT config: {}".format(exc))
+        return 1
+
+    bundle_path_value = get_bundle_path(config)
+
+    print("Configuration:")
+    print_status_value("Config file", path_with_state(config_path))
+    print_status_value("Bundle path", bundle_path_value or "not set")
+    print("")
+
+    if not bundle_path_value:
+        findings, next_command = collect_status_findings(config, bundle_path_value)
+        print("Readiness:")
+        print_status_value("Ready for deploy", "no")
+        for finding in findings:
+            print("  - {}".format(finding))
+        print("")
+        print("Next recommended command:")
+        print("  {}".format(next_command))
+        print("")
+        return 0
+
+    bundle_path = Path(bundle_path_value)
+    collections_hub = collections_hub_path(bundle_path)
+    ansible_dir = collections_hub / "ansible"
+    group_vars_dir = ansible_dir / "group_vars"
+    server_generated_vars = aerolitctl_server_generated_vars_file(bundle_path)
+
+    print("Bundle:")
+    print_status_value("Bundle exists", yes_no(bundle_path.exists()))
+    print_status_value("collections-hub", path_with_state(collections_hub))
+    print_status_value("Ansible dir", path_with_state(ansible_dir))
+    print_status_value("group_vars dir", path_with_state(group_vars_dir))
+    print_status_value("Generated vars", path_with_state(server_generated_vars))
+    if server_generated_vars.exists():
+        print_status_value(
+            "Generated vars current",
+            yes_no(generated_vars_look_current(server_generated_vars, config)),
+        )
+    else:
+        print_status_value("Generated vars current", "no")
+    print("")
+
+    server = config.get("server", {}) or {}
+    pxe = config.get("pxe", {}) or {}
+    nfs = server.get("nfs", {}) or {}
+    firewall = server.get("firewall", {}) or {}
+    pxe_http = server.get("pxe_http", {}) or {}
+
+    mode = server.get("mode")
+    normalized_mode = str(mode or "").strip().lower()
+    interface = server.get("interface")
+    server_ip = server.get("ip_address")
+
+    pxe_enabled = pxe_enabled_from_config(server, pxe)
+    controller_enabled = controller_enabled_from_config(server)
+    nfs_enabled = nfs_enabled_from_config(server)
+
+    print("Server plan:")
+    print_status_value("Mode", mode)
+    print_status_value("Interface", interface_state(interface, server_ip=server_ip))
+    print_status_value("Server IP", server_ip)
+    print_status_value("Prefix", server.get("prefix"))
+    print_status_value("Gateway", server.get("gateway") or "none")
+    print_status_value("DNS servers", ", ".join(server.get("dns") or []) or "none")
+    print_status_value(
+        "Deploy configures interface",
+        yes_no(server.get("configure_interface")),
+    )
+    print("")
+
+    print("PXE Server:")
+    print_status_value("Enabled", yes_no(pxe_enabled))
+
+    if pxe_enabled:
+        print_status_value(
+            "HTTP bind address",
+            pxe_http.get("bind_address") or "0.0.0.0",
+        )
+        print_status_value("HTTP port", pxe_http.get("port") or DEFAULT_HTTP_PORT)
+        print_status_value("DHCP start", pxe.get("dhcp_start"))
+        print_status_value("DHCP end", pxe.get("dhcp_end"))
+        print_status_value("DHCP netmask", pxe.get("dhcp_netmask"))
+        print_status_value(
+            "PXE playbook",
+            path_with_state(pxe_server_playbook(bundle_path)),
+        )
+    else:
+        if normalized_mode == "controller":
+            print_status_value("Reason", "disabled by mode controller")
+        else:
+            print_status_value("Reason", "disabled by saved PXE configuration")
+    print("")
+
+    print("Ansible Controller / NFS:")
+    print_status_value("Enabled", yes_no(controller_enabled))
+
+    if not controller_enabled:
+        if normalized_mode == "pxe":
+            print_status_value("Reason", "disabled by mode pxe")
+        else:
+            print_status_value(
+                "Reason",
+                "disabled by saved Ansible Controller / NFS configuration",
+            )
+    else:
+        print_status_value("NFS enabled", yes_no(nfs_enabled))
+
+        if nfs_enabled:
+            print_status_value("NFS server IP", nfs.get("server_ip"))
+            print_status_value("NFS export path", nfs.get("export_path"))
+            print_status_value("NFS allowed clients", nfs.get("allowed_clients"))
+            print_status_value(
+                "NFS allow all clients",
+                yes_no(nfs.get("allow_all_clients", False)),
+            )
+            print_status_value(
+                "Deploy may create export",
+                yes_no(nfs.get("create_export_path", False)),
+            )
+            print_status_value("Target/client mount path", nfs.get("target_mount_path"))
+        else:
+            print_status_value(
+                "NFS reason",
+                "NFS disabled by explicit option or saved configuration",
+            )
+
+        print_status_value(
+            "Controller playbook",
+            path_with_state(ansible_controller_playbook(bundle_path)),
+        )
+    print("")
+
+    print("Firewall intent:")
+    print_status_value("Manage firewall", yes_no(firewall.get("manage", False)))
+    print_status_value("Services", ", ".join(firewall.get("services") or []) or "none")
+    print_status_value("Ports", ", ".join(firewall.get("ports") or []) or "none")
+    print("")
+
+    findings, next_command = collect_status_findings(config, bundle_path_value)
+
+    print("Readiness:")
+    print_status_value("Ready for deploy", yes_no(not findings))
+
+    if findings:
+        print("")
+        print("Findings:")
+        for finding in findings:
+            print("  - {}".format(finding))
+    else:
+        print("  No blocking status findings detected.")
+
+    print("")
+    print("Next recommended command:")
+    print("  {}".format(next_command))
+    print("")
+
+    if verbose:
+        print("Verbose:")
+        print_status_value("Config path", config_path)
+        print_status_value("Bundle path", bundle_path)
+        print_status_value("collections-hub", collections_hub)
+        print_status_value("Ansible dir", ansible_dir)
+        print("")
+
+    return 0
