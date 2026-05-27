@@ -1,0 +1,66 @@
+def content_without_kickstart_script_blocks(content: str) -> str:
+    kept_lines = []
+    inside_script = False
+
+    script_section_prefixes = (
+        "%pre",
+        "%post",
+        "%onerror",
+        "%traceback",
+    )
+
+    for line in content.splitlines():
+        stripped = line.strip()
+
+        if stripped.startswith(script_section_prefixes):
+            inside_script = True
+            kept_lines.append("")
+            continue
+
+        if inside_script and stripped == "%end":
+            inside_script = False
+            kept_lines.append("")
+            continue
+
+        if inside_script:
+            kept_lines.append("")
+            continue
+
+        kept_lines.append(line)
+
+    return "\n".join(kept_lines)
+
+
+
+
+
+
+
+
+
+for check_name, pattern, message, status in unresolved_checks:
+    check_content = content
+
+    if check_name == "unresolved_shell_placeholder":
+        check_content = content_without_kickstart_script_blocks(content)
+
+    if pattern.search(check_content):
+        results.append(
+            validation_result(
+                check_id=f"{check_name}:{kickstart_name}",
+                status=status,
+                message=f"Generated Kickstart {kickstart_name} {message}.",
+                path=str(path),
+                http_path=f"/ks/{kickstart_name}",
+            )
+        )
+    else:
+        results.append(
+            validation_result(
+                check_id=f"{check_name}:{kickstart_name}",
+                status="ok",
+                message=f"Generated Kickstart {kickstart_name} passed check {check_name}.",
+                path=str(path),
+                http_path=f"/ks/{kickstart_name}",
+            )
+        )
