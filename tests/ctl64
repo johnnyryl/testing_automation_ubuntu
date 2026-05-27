@@ -9,11 +9,12 @@ CONFIG_DIR = Path("/etc/aerolit")
 CONFIG_FILE = CONFIG_DIR / "aerolitctl.yml"
 
 AEROLITCTL_GROUP_VARS_FILENAME = "aerolitctl.yml"
+AEROLITCTL_SERVER_GENERATED_VARS_FILENAME = "aerolitctl_server_generated.yml"
+AEROLITCTL_ANSIBLE_GENERATED_VARS_FILENAME = "aerolitctl_ansible_generated.yml"
+AEROLITCTL_PXE_GENERATED_VARS_FILENAME = "aerolitctl_pxe_generated.yml"
 
 OVERRIDES_DIR = CONFIG_DIR / "overrides"
 OVERRIDE_KICKSTARTS_DIR = OVERRIDES_DIR / "kickstarts"
-
-AEROLITCTL_PXE_GENERATED_VARS_FILENAME = "aerolitctl_pxe_generated.yml"
 
 PXE_OVERRIDES_DIR = OVERRIDES_DIR / "pxe"
 PXE_OVERRIDE_PROFILES_DIR = PXE_OVERRIDES_DIR / "profiles"
@@ -120,12 +121,18 @@ def ansible_group_vars_template_dir(bundle_path):
 
 def aerolitctl_server_generated_vars_file(bundle_path):
     """Return aerolitctl generated server vars path inside active group_vars/all."""
-    return ansible_group_vars_all_dir(bundle_path) / "aerolitctl_server_generated.yml"
+    return (
+        ansible_group_vars_all_dir(bundle_path)
+        / AEROLITCTL_SERVER_GENERATED_VARS_FILENAME
+    )
 
 
 def aerolitctl_ansible_generated_vars_file(bundle_path):
     """Return aerolitctl generated Ansible vars path inside active group_vars/all."""
-    return ansible_group_vars_all_dir(bundle_path) / "aerolitctl_ansible_generated.yml"
+    return (
+        ansible_group_vars_all_dir(bundle_path)
+        / AEROLITCTL_ANSIBLE_GENERATED_VARS_FILENAME
+    )
 
 
 def aerolitctl_pxe_generated_vars_file(bundle_path):
