@@ -10,6 +10,7 @@ from pathlib import Path
 from .bundle_manifest import validate_bundle_manifest
 from .compat import require_yaml
 from .config import get_bundle_path, load_config
+from .pxe import pxe_doctor_lines
 from .paths import (
     CONFIG_FILE,
     STATE_FILE,
@@ -175,6 +176,27 @@ def add_bundle_manifest_findings(report, findings):
             report.add_failure(message)
         else:
             report.add_warning(message)
+
+
+def add_pxe_doctor_findings(report, bundle_path):
+    """Add PXE status checks to doctor output."""
+    try:
+        findings = pxe_doctor_lines(bundle_path)
+    except Exception as exc:
+        report.add_warning("PXE checks skipped: {}".format(exc))
+        return
+
+    for level, message in findings:
+        level = str(level).lower()
+
+        if level == "ok":
+            report.add_ok("PXE: {}".format(message))
+        elif level in ["warn", "warning"]:
+            report.add_warning("PXE: {}".format(message))
+        elif level in ["fail", "failure", "error"]:
+            report.add_failure("PXE: {}".format(message))
+        else:
+            report.add_warning("PXE: {}".format(message))
 
 
 def check_root(report):
@@ -449,6 +471,7 @@ def run_doctor():
     report.add_ok("Configured bundle path: {}".format(bundle_path))
 
     check_bundle_layout(report, bundle_path)
+    add_pxe_doctor_findings(report, bundle_path)
 
     pxe_config = config.get("pxe", {})
     server_config = config.get("server", {})
