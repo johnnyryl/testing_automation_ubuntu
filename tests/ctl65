@@ -1,0 +1,1559 @@
+"""AeroLIT PXE profile/configuration planning helpers.
+
+`aerolitctl configure pxe` manages AeroLIT-owned PXE generator inputs:
+
+  collections-hub/ansible/group_vars/all/aerolitctl_pxe_generated.yml
+  /etc/aerolit/overrides/pxe/profiles/<profile>.yml
+
+It does not directly render boot.ipxe or generated Kickstarts. The pxe-content
+container owns rendering. This command writes profile/configuration inputs that
+the pxe-content role and generator can consume.
+"""
+
+from __future__ import print_function
+
+import datetime
+import shutil
+from collections import OrderedDict
+from pathlib import Path
+
+from .config import get_bundle_path, load_config
+from .paths import (
+    ansible_group_vars_all_dir,
+    aerolitctl_pxe_generated_vars_file,
+    aerolitctl_pxe_overrides_dir,
+    aerolitctl_pxe_profile_file,
+    aerolitctl_pxe_profile_overrides_dir,
+    aerolitctl_pxe_template_overrides_dir,
+)
+
+
+GENERATED_VARS_MARKER = "# Generated AeroLIT PXE variables"
+PROFILE_MARKER = "# Generated AeroLIT PXE profile override"
+
+DEFAULT_WATCH_INTERVAL = 15
+DEFAULT_GENERATED_KS_EDIT_POLICY = "preserve"
+DEFAULT_VALIDATION_FAILURE_POLICY = "warn"
+
+VALID_GENERATED_KS_EDIT_POLICIES = [
+    "preserve",
+    "overwrite",
+]
+
+VALID_VALIDATION_FAILURE_POLICIES = [
+    "warn",
+    "fail",
+]
+
+RESERVED_MENU_TARGETS = [
+    "main",
+    "rescue",
+    "shell",
+]
+
+STANDARD_OS_IDS = [
+    "rhel10",
+    "rhel9",
+    "rhel8",
+    "rhel7",
+]
+
+DEFAULT_KERNEL_ARGS = [
+    "inst.text",
+    "nomodeset",
+]
+
+RESERVED_KERNEL_ARG_PREFIXES = [
+    "initrd=",
+    "ip=",
+    "inst.repo=",
+    "inst.stage2=",
+    "inst.ks=",
+]
+
+
+class PxeConfigError(Exception):
+    """Raised when configure pxe input is invalid."""
+
+
+class PxeReport(object):
+    """Collect configure pxe validation results."""
+
+    def __init__(self):
+        self.ok = []
+        self.warnings = []
+        self.errors = []
+
+    def add_ok(self, message):
+        self.ok.append(message)
+
+    def add_warning(self, message):
+        self.warnings.append(message)
+
+    def add_error(self, message):
+        self.errors.append(message)
+
+    def print_report(self):
+        print("AeroLIT PXE validation")
+        print("")
+
+        for message in self.ok:
+            print("[OK] {}".format(message))
+
+        for message in self.warnings:
+            print("[WARN] {}".format(message))
+
+        for message in self.errors:
+            print("[FAIL] {}".format(message))
+
+        print("")
+        print("Summary:")
+        print("  OK: {}".format(len(self.ok)))
+        print("  Warnings: {}".format(len(self.warnings)))
+        print("  Failures: {}".format(len(self.errors)))
+
+    def exit_code(self):
+        return 1 if self.errors else 0
+
+
+def standard_profile(
+    profile_id,
+    title,
+    install_label,
+    menu_target,
+    implemented,
+    kickstart_template,
+):
+    """Return one standard PXE profile mapping."""
+    return OrderedDict(
+        [
+            ("profile_id", profile_id),
+            ("title", title),
+            ("install_label", install_label),
+            ("menu_target", menu_target),
+            ("implemented", implemented),
+            ("show_in_main_menu", True),
+            ("uefi", True),
+            ("bios", True),
+            ("supported_os", list(STANDARD_OS_IDS)),
+            ("kickstart_template", kickstart_template),
+            ("kernel_args", list(DEFAULT_KERNEL_ARGS)),
+        ]
+    )
+
+
+def default_profile_definitions():
+    """Return built-in PXE profiles matching generate-pxe-content.py."""
+    profiles = OrderedDict()
+
+    profiles["minimal"] = standard_profile(
+        "minimal",
+        "Minimal Installs",
+        "Minimal",
+        "minimal",
+        True,
+        "ks/{{ os_id }}-minimal.ks.j2",
+    )
+
+    profiles["security_baseline"] = standard_profile(
+        "security_baseline",
+        "Security Baseline Installs",
+        "Security Baseline",
+        "security_baseline",
+        False,
+        "ks/{{ os_id }}-security-baseline.ks.j2",
+    )
+
+    profiles["security_luks"] = standard_profile(
+        "security_luks",
+        "Security + LUKS Installs",
+        "Security + LUKS",
+        "security_luks",
+        False,
+        "ks/{{ os_id }}-security-luks.ks.j2",
+    )
+
+    profiles["small_disk"] = standard_profile(
+        "small_disk",
+        "Small Disk Installs",
+        "Small Disk",
+        "small_disk",
+        True,
+        "ks/{{ os_id }}-small-disk.ks.j2",
+    )
+
+    profiles["developer_workstation"] = standard_profile(
+        "developer_workstation",
+        "Developer Workstation Installs",
+        "Developer Workstation",
+        "developer_workstation",
+        False,
+        "ks/{{ os_id }}-developer-workstation.ks.j2",
+    )
+
+    profiles["embedded_edge"] = standard_profile(
+        "embedded_edge",
+        "Embedded / Edge Hardware Installs",
+        "Embedded / Edge",
+        "embedded_edge",
+        False,
+        "ks/{{ os_id }}-embedded-edge.ks.j2",
+    )
+
+    return profiles
+
+
+class ManagedPxeState(object):
+    """In-memory representation of aerolitctl-managed PXE state."""
+
+    def __init__(self):
+        self.profiles = default_profile_definitions()
+        self.pxe_content_iso_root = None
+        self.watch_interval = DEFAULT_WATCH_INTERVAL
+        self.generated_ks_edit_policy = DEFAULT_GENERATED_KS_EDIT_POLICY
+        self.validation_failure_policy = DEFAULT_VALIDATION_FAILURE_POLICY
+
+    def ensure_profile(self, profile_id):
+        profile_id = normalize_profile_id(profile_id)
+
+        if profile_id not in self.profiles:
+            title = profile_id.replace("_", " ").title()
+            self.profiles[profile_id] = OrderedDict(
+                [
+                    ("profile_id", profile_id),
+                    ("title", title),
+                    ("install_label", title),
+                    ("menu_target", profile_id),
+                    ("implemented", False),
+                    ("show_in_main_menu", True),
+                    ("uefi", True),
+                    ("bios", True),
+                    ("supported_os", list(STANDARD_OS_IDS)),
+                    (
+                        "kickstart_template",
+                        "ks/{{ os_id }}-{}.ks.j2".format(
+                            profile_id.replace("_", "-")
+                        ),
+                    ),
+                    ("kernel_args", list(DEFAULT_KERNEL_ARGS)),
+                ]
+            )
+
+        return self.profiles[profile_id]
+
+    def get_profile(self, profile_id):
+        profile_id = normalize_profile_id(profile_id)
+
+        if profile_id not in self.profiles:
+            raise PxeConfigError(
+                "PXE profile '{}' is not currently known. "
+                "Use --enable-profile first if this is a new custom profile.".format(
+                    profile_id
+                )
+            )
+
+        return self.profiles[profile_id]
+
+    def enable_profile(self, profile_id):
+        profile = self.ensure_profile(profile_id)
+        profile["show_in_main_menu"] = True
+
+    def disable_profile(self, profile_id):
+        profile = self.get_profile(profile_id)
+        profile["show_in_main_menu"] = False
+
+    def implement_profile(self, profile_id):
+        profile = self.ensure_profile(profile_id)
+        profile["implemented"] = True
+        profile["show_in_main_menu"] = True
+
+    def placeholder_profile(self, profile_id):
+        profile = self.get_profile(profile_id)
+        profile["implemented"] = False
+
+    def set_profile_title(self, profile_id, title):
+        profile = self.ensure_profile(profile_id)
+        title = str(title).strip()
+
+        if not title:
+            raise PxeConfigError(
+                "PXE profile {} title cannot be empty".format(profile_id)
+            )
+
+        profile["title"] = title
+
+    def set_profile_label(self, profile_id, install_label):
+        profile = self.ensure_profile(profile_id)
+        install_label = str(install_label).strip()
+
+        if not install_label:
+            raise PxeConfigError(
+                "PXE profile {} install_label cannot be empty".format(profile_id)
+            )
+
+        profile["install_label"] = install_label
+
+    def set_profile_menu_target(self, profile_id, menu_target):
+        profile = self.ensure_profile(profile_id)
+        menu_target = normalize_profile_id(menu_target)
+
+        if menu_target in RESERVED_MENU_TARGETS:
+            raise PxeConfigError(
+                "PXE profile {} cannot use reserved menu target: {}".format(
+                    profile_id,
+                    menu_target,
+                )
+            )
+
+        profile["menu_target"] = menu_target
+
+    def set_profile_template(self, profile_id, template):
+        profile = self.ensure_profile(profile_id)
+        profile["kickstart_template"] = validate_template_path(
+            template,
+            profile_id,
+            field="kickstart_template",
+        )
+
+    def set_profile_os(self, profile_id, os_list):
+        profile = self.ensure_profile(profile_id)
+        profile["supported_os"] = normalize_supported_os_values(os_list)
+
+    def set_profile_kernel_args(self, profile_id, kernel_args):
+        profile = self.ensure_profile(profile_id)
+        profile["kernel_args"] = normalize_kernel_args_values(
+            profile_id,
+            kernel_args,
+        )
+
+    def set_profile_uefi(self, profile_id, enabled):
+        profile = self.ensure_profile(profile_id)
+        profile["uefi"] = bool(enabled)
+
+    def set_profile_bios(self, profile_id, enabled):
+        profile = self.ensure_profile(profile_id)
+        profile["bios"] = bool(enabled)
+
+    def enabled_profiles(self):
+        return [
+            profile_id
+            for profile_id, profile in self.profiles.items()
+            if profile.get("show_in_main_menu") is True
+        ]
+
+    def implemented_profiles(self):
+        return [
+            profile_id
+            for profile_id, profile in self.profiles.items()
+            if profile.get("implemented") is True
+        ]
+
+
+def normalize_profile_id(value):
+    """Validate and return a PXE profile identifier."""
+    value = str(value).strip()
+
+    if not value:
+        raise PxeConfigError("PXE profile id cannot be empty")
+
+    allowed = "abcdefghijklmnopqrstuvwxyz0123456789_"
+
+    if value[0] not in "abcdefghijklmnopqrstuvwxyz0123456789":
+        raise PxeConfigError(
+            "Invalid PXE profile id '{}'. It must start with lowercase letter or number.".format(
+                value
+            )
+        )
+
+    for character in value:
+        if character not in allowed:
+            raise PxeConfigError(
+                "Invalid PXE profile id '{}'. Use lowercase letters, numbers, and underscore.".format(
+                    value
+                )
+            )
+
+    return value
+
+
+def split_csv_values(value, field):
+    """Split comma-separated CLI values."""
+    values = [
+        item.strip()
+        for item in str(value).split(",")
+        if item.strip()
+    ]
+
+    if not values:
+        raise PxeConfigError("{} cannot be empty".format(field))
+
+    return values
+
+
+def validate_template_path(value, profile_id, field="kickstart_template"):
+    """Validate a relative Kickstart template path."""
+    value = str(value).strip()
+
+    if not value:
+        raise PxeConfigError(
+            "PXE profile {} {} cannot be empty".format(profile_id, field)
+        )
+
+    if "\n" in value or "\r" in value:
+        raise PxeConfigError(
+            "PXE profile {} {} must be a single-line value".format(
+                profile_id,
+                field,
+            )
+        )
+
+    path = Path(value)
+
+    if path.is_absolute():
+        raise PxeConfigError(
+            "PXE profile {} {} must be relative, got: {}".format(
+                profile_id,
+                field,
+                value,
+            )
+        )
+
+    if ".." in path.parts:
+        raise PxeConfigError(
+            "PXE profile {} {} must not contain '..', got: {}".format(
+                profile_id,
+                field,
+                value,
+            )
+        )
+
+    return value
+
+
+def normalize_supported_os_values(value):
+    """Normalize comma-separated supported OS values."""
+    values = split_csv_values(value, "supported OS list")
+    result = []
+
+    for os_id in values:
+        os_id = str(os_id).strip().lower()
+
+        if os_id not in STANDARD_OS_IDS:
+            raise PxeConfigError(
+                "Unsupported OS id '{}'. Supported values: {}".format(
+                    os_id,
+                    ", ".join(STANDARD_OS_IDS),
+                )
+            )
+
+        if os_id not in result:
+            result.append(os_id)
+
+    return result
+
+
+def validate_kernel_arg(profile_id, arg):
+    """Validate one PXE kernel argument."""
+    arg = str(arg).strip()
+
+    if not arg:
+        raise PxeConfigError(
+            "PXE profile {} kernel_args cannot contain empty values".format(
+                profile_id
+            )
+        )
+
+    if "\n" in arg or "\r" in arg:
+        raise PxeConfigError(
+            "PXE profile {} kernel arg must be single-line: {}".format(
+                profile_id,
+                arg,
+            )
+        )
+
+    if any(character.isspace() for character in arg):
+        raise PxeConfigError(
+            "PXE profile {} kernel arg must not contain whitespace: {}".format(
+                profile_id,
+                arg,
+            )
+        )
+
+    for prefix in RESERVED_KERNEL_ARG_PREFIXES:
+        if arg.startswith(prefix):
+            raise PxeConfigError(
+                "PXE profile {} kernel arg must not set generated arg '{}': {}".format(
+                    profile_id,
+                    prefix,
+                    arg,
+                )
+            )
+
+    return arg
+
+
+def normalize_kernel_args_values(profile_id, value):
+    """Normalize comma-separated kernel args."""
+    values = split_csv_values(value, "kernel args")
+    return [
+        validate_kernel_arg(profile_id, item)
+        for item in values
+    ]
+
+
+def require_bool(value, field, source):
+    """Return a strict YAML-style boolean."""
+    if isinstance(value, bool):
+        return value
+
+    raise PxeConfigError(
+        "{} field {} must be a YAML boolean true/false, not {!r}".format(
+            source,
+            field,
+            value,
+        )
+    )
+
+
+def require_string_list(value, field, source):
+    """Return a list of strings."""
+    if not isinstance(value, list):
+        raise PxeConfigError("{} field {} must be a YAML list".format(source, field))
+
+    result = []
+
+    for item in value:
+        item = str(item).strip()
+
+        if not item:
+            raise PxeConfigError(
+                "{} field {} cannot contain empty values".format(source, field)
+            )
+
+        result.append(item)
+
+    return result
+
+
+def timestamp():
+    """Return a filesystem-safe timestamp."""
+    return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def read_text(path):
+    """Read text while tolerating non-UTF8 bytes."""
+    with open(str(path), "r", encoding="utf-8", errors="ignore") as handle:
+        return handle.read()
+
+
+def write_text(path, content):
+    """Write text and create parent directories."""
+    path = Path(path)
+
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True)
+
+    with open(str(path), "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
+def configured_bundle_path():
+    """Return configured bundle path from aerolitctl config."""
+    config = load_config()
+    bundle_path = get_bundle_path(config)
+
+    if not bundle_path:
+        raise PxeConfigError(
+            "No bundle path is configured. Run: aerolitctl configure init"
+        )
+
+    return Path(bundle_path)
+
+
+def bool_text(value):
+    """Return YAML boolean text."""
+    return "true" if value else "false"
+
+
+def yaml_quote(value):
+    """Quote a scalar as a YAML string."""
+    value = str(value)
+    return "'" + value.replace("'", "''") + "'"
+
+
+def yaml_value(value):
+    """Render a simple YAML scalar value."""
+    if isinstance(value, bool):
+        return bool_text(value)
+
+    if value is None:
+        return "null"
+
+    if isinstance(value, int):
+        return str(value)
+
+    return yaml_quote(value)
+
+
+def parse_scalar_value(value):
+    """Parse simple YAML scalar text for fallback loading."""
+    value = str(value).strip()
+
+    if value == "true":
+        return True
+
+    if value == "false":
+        return False
+
+    if value.startswith("'") and value.endswith("'"):
+        return value[1:-1].replace("''", "'")
+
+    if value.startswith('"') and value.endswith('"'):
+        return value[1:-1]
+
+    if value == "[]":
+        return []
+
+    try:
+        return int(value)
+    except ValueError:
+        return value
+
+
+def load_yaml_mapping(path):
+    """Load a small YAML mapping."""
+    path = Path(path)
+
+    try:
+        import yaml
+    except ImportError:
+        yaml = None
+
+    if yaml is not None:
+        try:
+            with open(str(path), "r", encoding="utf-8") as handle:
+                data = yaml.safe_load(handle) or {}
+        except Exception as exc:
+            raise PxeConfigError(
+                "Could not parse YAML file {}: {}".format(path, exc)
+            )
+
+        if not isinstance(data, dict):
+            raise PxeConfigError("YAML file should contain a mapping: {}".format(path))
+
+        return data
+
+    data = OrderedDict()
+    current_key = None
+
+    for raw_line in read_text(path).splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+
+        if not raw_line.startswith(" "):
+            if ":" not in raw_line:
+                continue
+
+            key, raw_value = raw_line.split(":", 1)
+            key = key.strip()
+            raw_value = raw_value.strip()
+
+            if not key:
+                continue
+
+            if raw_value:
+                data[key] = parse_scalar_value(raw_value)
+                current_key = None
+            else:
+                data[key] = OrderedDict()
+                current_key = key
+
+            continue
+
+        if current_key is None:
+            continue
+
+        stripped = raw_line.strip()
+
+        if stripped.startswith("- "):
+            if not isinstance(data.get(current_key), list):
+                data[current_key] = []
+
+            data[current_key].append(parse_scalar_value(stripped[2:].strip()))
+            continue
+
+        if ":" in stripped:
+            if not isinstance(data.get(current_key), dict):
+                data[current_key] = OrderedDict()
+
+            key, raw_value = stripped.split(":", 1)
+            data[current_key][key.strip()] = parse_scalar_value(raw_value.strip())
+
+    return data
+
+
+def file_looks_managed(path, managed_kind):
+    """Return True when an existing file appears safe for aerolitctl to update."""
+    path = Path(path)
+
+    if not path.exists():
+        return True
+
+    content = read_text(path)
+
+    if managed_kind == "generated_vars":
+        return (
+            GENERATED_VARS_MARKER in content
+            and "aerolitctl_pxe_generated:" in content
+        )
+
+    if managed_kind == "profile":
+        return PROFILE_MARKER in content
+
+    return False
+
+
+def ensure_file_is_safe_to_update(path, managed_kind, force=False):
+    """Refuse to overwrite a non-managed file unless force=True."""
+    path = Path(path)
+
+    if force or not path.exists():
+        return
+
+    if file_looks_managed(path, managed_kind):
+        return
+
+    raise PxeConfigError(
+        "{} exists but does not look like an aerolitctl-managed {} file. "
+        "Refusing to overwrite it without --force: {}".format(
+            path,
+            managed_kind.replace("_", " "),
+            path,
+        )
+    )
+
+
+def backup_file(path, dry_run=False, no_backup=False, label=None):
+    """Create a timestamped backup next to an existing file."""
+    path = Path(path)
+    label = label or str(path)
+
+    if no_backup or not path.exists():
+        return None
+
+    backup_path = path.with_name(
+        "{}.aerolit-backup-{}".format(path.name, timestamp())
+    )
+
+    if dry_run:
+        print("Would back up {} to {}".format(label, backup_path))
+        return backup_path
+
+    shutil.copy2(str(path), str(backup_path))
+    print("Backed up {} to {}".format(label, backup_path))
+    return backup_path
+
+
+def write_if_changed(
+    path,
+    content,
+    dry_run=False,
+    label=None,
+    managed_kind=None,
+    force=False,
+    no_backup=False,
+):
+    """Create/update a file only when content differs."""
+    path = Path(path)
+    label = label or str(path)
+
+    exists = path.exists()
+    current = read_text(path) if exists else None
+
+    if current == content:
+        print("Already current: {}".format(label))
+        return "unchanged"
+
+    if managed_kind:
+        ensure_file_is_safe_to_update(path, managed_kind, force=force)
+
+    if dry_run:
+        if exists:
+            backup_file(path, dry_run=True, no_backup=no_backup, label=label)
+            print("Would update: {}".format(label))
+            return "would_update"
+
+        print("Would create: {}".format(label))
+        return "would_create"
+
+    backup_file(path, dry_run=False, no_backup=no_backup, label=label)
+    write_text(path, content)
+
+    if exists:
+        print("Updated: {}".format(label))
+        return "updated"
+
+    print("Created: {}".format(label))
+    return "created"
+
+
+def remove_if_exists(
+    path,
+    dry_run=False,
+    label=None,
+    managed_kind=None,
+    force=False,
+    no_backup=False,
+):
+    """Remove an aerolitctl-managed file when it is no longer needed."""
+    path = Path(path)
+    label = label or str(path)
+
+    if not path.exists():
+        return "absent"
+
+    if managed_kind:
+        ensure_file_is_safe_to_update(path, managed_kind, force=force)
+
+    if dry_run:
+        backup_file(path, dry_run=True, no_backup=no_backup, label=label)
+        print("Would remove: {}".format(label))
+        return "would_remove"
+
+    backup_file(path, dry_run=False, no_backup=no_backup, label=label)
+    path.unlink()
+    print("Removed: {}".format(label))
+    return "removed"
+
+
+def ensure_pxe_directories(dry_run=False):
+    """Create PXE override directories when writing configuration."""
+    directories = [
+        aerolitctl_pxe_overrides_dir(),
+        aerolitctl_pxe_profile_overrides_dir(),
+        aerolitctl_pxe_template_overrides_dir(),
+    ]
+
+    for path in directories:
+        path = Path(path)
+
+        if path.exists():
+            continue
+
+        if dry_run:
+            print("Would create directory: {}".format(path))
+            continue
+
+        path.mkdir(parents=True, exist_ok=True)
+        print("Created directory: {}".format(path))
+
+
+def profile_from_mapping(data, source):
+    """Normalize a profile YAML mapping."""
+    profile_id = normalize_profile_id(data.get("profile_id", ""))
+
+    title = str(data.get("title", profile_id.replace("_", " ").title())).strip()
+    install_label = str(
+        data.get("install_label", profile_id.replace("_", " ").title())
+    ).strip()
+    menu_target = normalize_profile_id(data.get("menu_target", profile_id))
+
+    if not title:
+        raise PxeConfigError("{} title cannot be empty".format(source))
+
+    if not install_label:
+        raise PxeConfigError("{} install_label cannot be empty".format(source))
+
+    supported_os = data.get("supported_os", list(STANDARD_OS_IDS))
+    kernel_args = data.get("kernel_args", list(DEFAULT_KERNEL_ARGS))
+
+    profile = OrderedDict()
+    profile["profile_id"] = profile_id
+    profile["title"] = title
+    profile["install_label"] = install_label
+    profile["menu_target"] = menu_target
+    profile["implemented"] = require_bool(
+        data.get("implemented", False),
+        "implemented",
+        source,
+    )
+    profile["show_in_main_menu"] = require_bool(
+        data.get("show_in_main_menu", True),
+        "show_in_main_menu",
+        source,
+    )
+    profile["uefi"] = require_bool(data.get("uefi", True), "uefi", source)
+    profile["bios"] = require_bool(data.get("bios", True), "bios", source)
+    profile["supported_os"] = require_string_list(
+        supported_os,
+        "supported_os",
+        source,
+    )
+    profile["kickstart_template"] = str(data.get("kickstart_template", "")).strip()
+    profile["kernel_args"] = require_string_list(
+        kernel_args,
+        "kernel_args",
+        source,
+    )
+
+    return profile
+
+
+def load_existing_profile_overrides(state):
+    """Load existing aerolitctl-managed PXE profile override files."""
+    profile_dir = aerolitctl_pxe_profile_overrides_dir()
+
+    if not profile_dir.exists():
+        return
+
+    for path in sorted(profile_dir.glob("*.yml")):
+        if not file_looks_managed(path, "profile"):
+            continue
+
+        data = load_yaml_mapping(path)
+        profile = profile_from_mapping(data, str(path))
+        state.profiles[profile["profile_id"]] = profile
+
+
+def load_existing_generated_vars(state, bundle_path):
+    """Load existing aerolitctl-managed PXE generated vars when possible."""
+    path = aerolitctl_pxe_generated_vars_file(bundle_path)
+
+    if not path.exists():
+        return
+
+    if not file_looks_managed(path, "generated_vars"):
+        return
+
+    data = load_yaml_mapping(path)
+
+    extra_env = data.get("pxe_content_extra_env", {})
+    if isinstance(extra_env, dict):
+        if "PXE_WATCH_INTERVAL" in extra_env:
+            try:
+                state.watch_interval = int(extra_env["PXE_WATCH_INTERVAL"])
+            except ValueError:
+                pass
+
+        if "PXE_GENERATED_KS_EDIT_POLICY" in extra_env:
+            state.generated_ks_edit_policy = str(
+                extra_env["PXE_GENERATED_KS_EDIT_POLICY"]
+            )
+
+        if "PXE_VALIDATION_FAILURE_POLICY" in extra_env:
+            state.validation_failure_policy = str(
+                extra_env["PXE_VALIDATION_FAILURE_POLICY"]
+            )
+
+    if "pxe_content_iso_root" in data:
+        state.pxe_content_iso_root = data["pxe_content_iso_root"]
+
+
+def load_managed_pxe_state(bundle_path):
+    """Load managed PXE state from active files."""
+    state = ManagedPxeState()
+    load_existing_generated_vars(state, bundle_path)
+    load_existing_profile_overrides(state)
+    return state
+
+
+def render_yaml_list(lines, key, values):
+    """Render a YAML list."""
+    if values:
+        lines.append("{}:".format(key))
+        for value in values:
+            lines.append("  - {}".format(yaml_value(value)))
+    else:
+        lines.append("{}: []".format(key))
+
+
+def render_profile(profile):
+    """Render a PXE profile override YAML file."""
+    lines = [
+        "---",
+        PROFILE_MARKER,
+        "# Created by aerolitctl configure pxe.",
+        "# This file is consumed by the pxe-content generator through /overrides/profiles.",
+        "",
+    ]
+
+    for key, value in profile.items():
+        if isinstance(value, list):
+            render_yaml_list(lines, key, value)
+            continue
+
+        lines.append("{}: {}".format(key, yaml_value(value)))
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_generated_vars(bundle_path, state):
+    """Render aerolitctl_pxe_generated.yml."""
+    override_root = aerolitctl_pxe_overrides_dir()
+    profile_root = aerolitctl_pxe_profile_overrides_dir()
+    template_root = aerolitctl_pxe_template_overrides_dir()
+
+    enabled_profiles = state.enabled_profiles()
+    implemented_profiles = state.implemented_profiles()
+
+    lines = [
+        "---",
+        GENERATED_VARS_MARKER,
+        "# Created by aerolitctl configure pxe.",
+        "# This file lives in group_vars/all and feeds the PXE Ansible/container roles.",
+        "# Do not store secrets in this file.",
+        "",
+        "aerolitctl_pxe_generated: true",
+        "aerolitctl_pxe_override_root: {}".format(yaml_value(str(override_root))),
+        "aerolitctl_pxe_override_profile_root: {}".format(yaml_value(str(profile_root))),
+        "aerolitctl_pxe_override_template_root: {}".format(yaml_value(str(template_root))),
+        "",
+    ]
+
+    render_yaml_list(lines, "aerolitctl_pxe_enabled_profiles", enabled_profiles)
+    lines.append("")
+    render_yaml_list(lines, "aerolitctl_pxe_implemented_profiles", implemented_profiles)
+
+    if state.pxe_content_iso_root:
+        lines.extend(
+            [
+                "",
+                "# Host-side ISO/content root used by the pxe-content Ansible role.",
+                "pxe_content_iso_root: {}".format(
+                    yaml_value(str(state.pxe_content_iso_root))
+                ),
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "# Mounts for the pxe-content Quadlet container.",
+            "# The first mount provides extracted ISO content as /iso.",
+            "# The second mount provides AeroLIT-managed PXE overrides as /overrides.",
+            "pxe_content_volume_mounts:",
+            "  - {}".format(
+                yaml_value(
+                    "{{ pxe_content_iso_root }}:{{ pxe_content_container_iso_root }}:ro,Z"
+                )
+            ),
+            "  - {}".format(
+                yaml_value("{}:/overrides:ro,Z".format(str(override_root)))
+            ),
+            "",
+            "# Environment variables written into /etc/pxe-content/pxe-content.env.",
+            "pxe_content_extra_env:",
+            "  PXE_OVERRIDE_ROOT: {}".format(yaml_value("/overrides")),
+            "  PXE_OVERRIDE_PROFILE_ROOT: {}".format(yaml_value("/overrides/profiles")),
+            "  PXE_OVERRIDE_TEMPLATE_ROOT: {}".format(yaml_value("/overrides/templates")),
+            "  PXE_GENERATED_KS_EDIT_POLICY: {}".format(
+                yaml_value(state.generated_ks_edit_policy)
+            ),
+            "  PXE_VALIDATION_FAILURE_POLICY: {}".format(
+                yaml_value(state.validation_failure_policy)
+            ),
+            "  PXE_WATCH_INTERVAL: {}".format(yaml_value(str(state.watch_interval))),
+            "",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
+def existing_managed_profile_files():
+    """Return existing aerolitctl-managed PXE profile override files."""
+    profile_dir = aerolitctl_pxe_profile_overrides_dir()
+
+    if not profile_dir.exists():
+        return []
+
+    return [
+        path
+        for path in sorted(profile_dir.glob("*.yml"))
+        if file_looks_managed(path, "profile")
+    ]
+
+
+def write_profile_files(state, dry_run=False, force=False, no_backup=False):
+    """Write current managed PXE profile files and remove stale managed ones."""
+    expected_paths = []
+
+    for profile_id, profile in state.profiles.items():
+        path = aerolitctl_pxe_profile_file(profile_id)
+        expected_paths.append(path)
+
+        write_if_changed(
+            path,
+            render_profile(profile),
+            dry_run=dry_run,
+            label="PXE profile {}".format(profile_id),
+            managed_kind="profile",
+            force=force,
+            no_backup=no_backup,
+        )
+
+    for path in existing_managed_profile_files():
+        if path not in expected_paths:
+            remove_if_exists(
+                path,
+                dry_run=dry_run,
+                label="stale PXE profile {}".format(path.name),
+                managed_kind="profile",
+                force=force,
+                no_backup=no_backup,
+            )
+
+
+def validate_pxe_state(bundle_path, state, check_files=True, force=False):
+    """Validate managed PXE configuration."""
+    report = PxeReport()
+
+    group_vars_all = ansible_group_vars_all_dir(bundle_path)
+    generated_vars = aerolitctl_pxe_generated_vars_file(bundle_path)
+    override_root = aerolitctl_pxe_overrides_dir()
+    profile_root = aerolitctl_pxe_profile_overrides_dir()
+    template_root = aerolitctl_pxe_template_overrides_dir()
+
+    if group_vars_all.exists():
+        report.add_ok("group_vars/all directory found: {}".format(group_vars_all))
+    else:
+        report.add_error("group_vars/all directory missing: {}".format(group_vars_all))
+
+    if override_root.exists():
+        report.add_ok("PXE override root found: {}".format(override_root))
+    else:
+        report.add_warning("PXE override root will be created: {}".format(override_root))
+
+    if profile_root.exists():
+        report.add_ok("PXE profile override directory found: {}".format(profile_root))
+    else:
+        report.add_warning(
+            "PXE profile override directory will be created: {}".format(profile_root)
+        )
+
+    if template_root.exists():
+        report.add_ok("PXE template override directory found: {}".format(template_root))
+    else:
+        report.add_warning(
+            "PXE template override directory will be created: {}".format(template_root)
+        )
+
+    if state.watch_interval < 1:
+        report.add_error("PXE watch interval must be 1 or greater")
+
+    if state.generated_ks_edit_policy not in VALID_GENERATED_KS_EDIT_POLICIES:
+        report.add_error(
+            "Invalid generated Kickstart edit policy: {}".format(
+                state.generated_ks_edit_policy
+            )
+        )
+
+    if state.validation_failure_policy not in VALID_VALIDATION_FAILURE_POLICIES:
+        report.add_error(
+            "Invalid validation failure policy: {}".format(
+                state.validation_failure_policy
+            )
+        )
+
+    if not state.enabled_profiles():
+        report.add_error("At least one PXE profile must be enabled")
+
+    seen_menu_targets = {}
+
+    for profile_id, profile in state.profiles.items():
+        try:
+            normalized_id = normalize_profile_id(profile_id)
+            normalized_profile_id = normalize_profile_id(profile.get("profile_id", ""))
+            menu_target = normalize_profile_id(profile.get("menu_target", ""))
+        except PxeConfigError as exc:
+            report.add_error(str(exc))
+            continue
+
+        if normalized_id != normalized_profile_id:
+            report.add_error(
+                "PXE profile key '{}' does not match profile_id '{}'".format(
+                    normalized_id,
+                    normalized_profile_id,
+                )
+            )
+
+        if menu_target in RESERVED_MENU_TARGETS:
+            report.add_error(
+                "PXE profile {} uses reserved menu target: {}".format(
+                    profile_id,
+                    menu_target,
+                )
+            )
+
+        if menu_target in seen_menu_targets:
+            report.add_error(
+                "PXE profiles {} and {} use duplicate menu target: {}".format(
+                    seen_menu_targets[menu_target],
+                    profile_id,
+                    menu_target,
+                )
+            )
+        else:
+            seen_menu_targets[menu_target] = profile_id
+
+        if not str(profile.get("title", "")).strip():
+            report.add_error("PXE profile {} title cannot be empty".format(profile_id))
+
+        if not str(profile.get("install_label", "")).strip():
+            report.add_error(
+                "PXE profile {} install_label cannot be empty".format(profile_id)
+            )
+
+        if not profile.get("uefi", True) and not profile.get("bios", True):
+            report.add_error(
+                "PXE profile {} must enable UEFI and/or BIOS".format(profile_id)
+            )
+
+        if profile.get("implemented") is True and not profile.get("kickstart_template"):
+            report.add_error(
+                "PXE profile {} is implemented but has no kickstart_template".format(
+                    profile_id
+                )
+            )
+
+        if profile.get("kickstart_template"):
+            try:
+                validate_template_path(
+                    profile.get("kickstart_template"),
+                    profile_id,
+                    field="kickstart_template",
+                )
+            except PxeConfigError as exc:
+                report.add_error(str(exc))
+
+        supported_os = profile.get("supported_os", [])
+        if not isinstance(supported_os, list):
+            report.add_error(
+                "PXE profile {} supported_os must be a list".format(profile_id)
+            )
+        else:
+            seen_os = []
+            for os_id in supported_os:
+                os_id = str(os_id).strip()
+
+                if os_id not in STANDARD_OS_IDS:
+                    report.add_error(
+                        "PXE profile {} references unsupported OS id: {}".format(
+                            profile_id,
+                            os_id,
+                        )
+                    )
+
+                if os_id in seen_os:
+                    report.add_error(
+                        "PXE profile {} has duplicate supported OS id: {}".format(
+                            profile_id,
+                            os_id,
+                        )
+                    )
+                else:
+                    seen_os.append(os_id)
+
+        kernel_args = profile.get("kernel_args", [])
+        if not isinstance(kernel_args, list):
+            report.add_error(
+                "PXE profile {} kernel_args must be a list".format(profile_id)
+            )
+        else:
+            for arg in kernel_args:
+                try:
+                    validate_kernel_arg(profile_id, arg)
+                except PxeConfigError as exc:
+                    report.add_error(str(exc))
+
+        if profile.get("implemented") is True and profile_id != "minimal":
+            report.add_warning(
+                "PXE profile {} is marked implemented. Make sure its Kickstart template exists in the pxe-content image or override templates.".format(
+                    profile_id
+                )
+            )
+
+        if check_files:
+            path = aerolitctl_pxe_profile_file(profile_id)
+            if path.exists() and not file_looks_managed(path, "profile"):
+                if force:
+                    report.add_warning(
+                        "PXE profile path will be replaced with --force: {}".format(path)
+                    )
+                else:
+                    report.add_error(
+                        "PXE profile path exists but is missing aerolitctl markers: {}".format(
+                            path
+                        )
+                    )
+
+    if check_files and generated_vars.exists():
+        if file_looks_managed(generated_vars, "generated_vars"):
+            report.add_ok("Generated PXE vars file found: {}".format(generated_vars))
+        elif force:
+            report.add_warning(
+                "Generated PXE vars path will be replaced with --force: {}".format(
+                    generated_vars
+                )
+            )
+        else:
+            report.add_error(
+                "Generated PXE vars path exists but is missing aerolitctl markers: {}".format(
+                    generated_vars
+                )
+            )
+    elif check_files:
+        report.add_warning(
+            "Generated PXE vars file not created yet: {}".format(generated_vars)
+        )
+
+    return report
+
+
+def print_pxe_summary(bundle_path, state):
+    """Print a readable summary of managed PXE state."""
+    print("AeroLIT managed PXE configuration")
+    print("")
+    print("{:<30} {}".format("Bundle path:", bundle_path))
+    print("{:<30} {}".format("Generated vars:", aerolitctl_pxe_generated_vars_file(bundle_path)))
+    print("{:<30} {}".format("PXE override root:", aerolitctl_pxe_overrides_dir()))
+    print("{:<30} {}".format("Profile overrides:", aerolitctl_pxe_profile_overrides_dir()))
+    print("{:<30} {}".format("Template overrides:", aerolitctl_pxe_template_overrides_dir()))
+    print("")
+    print("PXE generator settings:")
+    print("  Watch interval: {}".format(state.watch_interval))
+    print("  Generated Kickstart edit policy: {}".format(state.generated_ks_edit_policy))
+    print("  Validation failure policy: {}".format(state.validation_failure_policy))
+
+    if state.pxe_content_iso_root:
+        print("  PXE content ISO root: {}".format(state.pxe_content_iso_root))
+    else:
+        print("  PXE content ISO root: role default")
+
+    print("")
+    print("Profiles:")
+
+    for profile_id, profile in state.profiles.items():
+        shown = "enabled" if profile.get("show_in_main_menu") else "disabled"
+        implemented = "implemented" if profile.get("implemented") else "placeholder"
+        firmware = []
+
+        if profile.get("uefi"):
+            firmware.append("UEFI")
+
+        if profile.get("bios"):
+            firmware.append("BIOS")
+
+        print(
+            "  - {}: {}, {}, firmware={}".format(
+                profile_id,
+                shown,
+                implemented,
+                "/".join(firmware) if firmware else "none",
+            )
+        )
+        print("      title: {}".format(profile.get("title")))
+        print("      install_label: {}".format(profile.get("install_label")))
+        print("      menu_target: {}".format(profile.get("menu_target")))
+        print("      supported_os: {}".format(", ".join(profile.get("supported_os", []))))
+        print("      kickstart_template: {}".format(profile.get("kickstart_template")))
+        print("      kernel_args: {}".format(", ".join(profile.get("kernel_args", []))))
+
+
+def has_write_actions(args):
+    """Return True if CLI args request a managed-file change."""
+    list_fields = [
+        "enable_profile",
+        "disable_profile",
+        "implement_profile",
+        "placeholder_profile",
+        "set_profile_title",
+        "set_profile_label",
+        "set_profile_menu_target",
+        "set_profile_template",
+        "set_profile_os",
+        "set_profile_kernel_args",
+        "profile_uefi",
+        "no_profile_uefi",
+        "profile_bios",
+        "no_profile_bios",
+    ]
+
+    for field in list_fields:
+        if getattr(args, field, None):
+            return True
+
+    value_fields = [
+        "watch_interval",
+        "generated_ks_edit_policy",
+        "validation_failure_policy",
+        "pxe_content_iso_root",
+    ]
+
+    for field in value_fields:
+        if getattr(args, field, None) is not None:
+            return True
+
+    if getattr(args, "reset_standard_profiles", False):
+        return True
+
+    return False
+
+
+def apply_cli_changes(state, args):
+    """Apply requested CLI changes to the managed PXE state."""
+    if getattr(args, "reset_standard_profiles", False):
+        state.profiles = default_profile_definitions()
+
+    for profile_id in getattr(args, "enable_profile", None) or []:
+        state.enable_profile(profile_id)
+
+    for profile_id in getattr(args, "disable_profile", None) or []:
+        state.disable_profile(profile_id)
+
+    for profile_id in getattr(args, "implement_profile", None) or []:
+        state.implement_profile(profile_id)
+
+    for profile_id in getattr(args, "placeholder_profile", None) or []:
+        state.placeholder_profile(profile_id)
+
+    for item in getattr(args, "set_profile_title", None) or []:
+        profile_id, title = item
+        state.set_profile_title(profile_id, title)
+
+    for item in getattr(args, "set_profile_label", None) or []:
+        profile_id, install_label = item
+        state.set_profile_label(profile_id, install_label)
+
+    for item in getattr(args, "set_profile_menu_target", None) or []:
+        profile_id, menu_target = item
+        state.set_profile_menu_target(profile_id, menu_target)
+
+    for item in getattr(args, "set_profile_template", None) or []:
+        profile_id, template = item
+        state.set_profile_template(profile_id, template)
+
+    for item in getattr(args, "set_profile_os", None) or []:
+        profile_id, os_list = item
+        state.set_profile_os(profile_id, os_list)
+
+    for item in getattr(args, "set_profile_kernel_args", None) or []:
+        profile_id, kernel_args = item
+        state.set_profile_kernel_args(profile_id, kernel_args)
+
+    for profile_id in getattr(args, "profile_uefi", None) or []:
+        state.set_profile_uefi(profile_id, True)
+
+    for profile_id in getattr(args, "no_profile_uefi", None) or []:
+        state.set_profile_uefi(profile_id, False)
+
+    for profile_id in getattr(args, "profile_bios", None) or []:
+        state.set_profile_bios(profile_id, True)
+
+    for profile_id in getattr(args, "no_profile_bios", None) or []:
+        state.set_profile_bios(profile_id, False)
+
+    if getattr(args, "watch_interval", None) is not None:
+        state.watch_interval = int(args.watch_interval)
+
+    if getattr(args, "generated_ks_edit_policy", None) is not None:
+        state.generated_ks_edit_policy = args.generated_ks_edit_policy
+
+    if getattr(args, "validation_failure_policy", None) is not None:
+        state.validation_failure_policy = args.validation_failure_policy
+
+    if getattr(args, "pxe_content_iso_root", None) is not None:
+        state.pxe_content_iso_root = args.pxe_content_iso_root
+
+
+def run_configure_pxe(args):
+    """Run aerolitctl configure pxe."""
+    bundle_path = getattr(args, "bundle_path", None)
+
+    if bundle_path:
+        bundle_path = Path(bundle_path)
+    else:
+        bundle_path = configured_bundle_path()
+
+    force = getattr(args, "force", False)
+    dry_run = getattr(args, "dry_run", False)
+    no_backup = getattr(args, "no_backup", False)
+    show_only = getattr(args, "show", False)
+    validate_requested = getattr(args, "validate", False)
+
+    state = load_managed_pxe_state(bundle_path)
+    apply_cli_changes(state, args)
+
+    if not has_write_actions(args) and not show_only and not validate_requested:
+        show_only = True
+
+    if show_only:
+        print_pxe_summary(bundle_path, state)
+
+    if has_write_actions(args):
+        print("")
+        print("AeroLIT configure pxe plan")
+        print("")
+        print("{:<30} {}".format("Dry run:", dry_run))
+        print("{:<30} {}".format("Bundle path:", bundle_path))
+        print("{:<30} {}".format("Generated vars:", aerolitctl_pxe_generated_vars_file(bundle_path)))
+        print("{:<30} {}".format("PXE override root:", aerolitctl_pxe_overrides_dir()))
+        print("{:<30} {}".format("Profile overrides:", aerolitctl_pxe_profile_overrides_dir()))
+        print("{:<30} {}".format("Template overrides:", aerolitctl_pxe_template_overrides_dir()))
+        print("{:<30} {}".format("Backups enabled:", not no_backup))
+        print("{:<30} {}".format("Force overwrite:", force))
+        print("")
+
+        pre_write_report = validate_pxe_state(
+            bundle_path,
+            state,
+            check_files=True,
+            force=force,
+        )
+
+        if pre_write_report.errors:
+            print("")
+            print("Refusing to write invalid managed PXE configuration.")
+            print("")
+            pre_write_report.print_report()
+            return pre_write_report.exit_code()
+
+        ensure_pxe_directories(dry_run=dry_run)
+
+        write_if_changed(
+            aerolitctl_pxe_generated_vars_file(bundle_path),
+            render_generated_vars(bundle_path, state),
+            dry_run=dry_run,
+            label="generated PXE vars",
+            managed_kind="generated_vars",
+            force=force,
+            no_backup=no_backup,
+        )
+
+        write_profile_files(
+            state,
+            dry_run=dry_run,
+            force=force,
+            no_backup=no_backup,
+        )
+
+        if dry_run:
+            print("")
+            print("Dry run complete. No files were changed.")
+        else:
+            print("")
+            print("AeroLIT PXE configuration saved.")
+
+    if validate_requested or has_write_actions(args) or show_only:
+        print("")
+        report = validate_pxe_state(
+            bundle_path,
+            state,
+            check_files=True,
+            force=force,
+        )
+        report.print_report()
+        return report.exit_code()
+
+    return 0
