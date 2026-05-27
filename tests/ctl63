@@ -623,7 +623,7 @@ def test_cli_help_and_parser(args):
     assert_contains(ansible_help, "--ensure-standard-groups", "configure ansible help")
     assert_contains(ansible_help, "--set-global-var", "configure ansible help")
     assert_contains(ansible_help, "--set-group-var", "configure ansible help")
-    assert_contains(ansible_help, "--add-k3s-cluster", "configure ansible help")
+    assert_contains(ansible_help, "--add-kubernetes-cluster", "configure ansible help")
     assert_contains(ansible_help, "--add-host-range", "configure ansible help")
 
     for command in commands:
@@ -1038,7 +1038,7 @@ def test_configure_ansible_dry_run_read_only(args, hash_paths):
             "--add-child-group",
             "aerolit_parent",
             "aerolit_child",
-            "--add-k3s-cluster",
+            "--add-kubernetes-cluster",
             "aerolit_test_cluster",
         ],
         [
@@ -1046,12 +1046,12 @@ def test_configure_ansible_dry_run_read_only(args, hash_paths):
             "configure",
             "ansible",
             "--dry-run",
-            "--add-k3s-server",
+            "--add-kubernetes-server",
             "aerolit_test_cluster",
-            "aerolit-k3s-server01",
-            "--add-k3s-agent",
+            "aerolit-kubernetes-server01",
+            "--add-kubernetes-agent",
             "aerolit_test_cluster",
-            "aerolit-k3s-agent01",
+            "aerolit-kubernetes-agent01",
         ],
     ]
 
@@ -1156,17 +1156,17 @@ def test_real_configure_ansible_writes(args):
             "configure",
             "ansible",
             "--no-backup",
-            "--add-k3s-cluster",
+            "--add-kubernetes-cluster",
             "aerolit_test_cluster",
-            "--add-k3s-server",
+            "--add-kubernetes-server",
             "aerolit_test_cluster",
-            "aerolit-k3s-server01",
-            "--add-k3s-agent",
+            "aerolit-kubernetes-server01",
+            "--add-kubernetes-agent",
             "aerolit_test_cluster",
-            "aerolit-k3s-agent01",
+            "aerolit-kubernetes-agent01",
         ]
     )
-    assert_contains(output, "AeroLIT Ansible configuration saved.", "configure ansible k3s write")
+    assert_contains(output, "AeroLIT Ansible configuration saved.", "configure ansible kubernetes write")
 
     inventory_text = read_text(inventory_path)
     generated_text = read_text(generated_path)
@@ -1181,11 +1181,11 @@ def test_real_configure_ansible_writes(args):
     assert_contains(inventory_text, "[rhel9]", "managed inventory rhel9 group")
     assert_contains(inventory_text, "[aerolit_parent:children]", "managed child group")
     assert_contains(inventory_text, "aerolit_child", "managed child group")
-    assert_contains(inventory_text, "[aerolit_test_cluster:children]", "managed k3s cluster")
-    assert_contains(inventory_text, "server_aerolit_test_cluster", "managed k3s server group")
-    assert_contains(inventory_text, "agent_aerolit_test_cluster", "managed k3s agent group")
-    assert_contains(inventory_text, "aerolit-k3s-server01", "managed k3s server host")
-    assert_contains(inventory_text, "aerolit-k3s-agent01", "managed k3s agent host")
+    assert_contains(inventory_text, "[aerolit_test_cluster:children]", "managed kubernetes cluster")
+    assert_contains(inventory_text, "server_aerolit_test_cluster", "managed kubernetes server group")
+    assert_contains(inventory_text, "agent_aerolit_test_cluster", "managed kubernetes agent group")
+    assert_contains(inventory_text, "aerolit-kubernetes-server01", "managed kubernetes server host")
+    assert_contains(inventory_text, "aerolit-kubernetes-agent01", "managed kubernetes agent host")
 
     assert_contains(generated_text, "aerolit_test_global: 'enabled'", "generated global var")
 
@@ -1212,9 +1212,9 @@ def test_real_configure_ansible_writes(args):
             "--remove-host",
             "aerolit-ansible-test01",
             "--remove-host",
-            "aerolit-k3s-server01",
+            "aerolit-kubernetes-server01",
             "--remove-host",
-            "aerolit-k3s-agent01",
+            "aerolit-kubernetes-agent01",
             "--remove-global-var",
             "aerolit_test_global",
             "--remove-group-var",
@@ -1243,8 +1243,8 @@ def test_real_configure_ansible_writes(args):
     generated_text = read_text(generated_path)
 
     assert_not_contains(inventory_text, "aerolit-ansible-test01", "managed inventory after removal")
-    assert_not_contains(inventory_text, "aerolit-k3s-server01", "managed inventory after removal")
-    assert_not_contains(inventory_text, "aerolit-k3s-agent01", "managed inventory after removal")
+    assert_not_contains(inventory_text, "aerolit-kubernetes-server01", "managed inventory after removal")
+    assert_not_contains(inventory_text, "aerolit-kubernetes-agent01", "managed inventory after removal")
     assert_not_contains(inventory_text, "aerolit_test_cluster", "managed inventory after removal")
     assert_not_contains(generated_text, "aerolit_test_global", "generated vars after removal")
     assert_path_missing(group_vars_path, "managed group vars after removal")
