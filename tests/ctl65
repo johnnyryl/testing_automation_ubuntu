@@ -1823,6 +1823,225 @@ def print_pxe_summary(bundle_path, state):
         print("      kernel_args: {}".format(", ".join(profile.get("kernel_args", []))))
 
 
+def pxe_status_snapshot(bundle_path):
+    """Return concise PXE status values for status/doctor/deploy --show."""
+    bundle_path = Path(bundle_path)
+
+    state = load_managed_pxe_state(bundle_path)
+
+    generated_vars = aerolitctl_pxe_generated_vars_file(bundle_path)
+    override_root = aerolitctl_pxe_overrides_dir()
+    profile_root = aerolitctl_pxe_profile_overrides_dir()
+    template_root = aerolitctl_pxe_template_overrides_dir()
+
+    generated_vars_present = generated_vars.exists()
+    generated_vars_managed = (
+        generated_vars_present
+        and file_looks_managed(generated_vars, "generated_vars")
+    )
+
+    managed_profile_files = existing_managed_profile_files()
+
+    data = {}
+    if generated_vars_managed:
+        data = load_yaml_mapping(generated_vars)
+
+    volume_mounts = data.get("pxe_content_volume_mounts", [])
+    if not isinstance(volume_mounts, list):
+        volume_mounts = []
+
+    volume_mount_text = [str(item) for item in volume_mounts]
+
+    iso_mount_configured = any(
+        "pxe_content_iso_root" in item
+        and "pxe_content_container_iso_root" in item
+        for item in volume_mount_text
+    )
+
+    override_mount_configured = any(
+        ":/overrides:" in item or item.endswith(":/overrides:ro,Z")
+        for item in volume_mount_text
+    )
+
+    pxe_content_role_mount_configured = (
+        iso_mount_configured
+        and override_mount_configured
+    )
+
+    return OrderedDict(
+        [
+            ("bundle_path", str(bundle_path)),
+            ("configured", generated_vars_managed or bool(managed_profile_files)),
+            ("enabled_profiles", state.enabled_profiles()),
+            ("implemented_profiles", state.implemented_profiles()),
+            ("generated_vars", str(generated_vars)),
+            ("generated_vars_present", generated_vars_present),
+            ("generated_vars_managed", generated_vars_managed),
+            ("override_root", str(override_root)),
+            ("override_root_present", override_root.exists()),
+            ("profile_override_root", str(profile_root)),
+            ("profile_override_root_present", profile_root.exists()),
+            ("template_override_root", str(template_root)),
+            ("template_override_root_present", template_root.exists()),
+            ("managed_profile_file_count", len(managed_profile_files)),
+            ("pxe_content_role_mount_configured", pxe_content_role_mount_configured),
+            ("pxe_content_iso_mount_configured", iso_mount_configured),
+            ("pxe_content_override_mount_configured", override_mount_configured),
+            ("watch_interval", state.watch_interval),
+            ("generated_ks_edit_policy", state.generated_ks_edit_policy),
+            ("validation_failure_policy", state.validation_failure_policy),
+        ]
+    )
+
+
+def print_pxe_status_summary(bundle_path):
+    """Print concise PXE status for broader aerolitctl status/show commands."""
+    snapshot = pxe_status_snapshot(bundle_path)
+
+    print("PXE configuration:")
+    print(
+        "  Profiles enabled: {}".format(
+            ", ".join(snapshot["enabled_profiles"])
+            if snapshot["enabled_profiles"]
+            else "none"
+        )
+    )
+    print(
+        "  Profiles implemented: {}".format(
+            ", ".join(snapshot["implemented_profiles"])
+            if snapshot["implemented_profiles"]
+            else "none"
+        )
+    )
+    print(
+        "  PXE overrides: {} ({})".format(
+            snapshot["override_root"],
+            "present" if snapshot["override_root_present"] else "missing",
+        )
+    )
+    print(
+        "  PXE profile overrides: {} managed file(s)".format(
+            snapshot["managed_profile_file_count"]
+        )
+    )
+    print(
+        "  PXE generated vars: {} ({})".format(
+            snapshot["generated_vars"],
+            "present"
+            if snapshot["generated_vars_managed"]
+            else "present but not aerolitctl-managed"
+            if snapshot["generated_vars_present"]
+            else "missing",
+        )
+    )
+    print(
+        "  PXE content role mount: {}".format(
+            "configured"
+            if snapshot["pxe_content_role_mount_configured"]
+            else "not configured"
+        )
+    )
+    print("  Watch interval: {}".format(snapshot["watch_interval"]))
+    print(
+        "  Generated Kickstart edit policy: {}".format(
+            snapshot["generated_ks_edit_policy"]
+        )
+    )
+    print(
+        "  Validation failure policy: {}".format(
+            snapshot["validation_failure_policy"]
+        )
+    )
+
+
+def pxe_doctor_lines(bundle_path):
+    """Return PXE doctor checks as (level, message) tuples."""
+    snapshot = pxe_status_snapshot(bundle_path)
+    lines = []
+
+    if snapshot["generated_vars_managed"]:
+        lines.append(
+            (
+                "OK",
+                "PXE generated vars found: {}".format(snapshot["generated_vars"]),
+            )
+        )
+    elif snapshot["generated_vars_present"]:
+        lines.append(
+            (
+                "FAIL",
+                "PXE generated vars exists but is not aerolitctl-managed: {}".format(
+                    snapshot["generated_vars"]
+                ),
+            )
+        )
+    else:
+        lines.append(
+            (
+                "WARN",
+                "PXE generated vars not created yet: {}".format(
+                    snapshot["generated_vars"]
+                ),
+            )
+        )
+
+    if snapshot["override_root_present"]:
+        lines.append(
+            (
+                "OK",
+                "PXE override root found: {}".format(snapshot["override_root"]),
+            )
+        )
+    else:
+        lines.append(
+            (
+                "WARN",
+                "PXE override root missing: {}".format(snapshot["override_root"]),
+            )
+        )
+
+    if snapshot["managed_profile_file_count"] > 0:
+        lines.append(
+            (
+                "OK",
+                "PXE profile overrides found: {} managed file(s)".format(
+                    snapshot["managed_profile_file_count"]
+                ),
+            )
+        )
+    else:
+        lines.append(
+            (
+                "WARN",
+                "No aerolitctl-managed PXE profile override files found.",
+            )
+        )
+
+    if snapshot["enabled_profiles"]:
+        lines.append(
+            (
+                "OK",
+                "PXE profiles enabled: {}".format(
+                    ", ".join(snapshot["enabled_profiles"])
+                ),
+            )
+        )
+    else:
+        lines.append(("FAIL", "No PXE profiles are enabled."))
+
+    if snapshot["pxe_content_role_mount_configured"]:
+        lines.append(("OK", "PXE content role mounts are configured."))
+    else:
+        lines.append(
+            (
+                "WARN",
+                "PXE content role mounts are not fully configured in generated vars.",
+            )
+        )
+
+    return lines
+
+
 def stdin_is_interactive():
     """Return True when guided mode can prompt the user."""
     try:
