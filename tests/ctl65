@@ -2035,6 +2035,10 @@ def run_configure_pxe(args):
     validate_requested = getattr(args, "validate", False)
 
     state = load_managed_pxe_state(bundle_path)
+
+    if getattr(args, "guided", False):
+        run_guided_pxe_config(state)
+
     apply_cli_changes(state, args)
 
     if not has_write_actions(args) and not show_only and not validate_requested:
