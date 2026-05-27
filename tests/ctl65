@@ -35,7 +35,6 @@ PROFILE_MARKER = "# Generated AeroLIT PXE profile override"
 DEFAULT_WATCH_INTERVAL = 15
 DEFAULT_GENERATED_KS_EDIT_POLICY = "preserve"
 DEFAULT_VALIDATION_FAILURE_POLICY = "warn"
-DEFAULT_PXE_HTTP_PORT = 18080
 
 VALID_GENERATED_KS_EDIT_POLICIES = [
     "preserve",
@@ -1768,6 +1767,8 @@ def print_pxe_summary(bundle_path, state):
     print(
         "  DNS servers: {}".format(
             ", ".join(state.dnsmasq_dns_servers)
+            if state.dnsmasq_dns_servers
+            else "[]"
             if state.dnsmasq_dns_servers is not None
             else "role default"
         )
