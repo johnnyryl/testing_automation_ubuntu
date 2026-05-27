@@ -502,6 +502,9 @@ def run_status(verbose=False):
     print_status_value("Ports", ", ".join(firewall.get("ports") or []) or "none")
     print("")
 
+    print_pxe_status_summary(bundle_path)
+    print("")
+
     findings, next_command = collect_status_findings(config, bundle_path_value)
 
     print("Readiness:")
@@ -527,12 +530,5 @@ def run_status(verbose=False):
         print_status_value("collections-hub", collections_hub)
         print_status_value("Ansible dir", ansible_dir)
         print("")
-
-    config = load_config()
-    bundle_path = get_bundle_path(config)
-
-    if bundle_path:
-        print("")
-        print_pxe_status_summary(bundle_path)
 
     return 0
