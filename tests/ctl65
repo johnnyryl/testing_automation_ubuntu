@@ -2047,7 +2047,7 @@ def run_guided_pxe_config(state):
         state.generated_ks_edit_policy = "overwrite"
 
     configure_handoff = prompt_yes_no(
-        "Do you want to configure PXE server IP / HTTP handoff values now",
+        "Do you want to review/change PXE server IP / HTTP handoff values now",
         default=bool(state.pxe_server_ip or state.pxe_http_port is not None),
     )
 
@@ -2069,7 +2069,7 @@ def run_guided_pxe_config(state):
         )
 
     configure_dnsmasq = prompt_yes_no(
-        "Do you want to configure basic dnsmasq PXE/DHCP settings now",
+        "Do you want to review/change basic dnsmasq PXE/DHCP settings now",
         default=bool(
             state.dnsmasq_interface
             or state.dnsmasq_enable_dhcp is not None
