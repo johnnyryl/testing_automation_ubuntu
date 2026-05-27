@@ -73,6 +73,15 @@ RESERVED_KERNEL_ARG_PREFIXES = [
     "inst.ks=",
 ]
 
+GUIDED_STANDARD_PROFILE_IDS = [
+    "minimal",
+    "small_disk",
+    "security_baseline",
+    "security_luks",
+    "developer_workstation",
+    "embedded_edge",
+]
+
 
 class PxeConfigError(Exception):
     """Raised when configure pxe input is invalid."""
@@ -1811,6 +1820,383 @@ def print_pxe_summary(bundle_path, state):
         print("      supported_os: {}".format(", ".join(profile.get("supported_os", []))))
         print("      kickstart_template: {}".format(profile.get("kickstart_template")))
         print("      kernel_args: {}".format(", ".join(profile.get("kernel_args", []))))
+
+
+def stdin_is_interactive():
+    """Return True when guided mode can prompt the user."""
+    try:
+        return sys.stdin.isatty()
+    except AttributeError:
+        return False
+
+
+def prompt_line(question, default=None):
+    """Prompt for one line of guided input."""
+    if not stdin_is_interactive():
+        raise PxeConfigError(
+            "Guided mode requires an interactive terminal. "
+            "Use explicit configure pxe flags instead."
+        )
+
+    if default is None:
+        prompt = "{}: ".format(question)
+    else:
+        prompt = "{} [{}]: ".format(question, default)
+
+    try:
+        try:
+            input_function = raw_input
+        except NameError:
+            input_function = input
+
+        value = input_function(prompt)
+    except EOFError:
+        raise PxeConfigError("Guided mode input ended unexpectedly")
+
+    value = str(value).strip()
+
+    if not value and default is not None:
+        return str(default)
+
+    return value
+
+
+def prompt_yes_no(question, default=True):
+    """Prompt for a yes/no answer."""
+    default_text = "Y/n" if default else "y/N"
+
+    while True:
+        value = prompt_line("{} ({})".format(question, default_text)).strip().lower()
+
+        if not value:
+            return bool(default)
+
+        if value in ["y", "yes"]:
+            return True
+
+        if value in ["n", "no"]:
+            return False
+
+        print("Please answer yes or no.")
+
+
+def prompt_choice(question, choices, default):
+    """Prompt for one value from a list."""
+    choices = list(choices)
+
+    if default not in choices:
+        raise PxeConfigError(
+            "Internal guided mode error: default '{}' is not in {}".format(
+                default,
+                ", ".join(choices),
+            )
+        )
+
+    while True:
+        value = prompt_line(
+            "{} ({})".format(question, "/".join(choices)),
+            default,
+        ).strip().lower()
+
+        if value in choices:
+            return value
+
+        print("Please choose one of: {}".format(", ".join(choices)))
+
+
+def prompt_int(question, default, minimum=1):
+    """Prompt for an integer value."""
+    while True:
+        value = prompt_line(question, default)
+
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            print("Please enter a number.")
+            continue
+
+        if number < minimum:
+            print("Please enter a number greater than or equal to {}.".format(minimum))
+            continue
+
+        return number
+
+
+def prompt_port(question, default):
+    """Prompt for a valid TCP/UDP port."""
+    while True:
+        value = prompt_int(question, default, minimum=1)
+
+        try:
+            return normalize_port(value, question)
+        except PxeConfigError as exc:
+            print(str(exc))
+
+
+def prompt_ipv4(question, default=None, allow_empty=False):
+    """Prompt for a valid IPv4 address."""
+    while True:
+        value = prompt_line(question, default)
+
+        try:
+            return normalize_ipv4_address(
+                value,
+                question,
+                allow_empty=allow_empty,
+            )
+        except PxeConfigError as exc:
+            print(str(exc))
+
+
+def prompt_simple_string(question, default=None):
+    """Prompt for a non-empty one-line string."""
+    while True:
+        value = prompt_line(question, default)
+
+        try:
+            return normalize_simple_string(value, question)
+        except PxeConfigError as exc:
+            print(str(exc))
+
+
+def prompt_ipv4_csv_list(question, default=None):
+    """Prompt for a comma-separated IPv4 list."""
+    while True:
+        value = prompt_line(question, default)
+
+        try:
+            return normalize_ipv4_csv_list(value, question)
+        except PxeConfigError as exc:
+            print(str(exc))
+
+
+def guided_profile_default(state, profile_id):
+    """Return guided default mode for one standard PXE profile."""
+    profile = state.profiles.get(profile_id, {})
+
+    if profile.get("show_in_main_menu") is not True:
+        return "hidden"
+
+    if profile.get("implemented") is True:
+        return "real"
+
+    return "placeholder"
+
+
+def apply_guided_profile_mode(state, profile_id, mode):
+    """Apply hidden/placeholder/real guided profile choice."""
+    if mode == "hidden":
+        state.disable_profile(profile_id)
+        return
+
+    if mode == "placeholder":
+        state.enable_profile(profile_id)
+        state.placeholder_profile(profile_id)
+        return
+
+    if mode == "real":
+        state.implement_profile(profile_id)
+        return
+
+    raise PxeConfigError(
+        "Internal guided mode error: unsupported profile mode '{}'".format(mode)
+    )
+
+
+def run_guided_pxe_config(state):
+    """Prompt for common PXE configuration choices."""
+    print("")
+    print("AeroLIT guided PXE configuration")
+    print("")
+    print("Press Enter to accept the default shown in brackets.")
+    print("")
+
+    print("PXE menu profile choices:")
+    print("  hidden      = do not show in the PXE menu")
+    print("  placeholder = show in the menu but do not make it bootable")
+    print("  real        = show in the menu as a real boot option")
+    print("")
+
+    for profile_id in GUIDED_STANDARD_PROFILE_IDS:
+        profile = state.profiles.get(profile_id, {})
+        label = profile.get("install_label") or profile_id.replace("_", " ").title()
+
+        mode = prompt_choice(
+            "How should {} appear in the PXE menu".format(label),
+            ["hidden", "placeholder", "real"],
+            guided_profile_default(state, profile_id),
+        )
+
+        apply_guided_profile_mode(state, profile_id, mode)
+
+    state.watch_interval = prompt_int(
+        "How often should the PXE content watcher regenerate, in seconds",
+        state.watch_interval,
+        minimum=1,
+    )
+
+    preserve_kickstarts = prompt_yes_no(
+        "Should manually edited generated Kickstarts be preserved",
+        default=state.generated_ks_edit_policy != "overwrite",
+    )
+
+    if preserve_kickstarts:
+        state.generated_ks_edit_policy = "preserve"
+    else:
+        state.generated_ks_edit_policy = "overwrite"
+
+    configure_handoff = prompt_yes_no(
+        "Do you want to configure PXE server IP / HTTP handoff values now",
+        default=bool(state.pxe_server_ip or state.pxe_http_port is not None),
+    )
+
+    if configure_handoff:
+        state.set_pxe_server_ip(
+            prompt_ipv4(
+                "PXE server IP clients should use for boot.ipxe",
+                default=state.pxe_server_ip,
+            )
+        )
+
+        state.set_pxe_http_port(
+            prompt_port(
+                "PXE HTTP port",
+                state.pxe_http_port if state.pxe_http_port is not None else 18080,
+            )
+        )
+
+    configure_dnsmasq = prompt_yes_no(
+        "Do you want to configure basic dnsmasq PXE/DHCP settings now",
+        default=bool(
+            state.dnsmasq_interface
+            or state.dnsmasq_enable_dhcp is not None
+            or state.dnsmasq_enable_tftp is not None
+            or state.dnsmasq_dhcp_range_start
+            or state.dnsmasq_dhcp_range_end
+            or state.dnsmasq_dhcp_netmask
+            or state.dnsmasq_gateway is not None
+            or state.dnsmasq_dns_servers is not None
+            or state.dnsmasq_manage_firewall is not None
+            or state.dnsmasq_firewall_zone
+        ),
+    )
+
+    if configure_dnsmasq:
+        state.set_dnsmasq_interface(
+            prompt_simple_string(
+                "dnsmasq interface",
+                default=state.dnsmasq_interface,
+            )
+        )
+
+        state.set_dnsmasq_enable_dhcp(
+            prompt_yes_no(
+                "Enable dnsmasq DHCP",
+                default=(
+                    state.dnsmasq_enable_dhcp
+                    if state.dnsmasq_enable_dhcp is not None
+                    else True
+                ),
+            )
+        )
+
+        state.set_dnsmasq_enable_tftp(
+            prompt_yes_no(
+                "Enable dnsmasq TFTP",
+                default=(
+                    state.dnsmasq_enable_tftp
+                    if state.dnsmasq_enable_tftp is not None
+                    else True
+                ),
+            )
+        )
+
+        if prompt_yes_no(
+            "Configure dnsmasq DHCP range",
+            default=bool(
+                state.dnsmasq_dhcp_range_start
+                and state.dnsmasq_dhcp_range_end
+                and state.dnsmasq_dhcp_netmask
+            ),
+        ):
+            start = prompt_ipv4(
+                "dnsmasq DHCP range start",
+                default=state.dnsmasq_dhcp_range_start,
+            )
+            end = prompt_ipv4(
+                "dnsmasq DHCP range end",
+                default=state.dnsmasq_dhcp_range_end,
+            )
+            netmask = prompt_ipv4(
+                "dnsmasq DHCP netmask",
+                default=state.dnsmasq_dhcp_netmask or "255.255.255.0",
+            )
+            state.set_dnsmasq_dhcp_range(start, end, netmask)
+
+        gateway_default = "role-default"
+
+        if state.dnsmasq_gateway == "":
+            gateway_default = "none"
+        elif state.dnsmasq_gateway:
+            gateway_default = "custom"
+
+        gateway_mode = prompt_choice(
+            "dnsmasq gateway/router option",
+            ["role-default", "none", "custom"],
+            gateway_default,
+        )
+
+        if gateway_mode == "role-default":
+            state.dnsmasq_gateway = None
+        elif gateway_mode == "none":
+            state.set_dnsmasq_gateway("")
+        elif gateway_mode == "custom":
+            state.set_dnsmasq_gateway(
+                prompt_ipv4(
+                    "dnsmasq gateway IPv4 address",
+                    default=state.dnsmasq_gateway if state.dnsmasq_gateway else None,
+                )
+            )
+
+        dns_default = None
+
+        if state.dnsmasq_dns_servers:
+            dns_default = ",".join(state.dnsmasq_dns_servers)
+
+        if prompt_yes_no(
+            "Configure dnsmasq DNS servers",
+            default=state.dnsmasq_dns_servers is not None,
+        ):
+            state.dnsmasq_dns_servers = prompt_ipv4_csv_list(
+                "dnsmasq DNS servers, comma-separated; blank means no DNS servers",
+                default=dns_default,
+            )
+        else:
+            state.dnsmasq_dns_servers = None
+
+        state.set_dnsmasq_manage_firewall(
+            prompt_yes_no(
+                "Allow pxe-dnsmasq role to manage firewall ports",
+                default=(
+                    state.dnsmasq_manage_firewall
+                    if state.dnsmasq_manage_firewall is not None
+                    else True
+                ),
+            )
+        )
+
+        if state.dnsmasq_manage_firewall:
+            state.set_dnsmasq_firewall_zone(
+                prompt_simple_string(
+                    "dnsmasq firewall zone",
+                    default=state.dnsmasq_firewall_zone or "public",
+                )
+            )
+        else:
+            state.dnsmasq_firewall_zone = None
+
+    print("")
+    print("Guided PXE choices applied.")
 
 
 def has_write_actions(args):
