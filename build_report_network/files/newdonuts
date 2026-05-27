@@ -1960,7 +1960,6 @@ UNRESOLVED_JINJA_BLOCK_RE = re.compile(r"{%\s*[a-zA-Z_]")
 UNRESOLVED_JINJA_VARIABLE_RE = re.compile(r"{{\s*[^}]+\s*}}")
 UNRESOLVED_SHELL_PLACEHOLDER_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
 
-
 def content_without_kickstart_script_blocks(content: str) -> str:
     kept_lines = []
     inside_script = False
@@ -1992,7 +1991,6 @@ def content_without_kickstart_script_blocks(content: str) -> str:
         kept_lines.append(line)
 
     return "\n".join(kept_lines)
-
 
 BOOT_ARTIFACT_CHECK_PREFIXES: Tuple[str, ...] = (
     "boot_ipxe_",
