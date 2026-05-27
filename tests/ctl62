@@ -406,6 +406,7 @@ def add_configure_pxe_parser(configure_subparsers):
         "--disable-dnsmasq-dhcp",
         dest="dnsmasq_enable_dhcp",
         action="store_false",
+        default=None,
         help="Disable DHCP behavior in the pxe-dnsmasq role.",
     )
     pxe_parser.add_argument(
