@@ -599,27 +599,27 @@ def build_parser():
     )
 
     ansible_parser.add_argument(
-        "--add-k3s-cluster",
+        "--add-kubernetes-cluster",
         action="append",
         default=[],
         metavar="CLUSTER",
-        help="Add/ensure a managed K3s cluster group structure.",
+        help="Add/ensure a managed Kubernetes cluster group structure.",
     )
     ansible_parser.add_argument(
-        "--add-k3s-server",
+        "--add-kubernetes-server",
         action="append",
         nargs=2,
         default=[],
         metavar=("CLUSTER", "HOST"),
-        help="Add a host to a managed K3s server/control-plane group.",
+        help="Add a host to a managed Kubernetes server/control-plane group.",
     )
     ansible_parser.add_argument(
-        "--add-k3s-agent",
+        "--add-kubernetes-agent",
         action="append",
         nargs=2,
         default=[],
         metavar=("CLUSTER", "HOST"),
-        help="Add a host to a managed K3s agent/worker group.",
+        help="Add a host to a managed Kubernetes agent/worker group.",
     )
 
     ansible_parser.add_argument(
