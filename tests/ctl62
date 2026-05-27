@@ -420,6 +420,7 @@ def add_configure_pxe_parser(configure_subparsers):
         "--disable-dnsmasq-tftp",
         dest="dnsmasq_enable_tftp",
         action="store_false",
+        default=None,
         help="Disable TFTP behavior in the pxe-dnsmasq role.",
     )
     pxe_parser.add_argument(
@@ -450,6 +451,7 @@ def add_configure_pxe_parser(configure_subparsers):
         "--disable-dnsmasq-firewall",
         dest="dnsmasq_manage_firewall",
         action="store_false",
+        default=None,
         help="Prevent pxe-dnsmasq from managing firewall ports.",
     )
     pxe_parser.add_argument(
