@@ -2300,6 +2300,16 @@ def profiles_removed_and_modified(args):
     return sorted(removed.intersection(modified))
 
 
+def validate_cli_option_combinations(args):
+    """Reject confusing or unsafe configure pxe option combinations."""
+    if getattr(args, "guided", False) and getattr(args, "reset_standard_profiles", False):
+        raise PxeConfigError(
+            "Do not use --guided and --reset-standard-profiles together. "
+            "Run 'aerolitctl configure pxe --reset-standard-profiles' first, "
+            "then run 'aerolitctl configure pxe --guided'."
+        )
+
+
 def apply_cli_changes(state, args):
     """Apply requested CLI changes to the managed PXE state."""
     conflicts = profiles_removed_and_modified(args)
@@ -2422,6 +2432,8 @@ def run_configure_pxe(args):
     no_backup = getattr(args, "no_backup", False)
     show_only = getattr(args, "show", False)
     validate_requested = getattr(args, "validate", False)
+
+    validate_cli_option_combinations(args)
 
     state = load_managed_pxe_state(bundle_path)
 
