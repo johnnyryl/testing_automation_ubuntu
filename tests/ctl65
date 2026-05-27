@@ -15,6 +15,7 @@ from __future__ import print_function
 import datetime
 import shutil
 import ipaddress
+import sys
 from collections import OrderedDict
 from pathlib import Path
 
@@ -1858,6 +1859,9 @@ def has_write_actions(args):
             return True
 
     if getattr(args, "reset_standard_profiles", False):
+        return True
+
+    if getattr(args, "guided", False):
         return True
 
     return False
