@@ -955,10 +955,10 @@ def run_deploy_server(
 
     print_deploy_plan(plan, generated_vars_path)
 
-    print("")
-    print_pxe_status_summary(bundle_path)
-
     if show:
+        print("")
+        print_pxe_status_summary(bundle_path)
+        print("")
         print("Show complete. No files or services were changed.")
         return 0
 
