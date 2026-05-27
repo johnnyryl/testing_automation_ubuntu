@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from .config import get_bundle_path, load_config
+from .pxe import print_pxe_status_summary
 from .paths import (
     CONFIG_FILE,
     aerolitctl_server_generated_vars_file,
@@ -526,5 +527,12 @@ def run_status(verbose=False):
         print_status_value("collections-hub", collections_hub)
         print_status_value("Ansible dir", ansible_dir)
         print("")
+
+    config = load_config()
+    bundle_path = get_bundle_path(config)
+
+    if bundle_path:
+        print("")
+        print_pxe_status_summary(bundle_path)
 
     return 0
