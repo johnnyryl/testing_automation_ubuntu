@@ -3185,6 +3185,22 @@ def run_guided(inventory, bundle_path=None, allow_sensitive=False, force=False):
     )
 
     if quick_default:
+        print_guided_section(
+            "Recommended first-time setup",
+            (
+                "This is a guided starting path for a new or mostly empty Ansible "
+                "inventory. It can ensure the standard AeroLIT groups, add localhost "
+                "to the controller/PXE groups, help configure shared SSH/become "
+                "defaults, and optionally add initial managed hosts."
+            ),
+        )
+
+        print("Choose Yes if you want AeroLIT to walk you through the common setup path.")
+        print("Choose No if you want to manually pick sections from the main menu.")
+        print("")
+        print("Nothing is written yet. Changes are only saved if you choose Finish guided mode and save.")
+        print("")
+
         if prompt_yes_no("Run recommended first-time setup now?", default=True):
             guided_recommended_first_time_setup(
                 inventory,
