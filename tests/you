@@ -1,3 +1,16 @@
+
+
+python3 -m compileall src
+aerolitctl configure repos --help
+aerolitctl configure repos --show
+aerolitctl configure repos --validate
+sudo aerolitctl configure repos --dry-run --refresh
+
+
+
+
+
+
 This pxe.py you pasted does define print_pxe_status_summary() correctly at top level.
 
 So if this exact file is actually saved at:
