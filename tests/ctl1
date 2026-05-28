@@ -46,14 +46,17 @@ Then we test. After that, we add path show/set, then bundle validation, then doc
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
+
 [project]
 name = "aerolitctl"
 version = "0.1.0"
 description = "Command and control interface for AeroLIT bundles."
 readme = "README.md"
 requires-python = ">=3.6"
+
 [project.scripts]
 aerolitctl = "aerolitctl.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
