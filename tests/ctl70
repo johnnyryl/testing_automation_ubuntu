@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="aerolitctl",
-    version="0.1.0"
+    version="0.1.0",
     description="Command and control interface for AeroLIT bundles.",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
