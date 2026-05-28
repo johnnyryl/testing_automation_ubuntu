@@ -21,7 +21,7 @@ It intentionally runs real `aerolitctl configure server`,
 way to confirm saved config, generated vars, managed Ansible
 files, and bundle manifest behavior. By default it restores the
 original config, state, generated vars, manifest, sync files,
-CI file, and managed Ansible files before exiting.
+CI file, managed Ansible files, and managed PXE files before exiting.
 
 Recommended location:
   tools/aerolitctl_merge_readiness.py
