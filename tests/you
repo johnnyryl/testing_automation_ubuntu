@@ -1,5 +1,18 @@
 
 
+
+python3 - <<'PY'
+import yaml
+path = "/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml"
+with open(path) as f:
+    data = yaml.safe_load(f)
+print(data["aerolitctl_server_bootstrap_repos"]["os_key"])
+print(len(data["aerolitctl_provisioning_repositories"]["rhel8"]))
+PY
+
+
+
+
 python3 -m compileall src
 aerolitctl configure repos --help
 aerolitctl configure repos --show
