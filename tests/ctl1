@@ -321,12 +321,17 @@ def config_text(bundle_path):
 6. src/aerolitctl/state.py
 
 """Runtime state handling for aerolitctl."""
+
 from datetime import datetime
+
 from . import __version__
 from .config import dump_yaml
+
+
 def default_state():
     """Return initial AeroLIT runtime state."""
     now = datetime.utcnow().isoformat() + "Z"
+
     return {
         "version": 1,
         "aerolitctl": {
@@ -342,6 +347,8 @@ def default_state():
             "completed_at": now,
         },
     }
+
+
 def state_text():
     """Return initial state YAML text."""
     return dump_yaml(default_state())
