@@ -15,10 +15,11 @@ from .paths import (
     STATE_DIR,
     ansible_cfg_file,
     ansible_dir,
+    ansible_group_vars_all_dir,
     ansible_group_vars_dir,
-    ansible_inventory_file,
+    ansible_inventory_dir,
     bundle_derived_paths,
-    generated_bootstrap_vars_file,
+    aerolitctl_server_generated_vars_file,
     gitlab_ci_file,
     initialization_backup_root,
     sync_preserve_file,
@@ -75,9 +76,10 @@ def default_config(bundle_path):
             "enabled": True,
             "root": str(ansible_dir(bundle_path)),
             "config_path": str(ansible_cfg_file(bundle_path)),
-            "inventory_path": str(ansible_inventory_file(bundle_path)),
+            "inventory_path": str(ansible_inventory_dir(bundle_path)),
             "group_vars_path": str(ansible_group_vars_dir(bundle_path)),
-            "generated_vars_path": str(generated_bootstrap_vars_file(bundle_path)),
+            "group_vars_all_path": str(ansible_group_vars_all_dir(bundle_path)),
+            "generated_vars_path": str(aerolitctl_server_generated_vars_file(bundle_path)),
             "playbook_dir": str(ansible_dir(bundle_path)),
         },
         "sync": {
@@ -167,9 +169,9 @@ def update_bundle_path(config, bundle_path):
     ansible["enabled"] = ansible.get("enabled", True)
     ansible["root"] = str(ansible_dir(bundle_path))
     ansible["config_path"] = str(ansible_cfg_file(bundle_path))
-    ansible["inventory_path"] = str(ansible_inventory_file(bundle_path))
+    ansible["inventory_path"] = str(ansible_inventory_dir(bundle_path))
     ansible["group_vars_path"] = str(ansible_group_vars_dir(bundle_path))
-    ansible["generated_vars_path"] = str(generated_bootstrap_vars_file(bundle_path))
+    ansible["generated_vars_path"] = str(aerolitctl_server_generated_vars_file(bundle_path))
     ansible["playbook_dir"] = str(ansible_dir(bundle_path))
 
     sync = config.setdefault("sync", {})
