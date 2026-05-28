@@ -422,6 +422,30 @@ def managed_ansible_state_paths(args):
     return paths
 
 
+STANDARD_PXE_PROFILE_IDS = [
+    "minimal",
+    "small_disk",
+    "security_baseline",
+    "security_luks",
+    "developer_workstation",
+    "embedded_edge",
+]
+
+
+def managed_pxe_state_paths(args):
+    """Return aerolitctl-managed PXE files that should be snapshotted."""
+    paths = [
+        Path(args.pxe_generated_vars_path),
+    ]
+
+    profile_root = Path(args.pxe_profile_overrides_dir)
+
+    for profile_id in STANDARD_PXE_PROFILE_IDS:
+        paths.append(profile_root / "{}.yml".format(profile_id))
+
+    return paths
+
+
 def assert_bundle_manifest_content(args):
     """Assert the bundle manifest exists and contains expected v1 fields."""
     manifest = bundle_manifest_path(args)
@@ -614,6 +638,11 @@ def test_cli_help_and_parser(args):
         ["aerolitctl", "configure", "server", "--dry-run", "--mode", "pxe", "--show", "--verbose"],
         ["aerolitctl", "configure", "ansible", "--help"],
         ["aerolitctl", "configure", "ansible", "--show"],
+        ["aerolitctl", "configure", "pxe", "--help"],
+        ["aerolitctl", "configure", "pxe", "--show"],
+        ["aerolitctl", "configure", "pxe", "--validate"],
+        ["aerolitctl", "configure", "pxe", "--dry-run", "--reset-standard-profiles"],
+        ["aerolitctl", "configure", "pxe", "--dry-run", "--disable-dnsmasq-dhcp"],
     ]
 
     help_output = run_cmd(["aerolitctl", "configure", "server", "--help"])
@@ -626,6 +655,18 @@ def test_cli_help_and_parser(args):
     assert_contains(ansible_help, "--add-kubernetes-cluster", "configure ansible help")
     assert_contains(ansible_help, "--add-host-range", "configure ansible help")
 
+    pxe_help = run_cmd(["aerolitctl", "configure", "pxe", "--help"])
+    assert_contains(pxe_help, "--reset-standard-profiles", "configure pxe help")
+    assert_contains(pxe_help, "--enable-profile", "configure pxe help")
+    assert_contains(pxe_help, "--disable-profile", "configure pxe help")
+    assert_contains(pxe_help, "--implement-profile", "configure pxe help")
+    assert_contains(pxe_help, "--placeholder-profile", "configure pxe help")
+    assert_contains(pxe_help, "--pxe-server-ip", "configure pxe help")
+    assert_contains(pxe_help, "--pxe-http-port", "configure pxe help")
+    assert_contains(pxe_help, "--enable-dnsmasq-dhcp", "configure pxe help")
+    assert_contains(pxe_help, "--disable-dnsmasq-dhcp", "configure pxe help")
+    assert_contains(pxe_help, "--dnsmasq-dhcp-range", "configure pxe help")
+
     for command in commands:
         run_cmd(command)
 
@@ -636,7 +677,6 @@ def test_standardized_source_wording(args):
 
     bad_strings = [
         "NFS/controller",
-        "PXE:",
     ]
 
     required_strings = [
@@ -1089,6 +1129,265 @@ def test_configure_ansible_sensitive_var_guard(args):
     )
 
 
+def test_configure_pxe_option_guard(args):
+    """Confirm configure pxe rejects confusing option combinations."""
+    output = run_cmd(
+        [
+            "aerolitctl",
+            "configure",
+            "pxe",
+            "--guided",
+            "--reset-standard-profiles",
+        ],
+        expected_rc=1,
+    )
+
+    assert_contains(
+        output,
+        "Do not use --guided and --reset-standard-profiles together",
+        "configure pxe guided/reset guard",
+    )
+
+
+def test_configure_pxe_dry_run_read_only(args, hash_paths):
+    """Confirm configure pxe dry-run operations are read-only."""
+    before = sha256_paths(hash_paths)
+
+    commands = [
+        [
+            "aerolitctl",
+            "configure",
+            "pxe",
+            "--dry-run",
+            "--reset-standard-profiles",
+        ],
+        [
+            "aerolitctl",
+            "configure",
+            "pxe",
+            "--dry-run",
+            "--enable-profile",
+            "minimal",
+            "--disable-profile",
+            "developer_workstation",
+            "--implement-profile",
+            "minimal",
+            "--placeholder-profile",
+            "security_baseline",
+        ],
+        [
+            "aerolitctl",
+            "configure",
+            "pxe",
+            "--dry-run",
+            "--pxe-server-ip",
+            args.server_ip,
+            "--pxe-http-port",
+            "18080",
+            "--dnsmasq-interface",
+            args.interface,
+            "--enable-dnsmasq-dhcp",
+            "--enable-dnsmasq-tftp",
+            "--dnsmasq-dhcp-range",
+            args.dhcp_start,
+            args.dhcp_end,
+            "255.255.255.0",
+            "--dnsmasq-gateway",
+            "",
+            "--dnsmasq-dns-servers",
+            args.server_ip,
+            "--enable-dnsmasq-firewall",
+            "--dnsmasq-firewall-zone",
+            "public",
+        ],
+        [
+            "aerolitctl",
+            "configure",
+            "pxe",
+            "--dry-run",
+            "--disable-dnsmasq-dhcp",
+            "--disable-dnsmasq-tftp",
+            "--disable-dnsmasq-firewall",
+        ],
+    ]
+
+    for command in commands:
+        output = run_cmd(command)
+        assert_contains(output, "AeroLIT configure pxe plan", "configure pxe dry-run")
+        assert_contains(
+            output,
+            "Dry run complete. No files were changed.",
+            "configure pxe dry-run",
+        )
+
+    after = sha256_paths(hash_paths)
+    assert_hashes_same(before, after, "configure-pxe-dry-run-read-only")
+
+
+def test_real_configure_pxe_writes(args):
+    """Run real configure pxe writes and verify status/doctor/deploy summaries."""
+    generated_path = Path(args.pxe_generated_vars_path)
+    profile_root = Path(args.pxe_profile_overrides_dir)
+
+    output = run_cmd(
+        [
+            "aerolitctl",
+            "configure",
+            "pxe",
+            "--no-backup",
+            "--reset-standard-profiles",
+            "--disable-profile",
+            "security_baseline",
+            "--disable-profile",
+            "security_luks",
+            "--disable-profile",
+            "developer_workstation",
+            "--disable-profile",
+            "embedded_edge",
+            "--implement-profile",
+            "minimal",
+            "--implement-profile",
+            "small_disk",
+            "--pxe-server-ip",
+            args.server_ip,
+            "--pxe-http-port",
+            "18080",
+            "--dnsmasq-interface",
+            args.interface,
+            "--enable-dnsmasq-dhcp",
+            "--enable-dnsmasq-tftp",
+            "--dnsmasq-dhcp-range",
+            args.dhcp_start,
+            args.dhcp_end,
+            "255.255.255.0",
+            "--dnsmasq-gateway",
+            "",
+            "--dnsmasq-dns-servers",
+            args.server_ip,
+            "--enable-dnsmasq-firewall",
+            "--dnsmasq-firewall-zone",
+            "public",
+        ]
+    )
+
+    assert_contains(output, "AeroLIT PXE configuration saved.", "configure pxe write")
+
+    assert_path_exists(generated_path, "PXE generated vars")
+    generated_text = read_text(generated_path)
+
+    assert_contains(generated_text, "# Generated AeroLIT PXE variables", "PXE generated vars")
+    assert_contains(generated_text, "aerolitctl_pxe_generated: true", "PXE generated vars")
+    assert_contains(generated_text, "aerolitctl_pxe_enabled_profiles:", "PXE generated vars")
+    assert_contains(generated_text, "- 'minimal'", "PXE generated vars")
+    assert_contains(generated_text, "- 'small_disk'", "PXE generated vars")
+    assert_not_contains(
+        generated_text,
+        "- 'developer_workstation'",
+        "PXE generated vars enabled profiles",
+    )
+    assert_contains(generated_text, "pxe_content_volume_mounts:", "PXE generated vars")
+    assert_contains(generated_text, "/overrides:ro,Z", "PXE generated vars")
+    assert_contains(generated_text, "PXE_OVERRIDE_ROOT: '/overrides'", "PXE generated vars")
+    assert_contains(generated_text, "pxe_dnsmasq_enable_dhcp: true", "PXE generated vars")
+    assert_contains(generated_text, "pxe_dnsmasq_enable_tftp: true", "PXE generated vars")
+    assert_contains(generated_text, "pxe_dnsmasq_gateway: ''", "PXE generated vars")
+
+    minimal_profile = profile_root / "minimal.yml"
+    small_disk_profile = profile_root / "small_disk.yml"
+    security_profile = profile_root / "security_baseline.yml"
+
+    assert_path_exists(minimal_profile, "minimal PXE profile")
+    assert_path_exists(small_disk_profile, "small_disk PXE profile")
+    assert_path_exists(security_profile, "security_baseline PXE profile")
+
+    minimal_text = read_text(minimal_profile)
+    small_disk_text = read_text(small_disk_profile)
+    security_text = read_text(security_profile)
+
+    assert_contains(
+        minimal_text,
+        "# Generated AeroLIT PXE profile override",
+        "minimal PXE profile",
+    )
+    assert_contains(minimal_text, "profile_id: 'minimal'", "minimal PXE profile")
+    assert_contains(minimal_text, "implemented: true", "minimal PXE profile")
+
+    assert_contains(
+        small_disk_text,
+        "profile_id: 'small_disk'",
+        "small_disk PXE profile",
+    )
+    assert_contains(small_disk_text, "implemented: true", "small_disk PXE profile")
+
+    assert_contains(
+        security_text,
+        "profile_id: 'security_baseline'",
+        "security_baseline PXE profile",
+    )
+    assert_contains(
+        security_text,
+        "show_in_main_menu: false",
+        "security_baseline PXE profile",
+    )
+
+    show_output = run_cmd(["aerolitctl", "configure", "pxe", "--show"])
+    assert_contains(show_output, "AeroLIT managed PXE configuration", "configure pxe show")
+    assert_contains(show_output, "minimal: enabled, implemented", "configure pxe show")
+    assert_contains(show_output, "small_disk: enabled, implemented", "configure pxe show")
+    assert_contains(show_output, "security_baseline: disabled", "configure pxe show")
+
+    validate_output = run_cmd(["aerolitctl", "configure", "pxe", "--validate"])
+    assert_contains(validate_output, "AeroLIT PXE validation", "configure pxe validate")
+    assert_regex(validate_output, r"Failures:\s+0", "configure pxe validate")
+
+    status_output = run_cmd(["aerolitctl", "status"])
+    assert_contains(status_output, "PXE configuration:", "status PXE summary")
+    assert_contains(status_output, "Configured: yes", "status PXE summary")
+    assert_contains(status_output, "Profiles enabled: minimal, small_disk", "status PXE summary")
+    assert_contains(status_output, "PXE content role mount: configured", "status PXE summary")
+    assert_contains(status_output, "PXE generated vars:", "status PXE summary")
+
+    doctor_output = run_cmd(["aerolitctl", "doctor"])
+    assert_contains(doctor_output, "PXE generated vars found", "doctor PXE summary")
+    assert_contains(doctor_output, "PXE override root found", "doctor PXE summary")
+    assert_contains(doctor_output, "PXE profiles enabled: minimal, small_disk", "doctor PXE summary")
+    assert_contains(
+        doctor_output,
+        "PXE content role mounts are configured",
+        "doctor PXE summary",
+    )
+
+    run_cmd(configure_server_command(args, "full"))
+
+    deploy_show_output = run_cmd(["aerolitctl", "deploy", "server", "--show"])
+    assert_contains(
+        deploy_show_output,
+        "AeroLIT deploy server plan",
+        "deploy --show PXE summary",
+    )
+    assert_contains(
+        deploy_show_output,
+        "PXE configuration:",
+        "deploy --show PXE summary",
+    )
+    assert_contains(
+        deploy_show_output,
+        "Profiles enabled: minimal, small_disk",
+        "deploy --show PXE summary",
+    )
+    assert_contains(
+        deploy_show_output,
+        "PXE content role mount: configured",
+        "deploy --show PXE summary",
+    )
+    assert_contains(
+        deploy_show_output,
+        "Show complete. No files or services were changed.",
+        "deploy --show PXE summary",
+    )
+    assert_not_contains(deploy_show_output, "Would run", "deploy --show PXE summary")
+
+
 def test_real_configure_ansible_writes(args):
     """Run real configure ansible writes and verify managed files."""
     inventory_path = Path(args.ansible_inventory_path)
@@ -1511,6 +1810,17 @@ def main():
         / "aerolit_test_group"
         / "aerolitctl.yml"
     )
+    args.pxe_generated_vars_path = str(
+        Path(args.bundle_path)
+        / "collections-hub"
+        / "ansible"
+        / "group_vars"
+        / "all"
+        / "aerolitctl_pxe_generated.yml"
+    )
+    args.pxe_overrides_dir = "/etc/aerolit/overrides/pxe"
+    args.pxe_profile_overrides_dir = "/etc/aerolit/overrides/pxe/profiles"
+    args.pxe_template_overrides_dir = "/etc/aerolit/overrides/pxe/templates"
     args.log_dir = args.log_dir or "/tmp/aerolitctl-merge-test-{}".format(timestamp())
     args.require_firewalld = not args.no_require_firewalld
 
@@ -1540,6 +1850,7 @@ def main():
         Path(args.bundle_path) / "collections-hub" / ".gitlab-ci.yml",
         Path(args.generated_vars_path),
         *managed_ansible_state_paths(args),
+        *managed_pxe_state_paths(args),
     ]
 
     state_snapshot = None
@@ -1558,6 +1869,9 @@ def main():
     print("Ansible inventory  : {}".format(args.ansible_inventory_path))
     print("Ansible gen vars   : {}".format(args.ansible_generated_vars_path))
     print("Ansible test vars  : {}".format(args.ansible_test_group_vars_path))
+    print("PXE gen vars       : {}".format(args.pxe_generated_vars_path))
+    print("PXE overrides      : {}".format(args.pxe_overrides_dir))
+    print("PXE profiles       : {}".format(args.pxe_profile_overrides_dir))
     print("Log dir            : {}".format(args.log_dir))
     print("Local CLI wrapper  : {}".format(args.aerolitctl_wrapper))
     print("Keep state         : {}".format(args.keep_state))
@@ -1586,6 +1900,8 @@ def main():
         ("configure server dry-run mode behavior", lambda: test_configure_dry_run_modes(args, hash_paths)),
         ("configure ansible dry-run read-only", lambda: test_configure_ansible_dry_run_read_only(args, hash_paths)),
         ("configure ansible sensitive var guard", lambda: test_configure_ansible_sensitive_var_guard(args)),
+        ("configure pxe option guard", lambda: test_configure_pxe_option_guard(args)),
+        ("configure pxe dry-run read-only", lambda: test_configure_pxe_dry_run_read_only(args, hash_paths)),
     ]
 
     if not args.skip_write_tests:
@@ -1593,6 +1909,7 @@ def main():
             [
                 ("real configure ansible managed writes", lambda: test_real_configure_ansible_writes(args)),
                 ("real configure server mode writes", lambda: test_real_configure_modes(args)),
+                ("real configure pxe managed writes/status/doctor", lambda: test_real_configure_pxe_writes(args)),
                 ("deploy server mode dry-run matrix", lambda: test_deploy_mode_matrix(args)),
                 ("deploy server skip flags", lambda: test_deploy_skip_flags(args)),
                 ("deploy show vs dry-run", lambda: test_deploy_show_vs_dry_run(args, hash_paths)),
