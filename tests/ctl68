@@ -52,11 +52,15 @@ class RepoReport(object):
 
     def __init__(self):
         self.ok = []
+        self.info = []
         self.warnings = []
         self.errors = []
 
     def add_ok(self, message):
         self.ok.append(message)
+
+    def add_info(self, message):
+        self.info.append(message)
 
     def add_warning(self, message):
         self.warnings.append(message)
@@ -71,6 +75,9 @@ class RepoReport(object):
         for message in self.ok:
             print("[OK] {}".format(message))
 
+        for message in self.info:
+            print("[INFO] {}".format(message))
+
         for message in self.warnings:
             print("[WARN] {}".format(message))
 
@@ -80,6 +87,7 @@ class RepoReport(object):
         print("")
         print("Summary:")
         print("  OK: {}".format(len(self.ok)))
+        print("  Info: {}".format(len(self.info)))
         print("  Warnings: {}".format(len(self.warnings)))
         print("  Failures: {}".format(len(self.errors)))
 
@@ -987,11 +995,122 @@ def write_if_changed(path, content, dry_run=False, force=False, no_backup=False)
     return "created"
 
 
-def validate_repos_state(bundle_path, path_for_ansible, entries):
+def collect_requested_os_keys(args):
+    """Return OS keys explicitly requested by configure repos arguments."""
+    requested = set()
+
+    provision_specs = []
+    provision_specs.extend(getattr(args, "provision_repo", None) or [])
+    provision_specs.extend(getattr(args, "provision_extra_repo", None) or [])
+
+    for spec in provision_specs:
+        left = str(spec).split("=", 1)[0].strip().lower()
+
+        if ":" not in left:
+            continue
+
+        os_key = left.split(":", 1)[0].strip()
+
+        if os_key in SUPPORTED_RHEL_KEYS:
+            requested.add(os_key)
+
+    return requested
+
+
+def path_contains_rpms(path, max_depth=3):
+    """Return True if a path contains RPM files within a bounded depth."""
+    path = Path(path)
+
+    if not path.exists() or not path.is_dir():
+        return False
+
+    root_depth = len(path.parts)
+
+    for current, dirs, files in os.walk(str(path)):
+        current_path = Path(current)
+        depth = len(current_path.parts) - root_depth
+
+        if depth > max_depth:
+            dirs[:] = []
+            continue
+
+        if any(item.lower().endswith(".rpm") for item in files):
+            return True
+
+        dirs[:] = [
+            item
+            for item in dirs
+            if item not in SKIP_SCAN_DIRS
+        ]
+
+    return False
+
+
+def invalid_expected_repo_paths(bundle_path, os_key):
+    """Return repo-looking paths for an OS that exist but lack repodata."""
+    bundle_path = absolute_path(bundle_path)
+    major = os_key.replace("rhel", "")
+    invalid = []
+    seen = set()
+
+    iso_roots = [
+        bundle_path / "extracted_isos" / "{}iso".format(os_key),
+        bundle_path / "extracted_isos" / os_key,
+        bundle_path / "extracted_isos" / "rhel{}iso".format(major),
+        bundle_path / "extracted_isos" / "rhel{}".format(major),
+        bundle_path / "isos" / "{}iso".format(os_key),
+        bundle_path / "isos" / os_key,
+        bundle_path / "isos" / "rhel{}iso".format(major),
+        bundle_path / "isos" / "rhel{}".format(major),
+    ]
+
+    for root in iso_roots:
+        for repo_name in ["BaseOS", "baseos", "AppStream", "appstream"]:
+            candidate = root / repo_name
+            key = str(candidate)
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            if candidate.exists() and not repo_dir_is_valid(candidate):
+                invalid.append(candidate)
+
+    repos_root = bundle_path / "repos"
+    if repos_root.exists():
+        for current, dirs, files in os.walk(str(repos_root)):
+            current_path = Path(current)
+
+            dirs[:] = [
+                item
+                for item in dirs
+                if item not in SKIP_SCAN_DIRS
+            ]
+
+            if infer_rhel_key_from_path(current_path) != os_key:
+                continue
+
+            if repo_dir_is_valid(current_path):
+                dirs[:] = []
+                continue
+
+            if path_contains_rpms(current_path, max_depth=2):
+                key = str(current_path)
+                if key not in seen:
+                    seen.add(key)
+                    invalid.append(current_path)
+                dirs[:] = []
+
+    return invalid
+
+
+def validate_repos_state(bundle_path, path_for_ansible, entries, requested_os_keys=None):
     """Validate discovered repository state."""
     report = RepoReport()
     bundle_path = absolute_path(bundle_path)
     generated_path = repos_generated_vars_file(bundle_path)
+    requested_os_keys = set(requested_os_keys or [])
 
     if bundle_path.exists():
         report.add_ok("Bundle path found: {}".format(bundle_path))
@@ -1039,8 +1158,32 @@ def validate_repos_state(bundle_path, path_for_ansible, entries):
             report.add_ok(
                 "{} provisioning repos discovered: {}".format(os_key, len(repos))
             )
+            continue
+
+        invalid_paths = invalid_expected_repo_paths(bundle_path, os_key)
+
+        if os_key in requested_os_keys:
+            report.add_warning(
+                "{} provisioning repos not discovered, but that OS was explicitly requested.".format(
+                    os_key
+                )
+            )
+        elif invalid_paths:
+            report.add_warning(
+                "{} repo-looking path(s) exist but are missing repodata/repomd.xml.".format(
+                    os_key
+                )
+            )
+            for invalid_path in invalid_paths:
+                report.add_warning(
+                    "Invalid {} repo path: {}".format(os_key, invalid_path)
+                )
         else:
-            report.add_warning("{} provisioning repos not discovered.".format(os_key))
+            report.add_info(
+                "{} provisioning repos not discovered; no repo-looking path was found.".format(
+                    os_key
+                )
+            )
 
     unknown = [
         entry
@@ -1179,6 +1322,8 @@ def run_configure_repos(args):
             args=args,
         )
 
+        requested_os_keys = collect_requested_os_keys(args)
+
         if not show_only and not validate_requested and not refresh_requested:
             show_only = True
 
@@ -1203,7 +1348,12 @@ def run_configure_repos(args):
             print("{:<32} {}".format("Force overwrite:", force))
             print("")
 
-            report = validate_repos_state(bundle_path, path_for_ansible, entries)
+            report = validate_repos_state(
+                bundle_path,
+                path_for_ansible,
+                entries,
+                requested_os_keys=requested_os_keys,
+            )
             if report.errors:
                 print("")
                 print("Refusing to write invalid managed repository configuration.")
@@ -1233,7 +1383,12 @@ def run_configure_repos(args):
 
         if validate_requested or refresh_requested or show_only:
             print("")
-            report = validate_repos_state(bundle_path, path_for_ansible, entries)
+            report = validate_repos_state(
+                bundle_path,
+                path_for_ansible,
+                entries,
+                requested_os_keys=requested_os_keys,
+            )
             report.print_report()
             return report.exit_code()
 
