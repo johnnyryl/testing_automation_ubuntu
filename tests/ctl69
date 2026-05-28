@@ -6,12 +6,13 @@ except ImportError:
     yaml = None
 
 
-def require yaml():
+def require_yaml():
     """Fail with a useful message if PyYAML is missing."""
     if yaml is None:
         raise RuntimeError(
             "Missing Python YAML support. Install it with: dnf install -y python3-pyyaml"
         )
+
 
 def yaml_dump(data):
     """Return YAML text with compatibility for older PyYAML versions."""
@@ -20,13 +21,13 @@ def yaml_dump(data):
     try:
         return yaml.safe_dump(
             data,
-            default_fLow_style=False,
+            default_flow_style=False,
             sort_keys=False,
         )
-    except ТуреЕгrог:
+    except TypeError:
         return yaml.safe_dump(
             data,
-            default_fLow_style=False,
+            default_flow_style=False,
         )
 
 
