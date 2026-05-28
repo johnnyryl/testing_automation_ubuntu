@@ -1,0 +1,1244 @@
+"""AeroLIT repository discovery and generated repo configuration helpers.
+
+`aerolitctl configure repos` is not intended to be a required happy-path step.
+
+Default behavior should eventually be:
+- deploy server uses existing system repos first
+- if missing packages cannot be installed, deploy server discovers bundle repos
+- deploy server can write/use an AeroLIT server bootstrap repo automatically
+- provisioning repo variables are generated from bundle ISOs and repos by default
+
+This module provides safe discovery, validation, show, and managed group_vars
+generation. Package install/bootstrap integration comes later.
+"""
+
+from __future__ import print_function
+
+import datetime
+import os
+import re
+import shutil
+from collections import OrderedDict
+from pathlib import Path
+from urllib.parse import quote, unquote, urlparse
+
+from .config import get_bundle_path, load_config
+
+
+GENERATED_REPOS_MARKER = "# Generated AeroLIT repository variables"
+
+DEFAULT_PATH_FOR_ANSIBLE = "/home/unix/sysadmin"
+SUPPORTED_RHEL_KEYS = ["rhel7", "rhel8", "rhel9", "rhel10"]
+
+SKIP_SCAN_DIRS = [
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".tox",
+    ".venv",
+    "venv",
+]
+
+URL_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+
+
+class RepoConfigError(Exception):
+    """Raised when configure repos input is invalid."""
+
+
+class RepoReport(object):
+    """Collect configure repos validation results."""
+
+    def __init__(self):
+        self.ok = []
+        self.warnings = []
+        self.errors = []
+
+    def add_ok(self, message):
+        self.ok.append(message)
+
+    def add_warning(self, message):
+        self.warnings.append(message)
+
+    def add_error(self, message):
+        self.errors.append(message)
+
+    def print_report(self):
+        print("AeroLIT repository validation")
+        print("")
+
+        for message in self.ok:
+            print("[OK] {}".format(message))
+
+        for message in self.warnings:
+            print("[WARN] {}".format(message))
+
+        for message in self.errors:
+            print("[FAIL] {}".format(message))
+
+        print("")
+        print("Summary:")
+        print("  OK: {}".format(len(self.ok)))
+        print("  Warnings: {}".format(len(self.warnings)))
+        print("  Failures: {}".format(len(self.errors)))
+
+    def exit_code(self):
+        return 1 if self.errors else 0
+
+
+def timestamp():
+    """Return a filesystem-safe timestamp."""
+    return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def read_text(path):
+    """Read text while tolerating non-UTF8 bytes."""
+    with open(str(path), "r", encoding="utf-8", errors="ignore") as handle:
+        return handle.read()
+
+
+def write_text(path, content):
+    """Write text and create parent directories."""
+    path = Path(path)
+
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True)
+
+    with open(str(path), "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
+def yaml_quote(value):
+    """Quote a scalar as a YAML string."""
+    value = str(value)
+    return "'" + value.replace("'", "''") + "'"
+
+
+def yaml_value(value):
+    """Render a simple YAML scalar value."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+
+    if value is None:
+        return "null"
+
+    if isinstance(value, int):
+        return str(value)
+
+    return yaml_quote(value)
+
+
+def absolute_path(path, cwd=None):
+    """Return an absolute normalized Path without requiring it to exist."""
+    path = Path(path)
+
+    if not path.is_absolute():
+        path = Path(cwd or os.getcwd()) / path
+
+    return Path(os.path.abspath(str(path)))
+
+
+def normalize_client_path(path):
+    """Normalize the client-visible bundle path."""
+    value = str(path or "").strip()
+
+    if not value:
+        raise RepoConfigError("--path-for-ansible cannot be empty")
+
+    if not value.startswith("/"):
+        raise RepoConfigError(
+            "--path-for-ansible must be an absolute client-visible path"
+        )
+
+    if value != "/":
+        value = value.rstrip("/")
+
+    return value
+
+
+def is_url(value):
+    """Return True when value looks like a URL."""
+    return bool(URL_PATTERN.match(str(value).strip()))
+
+
+def is_file_url(value):
+    """Return True when value is a file:// URL."""
+    return str(value).strip().lower().startswith("file://")
+
+
+def trim_url(value):
+    """Normalize a non-file URL without breaking scheme syntax."""
+    value = str(value).strip()
+
+    if value.endswith("/") and not re.match(
+        r"^[A-Za-z][A-Za-z0-9+.-]*://[^/]+/$",
+        value,
+    ):
+        value = value.rstrip("/")
+
+    return value
+
+
+def file_url_for_path(path):
+    """Return a URL-encoded file:// baseurl for a local path."""
+    path = absolute_path(path)
+    return "file://{}".format(quote(str(path), safe="/:"))
+
+
+def local_path_from_file_url(value):
+    """Return local path from file:// URL."""
+    parsed = urlparse(str(value).strip())
+
+    if parsed.scheme.lower() != "file":
+        raise RepoConfigError("Expected file:// URL, got: {}".format(value))
+
+    if parsed.netloc not in ["", "localhost"]:
+        raise RepoConfigError(
+            "Only local file:// URLs are supported for validation, got: {}".format(
+                value
+            )
+        )
+
+    return absolute_path(unquote(parsed.path))
+
+
+def local_path_from_source(source, cwd=None):
+    """Return local path for local path or file:// source, else None."""
+    source = str(source).strip()
+
+    if is_file_url(source):
+        return local_path_from_file_url(source)
+
+    if is_url(source):
+        return None
+
+    return absolute_path(source, cwd=cwd)
+
+
+def source_to_server_baseurl(source, cwd=None):
+    """Return server-local baseurl from a path or URL source."""
+    source = str(source).strip()
+
+    if not source:
+        raise RepoConfigError("Repository source cannot be empty")
+
+    if is_file_url(source):
+        return file_url_for_path(local_path_from_file_url(source))
+
+    if is_url(source):
+        return trim_url(source)
+
+    return file_url_for_path(absolute_path(source, cwd=cwd))
+
+
+def source_to_client_baseurl(bundle_path, path_for_ansible, source, cwd=None):
+    """Return client-visible baseurl for a repo source."""
+    source = str(source).strip()
+    bundle_path = absolute_path(bundle_path)
+
+    if is_url(source) and not is_file_url(source):
+        return trim_url(source)
+
+    local_path = local_path_from_source(source, cwd=cwd)
+    if local_path is None:
+        return source_to_server_baseurl(source, cwd=cwd)
+
+    try:
+        rel = local_path.relative_to(bundle_path)
+    except ValueError:
+        return file_url_for_path(local_path)
+
+    client_path = Path(path_for_ansible) / rel
+    return file_url_for_path(client_path)
+
+
+def configured_bundle_path():
+    """Return configured bundle path from aerolitctl config."""
+    config = load_config()
+    bundle_path = get_bundle_path(config)
+
+    if not bundle_path:
+        raise RepoConfigError(
+            "No bundle path is configured. Run: aerolitctl configure init"
+        )
+
+    return absolute_path(bundle_path)
+
+
+def repos_generated_vars_file(bundle_path):
+    """Return managed generated repo vars path."""
+    return (
+        absolute_path(bundle_path)
+        / "collections-hub"
+        / "ansible"
+        / "group_vars"
+        / "all"
+        / "aerolitctl_repos_generated.yml"
+    )
+
+
+def current_os_major():
+    """Return current OS major version from /etc/os-release when available."""
+    os_release = Path("/etc/os-release")
+
+    if not os_release.exists():
+        return None
+
+    content = read_text(os_release)
+
+    match = re.search(r'^VERSION_ID="?([0-9]+)', content, re.MULTILINE)
+    if match:
+        return match.group(1)
+
+    return None
+
+
+def repo_dir_is_valid(path):
+    """Return True when path looks like a yum/dnf repo directory."""
+    path = Path(path)
+    return (path / "repodata" / "repomd.xml").exists()
+
+
+def repo_source_is_valid(source, cwd=None):
+    """Return True when a local repo source is valid; remote URLs are not verified."""
+    local_path = local_path_from_source(source, cwd=cwd)
+
+    if local_path is None:
+        return True
+
+    return repo_dir_is_valid(local_path)
+
+
+def sanitize_repo_id(value):
+    """Return a safe repo id fragment."""
+    value = str(value).strip().lower()
+    value = re.sub(r"[^a-z0-9_.-]+", "-", value)
+    value = value.strip("-._")
+
+    if not value:
+        value = "repo"
+
+    return value
+
+
+def infer_rhel_key_from_path(path):
+    """Infer rhel7/rhel8/rhel9/rhel10 from a repo path or URL."""
+    text = str(path).lower()
+
+    patterns = [
+        r"rhel[-_./ ]*([0-9]+)",
+        r"redhat[-_./ ]*([0-9]+)",
+        r"rh[-_./ ]*([0-9]+)",
+        r"el[-_./ ]*([0-9]+)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            key = "rhel{}".format(match.group(1))
+            if key in SUPPORTED_RHEL_KEYS:
+                return key
+
+    return None
+
+
+def infer_repo_role_from_path(path):
+    """Infer BaseOS/AppStream/extra role from a repo path or URL."""
+    text = str(path).lower()
+    parts = [part.lower() for part in re.split(r"[\\/]+", text)]
+    basename = parts[-1] if parts else ""
+
+    if "baseos" in parts or basename == "baseos":
+        return "baseos"
+
+    if "appstream" in parts or basename == "appstream":
+        return "appstream"
+
+    if basename in ["crb", "codeready-builder", "codeready_builder"]:
+        return "crb"
+
+    if basename in ["epel"]:
+        return "epel"
+
+    return "extra"
+
+
+def source_kind_for_path(bundle_path, path):
+    """Return a readable source kind for a repo path."""
+    bundle_path = absolute_path(bundle_path)
+    path = absolute_path(path)
+
+    try:
+        rel = path.relative_to(bundle_path)
+    except ValueError:
+        return "external-local"
+
+    rel_text = str(rel).lower()
+
+    if rel_text.startswith("extracted_isos/") or rel_text.startswith("isos/"):
+        return "extracted-iso"
+
+    if rel_text.startswith("repos/"):
+        return "bundle-repos"
+
+    if "iso" in rel_text:
+        return "extracted-iso"
+
+    return "bundle"
+
+
+def source_kind_for_source(bundle_path, source):
+    """Return source kind for local path, file URL, or remote URL."""
+    if is_url(source) and not is_file_url(source):
+        return "external-url"
+
+    local_path = local_path_from_source(source)
+    if local_path is None:
+        return "external"
+
+    return source_kind_for_path(bundle_path, local_path)
+
+
+def bounded_repo_walk(root, max_depth=8):
+    """Yield repo directories under root without unbounded traversal."""
+    root = Path(root)
+
+    if not root.exists():
+        return
+
+    root = absolute_path(root)
+    root_depth = len(root.parts)
+
+    for current, dirs, files in os.walk(str(root)):
+        current_path = Path(current)
+        depth = len(current_path.parts) - root_depth
+
+        if depth > max_depth:
+            dirs[:] = []
+            continue
+
+        dirs[:] = sorted(
+            [
+                item
+                for item in dirs
+                if item not in SKIP_SCAN_DIRS
+            ]
+        )
+
+        if "repodata" in dirs and repo_dir_is_valid(current_path):
+            dirs[:] = []
+            yield current_path
+
+
+def candidate_scan_roots(bundle_path):
+    """Return bundle roots worth scanning for yum/dnf repositories."""
+    bundle_path = absolute_path(bundle_path)
+
+    roots = [
+        bundle_path / "extracted_isos",
+        bundle_path / "isos",
+        bundle_path / "repos",
+        bundle_path,
+    ]
+
+    result = []
+    seen = set()
+
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+
+        seen.add(key)
+        result.append(root)
+
+    return result
+
+
+def build_repo_entry(
+    bundle_path,
+    path_for_ansible,
+    source,
+    repo_id=None,
+    name=None,
+    os_key=None,
+    role=None,
+    source_kind=None,
+    server_bootstrap_enabled=True,
+    provisioning_enabled=True,
+):
+    """Build one normalized repo entry from a local path or URL."""
+    bundle_path = absolute_path(bundle_path)
+    path_for_ansible = normalize_client_path(path_for_ansible)
+    source = str(source).strip()
+
+    inferred_os_key = os_key or infer_rhel_key_from_path(source)
+    inferred_role = role or infer_repo_role_from_path(source)
+    local_path = local_path_from_source(source)
+    source_kind = source_kind or source_kind_for_source(bundle_path, source)
+
+    if repo_id:
+        repo_id = sanitize_repo_id(repo_id)
+    elif inferred_os_key:
+        if inferred_role in ["baseos", "appstream"]:
+            repo_id = "aerolit-{}-{}".format(inferred_os_key, inferred_role)
+        else:
+            repo_short = sanitize_repo_id(Path(str(source)).name)
+            repo_id = "aerolit-{}-{}".format(inferred_os_key, repo_short)
+    else:
+        repo_short = sanitize_repo_id(Path(str(source)).name)
+        repo_id = "aerolit-unknown-{}".format(repo_short)
+
+    if not name:
+        if inferred_os_key:
+            prefix = "aerolit-{}-".format(inferred_os_key)
+            name = "AeroLIT {} {}".format(
+                inferred_os_key,
+                repo_id.replace(prefix, ""),
+            )
+        else:
+            name = "AeroLIT unknown {}".format(
+                repo_id.replace("aerolit-unknown-", "")
+            )
+
+    return OrderedDict(
+        [
+            ("id", repo_id),
+            ("name", name),
+            ("os_key", inferred_os_key),
+            ("role", inferred_role),
+            ("source_kind", source_kind),
+            ("source", source),
+            ("path", str(local_path) if local_path is not None else None),
+            ("server_baseurl", source_to_server_baseurl(source)),
+            (
+                "client_baseurl",
+                source_to_client_baseurl(bundle_path, path_for_ansible, source),
+            ),
+            ("server_bootstrap_enabled", bool(server_bootstrap_enabled)),
+            ("provisioning_enabled", bool(provisioning_enabled)),
+        ]
+    )
+
+
+def dedupe_repo_entries(entries):
+    """Dedupe repo ids while preserving order."""
+    result = []
+    used_ids = {}
+
+    for entry in entries:
+        base_id = entry["id"]
+        repo_id = base_id
+
+        if repo_id in used_ids:
+            source_hint = entry.get("path") or entry.get("source") or "repo"
+            parent = sanitize_repo_id(Path(str(source_hint)).parent.name)
+            repo_id = "{}-{}".format(base_id, parent)
+
+        count = used_ids.get(repo_id, 0)
+        if count:
+            repo_id = "{}-{}".format(repo_id, count + 1)
+
+        used_ids[repo_id] = used_ids.get(repo_id, 0) + 1
+        entry["id"] = repo_id
+        result.append(entry)
+
+    return result
+
+
+def discover_bundle_repos(bundle_path, path_for_ansible=DEFAULT_PATH_FOR_ANSIBLE):
+    """Discover yum/dnf repos in common AeroLIT bundle locations."""
+    bundle_path = absolute_path(bundle_path)
+    path_for_ansible = normalize_client_path(path_for_ansible)
+
+    entries = []
+    seen_paths = set()
+
+    for root in candidate_scan_roots(bundle_path):
+        for repo_path in bounded_repo_walk(root):
+            key = str(absolute_path(repo_path))
+            if key in seen_paths:
+                continue
+
+            seen_paths.add(key)
+            entries.append(
+                build_repo_entry(
+                    bundle_path,
+                    path_for_ansible,
+                    str(repo_path),
+                    server_bootstrap_enabled=True,
+                    provisioning_enabled=True,
+                )
+            )
+
+    return dedupe_repo_entries(entries)
+
+
+def parse_provision_repo_spec(spec):
+    """Parse OS:ID=PATH_OR_URL provisioning repo override spec."""
+    spec = str(spec).strip()
+
+    if "=" not in spec:
+        raise RepoConfigError(
+            "Provisioning repo override must be OS:ID=PATH_OR_URL, got: {}".format(
+                spec
+            )
+        )
+
+    left, source = spec.split("=", 1)
+
+    if ":" not in left:
+        raise RepoConfigError(
+            "Provisioning repo override must be OS:ID=PATH_OR_URL, got: {}".format(
+                spec
+            )
+        )
+
+    os_key, repo_id = left.split(":", 1)
+    os_key = os_key.strip().lower()
+    repo_id = sanitize_repo_id(repo_id)
+
+    if os_key not in SUPPORTED_RHEL_KEYS:
+        raise RepoConfigError(
+            "Unsupported provisioning repo OS '{}'. Supported values: {}".format(
+                os_key,
+                ", ".join(SUPPORTED_RHEL_KEYS),
+            )
+        )
+
+    if not repo_id:
+        raise RepoConfigError("Provisioning repo id cannot be empty: {}".format(spec))
+
+    if not source.strip():
+        raise RepoConfigError("Provisioning repo source cannot be empty: {}".format(spec))
+
+    return os_key, repo_id, source.strip()
+
+
+def explicit_entries_from_args(bundle_path, path_for_ansible, args):
+    """Return explicit repo entries requested by CLI args.
+
+    These args are optional hooks. The CLI parser can expose them later without
+    changing this discovery engine.
+    """
+    entries = []
+    current_major = current_os_major()
+    current_os_key = "rhel{}".format(current_major) if current_major else None
+
+    server_baseos = getattr(args, "server_baseos_source", None)
+    server_appstream = getattr(args, "server_appstream_source", None)
+
+    if server_baseos:
+        entries.append(
+            build_repo_entry(
+                bundle_path,
+                path_for_ansible,
+                server_baseos,
+                repo_id="aerolit-{}-server-baseos".format(
+                    current_os_key or "server"
+                ),
+                name="AeroLIT server bootstrap BaseOS",
+                os_key=current_os_key,
+                role="baseos",
+                source_kind="manual-server",
+                server_bootstrap_enabled=True,
+                provisioning_enabled=False,
+            )
+        )
+
+    if server_appstream:
+        entries.append(
+            build_repo_entry(
+                bundle_path,
+                path_for_ansible,
+                server_appstream,
+                repo_id="aerolit-{}-server-appstream".format(
+                    current_os_key or "server"
+                ),
+                name="AeroLIT server bootstrap AppStream",
+                os_key=current_os_key,
+                role="appstream",
+                source_kind="manual-server",
+                server_bootstrap_enabled=True,
+                provisioning_enabled=False,
+            )
+        )
+
+    provision_specs = []
+    provision_specs.extend(getattr(args, "provision_repo", None) or [])
+    provision_specs.extend(getattr(args, "provision_extra_repo", None) or [])
+
+    for spec in provision_specs:
+        os_key, repo_id, source = parse_provision_repo_spec(spec)
+        entries.append(
+            build_repo_entry(
+                bundle_path,
+                path_for_ansible,
+                source,
+                repo_id="aerolit-{}-{}".format(os_key, repo_id),
+                name="AeroLIT {} {}".format(os_key, repo_id),
+                os_key=os_key,
+                role=infer_repo_role_from_path(source),
+                source_kind="manual-provisioning",
+                server_bootstrap_enabled=False,
+                provisioning_enabled=True,
+            )
+        )
+
+    return entries
+
+
+def build_repo_plan(bundle_path, path_for_ansible, args):
+    """Build the full repo plan from explicit overrides plus auto-discovery."""
+    no_auto_discovery = (
+        getattr(args, "no_auto_discovery", False)
+        or getattr(args, "disable_auto_discovery", False)
+    )
+
+    entries = []
+    entries.extend(explicit_entries_from_args(bundle_path, path_for_ansible, args))
+
+    if not no_auto_discovery:
+        entries.extend(discover_bundle_repos(bundle_path, path_for_ansible))
+
+    return dedupe_repo_entries(entries)
+
+
+def grouped_provisioning_repos(entries):
+    """Return discovered provisioning repos grouped by rhel key."""
+    grouped = OrderedDict()
+
+    for key in SUPPORTED_RHEL_KEYS:
+        grouped[key] = []
+
+    for entry in entries:
+        if entry.get("provisioning_enabled") is False:
+            continue
+
+        os_key = entry.get("os_key")
+        if os_key in grouped:
+            grouped[os_key].append(entry)
+
+    return grouped
+
+
+def server_bootstrap_pair(entries, os_major=None):
+    """Return best BaseOS/AppStream pair for the current server OS."""
+    os_major = os_major or current_os_major()
+    os_key = "rhel{}".format(os_major) if os_major else None
+
+    result = OrderedDict(
+        [
+            ("os_key", os_key),
+            ("baseos", None),
+            ("appstream", None),
+        ]
+    )
+
+    if not os_key:
+        return result
+
+    for entry in entries:
+        if entry.get("server_bootstrap_enabled") is False:
+            continue
+
+        if entry.get("os_key") != os_key:
+            continue
+
+        if entry.get("role") == "baseos" and result["baseos"] is None:
+            result["baseos"] = entry
+
+        if entry.get("role") == "appstream" and result["appstream"] is None:
+            result["appstream"] = entry
+
+    return result
+
+
+def render_repo_item(lines, repo, indent, baseurl_key):
+    """Render one repo item as a YAML list item at indent."""
+    spaces = " " * indent
+    lines.append("{}- id: {}".format(spaces, yaml_value(repo["id"])))
+    lines.append("{}  name: {}".format(spaces, yaml_value(repo["name"])))
+    lines.append("{}  role: {}".format(spaces, yaml_value(repo["role"])))
+    lines.append("{}  source_kind: {}".format(spaces, yaml_value(repo["source_kind"])))
+    lines.append("{}  baseurl: {}".format(spaces, yaml_value(repo[baseurl_key])))
+    lines.append(
+        "{}  server_baseurl: {}".format(
+            spaces,
+            yaml_value(repo["server_baseurl"]),
+        )
+    )
+    lines.append("{}  enabled: true".format(spaces))
+    lines.append("{}  gpgcheck: false".format(spaces))
+
+
+def render_repo_dict(lines, repo, indent, baseurl_key):
+    """Render one repo as a YAML dictionary at indent."""
+    spaces = " " * indent
+    lines.append("{}id: {}".format(spaces, yaml_value(repo["id"])))
+    lines.append("{}name: {}".format(spaces, yaml_value(repo["name"])))
+    lines.append("{}role: {}".format(spaces, yaml_value(repo["role"])))
+    lines.append("{}source_kind: {}".format(spaces, yaml_value(repo["source_kind"])))
+    lines.append("{}baseurl: {}".format(spaces, yaml_value(repo[baseurl_key])))
+    lines.append(
+        "{}server_baseurl: {}".format(
+            spaces,
+            yaml_value(repo["server_baseurl"]),
+        )
+    )
+    lines.append("{}enabled: true".format(spaces))
+    lines.append("{}gpgcheck: false".format(spaces))
+
+
+def render_grouped_repo_mapping(lines, variable_name, grouped, baseurl_key):
+    """Render grouped rhelX repo mapping."""
+    lines.append("{}:".format(variable_name))
+
+    for os_key, repos in grouped.items():
+        if not repos:
+            lines.append("  {}: []".format(os_key))
+            continue
+
+        lines.append("  {}:".format(os_key))
+        for repo in repos:
+            render_repo_item(lines, repo, indent=4, baseurl_key=baseurl_key)
+
+
+def render_repos_generated_vars(bundle_path, path_for_ansible, entries):
+    """Render managed repository group_vars YAML."""
+    bundle_path = absolute_path(bundle_path)
+    generated_path = repos_generated_vars_file(bundle_path)
+    server_pair = server_bootstrap_pair(entries)
+    grouped = grouped_provisioning_repos(entries)
+
+    lines = [
+        "---",
+        GENERATED_REPOS_MARKER,
+        "# Created by aerolitctl configure repos.",
+        "# This file lives in group_vars/all and feeds server/provisioning repo roles.",
+        "# Do not store secrets in this file.",
+        "",
+        "aerolitctl_repos_generated: true",
+        "aerolitctl_repos_bundle_path: {}".format(yaml_value(str(bundle_path))),
+        "aerolitctl_repos_client_base_path: {}".format(yaml_value(path_for_ansible)),
+        "aerolitctl_repos_generated_file: {}".format(yaml_value(str(generated_path))),
+        "",
+        "aerolitctl_server_bootstrap_repos:",
+        "  os_key: {}".format(yaml_value(server_pair["os_key"])),
+    ]
+
+    if server_pair["baseos"]:
+        lines.append(
+            "  baseos: {}".format(
+                yaml_value(server_pair["baseos"]["server_baseurl"])
+            )
+        )
+        lines.append("  baseos_repo:")
+        render_repo_dict(
+            lines,
+            server_pair["baseos"],
+            indent=4,
+            baseurl_key="server_baseurl",
+        )
+    else:
+        lines.append("  baseos: null")
+        lines.append("  baseos_repo: null")
+
+    if server_pair["appstream"]:
+        lines.append(
+            "  appstream: {}".format(
+                yaml_value(server_pair["appstream"]["server_baseurl"])
+            )
+        )
+        lines.append("  appstream_repo:")
+        render_repo_dict(
+            lines,
+            server_pair["appstream"],
+            indent=4,
+            baseurl_key="server_baseurl",
+        )
+    else:
+        lines.append("  appstream: null")
+        lines.append("  appstream_repo: null")
+
+    lines.append("")
+    if entries:
+        lines.append("aerolitctl_repository_inventory:")
+        for repo in entries:
+            render_repo_item(lines, repo, indent=2, baseurl_key="client_baseurl")
+            lines.append("    os_key: {}".format(yaml_value(repo.get("os_key"))))
+            lines.append(
+                "    provisioning_enabled: {}".format(
+                    yaml_value(repo.get("provisioning_enabled"))
+                )
+            )
+            lines.append(
+                "    server_bootstrap_enabled: {}".format(
+                    yaml_value(repo.get("server_bootstrap_enabled"))
+                )
+            )
+    else:
+        lines.append("aerolitctl_repository_inventory: []")
+
+    lines.append("")
+    render_grouped_repo_mapping(
+        lines,
+        "aerolitctl_provisioning_repositories",
+        grouped,
+        baseurl_key="client_baseurl",
+    )
+
+    lines.extend(
+        [
+            "",
+            "# Compatibility variable matching the existing bootstrap/provisioning repo shape.",
+        ]
+    )
+    render_grouped_repo_mapping(
+        lines,
+        "append_bootstrap_yum_repositories",
+        grouped,
+        baseurl_key="client_baseurl",
+    )
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def file_looks_managed(path):
+    """Return True when existing generated repo vars file is safe to update."""
+    path = Path(path)
+
+    if not path.exists():
+        return True
+
+    content = read_text(path)
+    return (
+        GENERATED_REPOS_MARKER in content
+        and "aerolitctl_repos_generated: true" in content
+    )
+
+
+def backup_file(path, dry_run=False, no_backup=False, label=None):
+    """Create a timestamped backup next to an existing file."""
+    path = Path(path)
+    label = label or str(path)
+
+    if no_backup or not path.exists():
+        return None
+
+    backup_path = path.with_name(
+        "{}.aerolit-backup-{}".format(path.name, timestamp())
+    )
+
+    if dry_run:
+        print("Would back up {} to {}".format(label, backup_path))
+        return backup_path
+
+    shutil.copy2(str(path), str(backup_path))
+    print("Backed up {} to {}".format(label, backup_path))
+    return backup_path
+
+
+def write_if_changed(path, content, dry_run=False, force=False, no_backup=False):
+    """Create/update generated repo vars only when content differs."""
+    path = Path(path)
+    exists = path.exists()
+    current = read_text(path) if exists else None
+
+    if current == content:
+        print("Already current: generated repository vars")
+        return "unchanged"
+
+    if exists and not force and not file_looks_managed(path):
+        raise RepoConfigError(
+            "{} exists but does not look like an aerolitctl-managed repo vars file. "
+            "Refusing to overwrite it without --force.".format(path)
+        )
+
+    if dry_run:
+        if exists:
+            backup_file(
+                path,
+                dry_run=True,
+                no_backup=no_backup,
+                label="generated repository vars",
+            )
+            print("Would update: generated repository vars")
+            return "would_update"
+
+        print("Would create: generated repository vars")
+        return "would_create"
+
+    backup_file(
+        path,
+        dry_run=False,
+        no_backup=no_backup,
+        label="generated repository vars",
+    )
+    write_text(path, content)
+
+    if exists:
+        print("Updated: generated repository vars")
+        return "updated"
+
+    print("Created: generated repository vars")
+    return "created"
+
+
+def validate_repos_state(bundle_path, path_for_ansible, entries):
+    """Validate discovered repository state."""
+    report = RepoReport()
+    bundle_path = absolute_path(bundle_path)
+    generated_path = repos_generated_vars_file(bundle_path)
+
+    if bundle_path.exists():
+        report.add_ok("Bundle path found: {}".format(bundle_path))
+    else:
+        report.add_error("Bundle path missing: {}".format(bundle_path))
+
+    group_vars_all = generated_path.parent
+    if group_vars_all.exists():
+        report.add_ok("group_vars/all directory found: {}".format(group_vars_all))
+    else:
+        report.add_error("group_vars/all directory missing: {}".format(group_vars_all))
+
+    if entries:
+        report.add_ok("Discovered/planned {} repo(s).".format(len(entries)))
+    else:
+        report.add_warning(
+            "No repos with repodata/repomd.xml were discovered or configured."
+        )
+
+    seen_baseurls = set()
+    for entry in entries:
+        baseurl = entry.get("server_baseurl")
+        if baseurl in seen_baseurls:
+            report.add_warning("Duplicate repo baseurl in plan: {}".format(baseurl))
+        seen_baseurls.add(baseurl)
+
+        source = entry.get("source")
+        if source and is_url(source) and not is_file_url(source):
+            report.add_warning(
+                "Remote repo source was not validated locally: {}".format(source)
+            )
+            continue
+
+        local_path = entry.get("path")
+        if local_path and repo_dir_is_valid(local_path):
+            report.add_ok("Repo path valid: {}".format(local_path))
+        elif local_path:
+            report.add_error(
+                "Repo path missing repodata/repomd.xml: {}".format(local_path)
+            )
+
+    grouped = grouped_provisioning_repos(entries)
+    for os_key, repos in grouped.items():
+        if repos:
+            report.add_ok(
+                "{} provisioning repos discovered: {}".format(os_key, len(repos))
+            )
+        else:
+            report.add_warning("{} provisioning repos not discovered.".format(os_key))
+
+    unknown = [
+        entry
+        for entry in entries
+        if not entry.get("os_key")
+    ]
+    if unknown:
+        report.add_warning(
+            "{} repo(s) discovered but OS version could not be inferred.".format(
+                len(unknown)
+            )
+        )
+
+    server_pair = server_bootstrap_pair(entries)
+    if server_pair["os_key"]:
+        if server_pair["baseos"] and server_pair["appstream"]:
+            report.add_ok(
+                "Server bootstrap BaseOS/AppStream pair found for {}.".format(
+                    server_pair["os_key"]
+                )
+            )
+        else:
+            report.add_warning(
+                "Server bootstrap BaseOS/AppStream pair incomplete for {}.".format(
+                    server_pair["os_key"]
+                )
+            )
+    else:
+        report.add_warning("Could not determine current server OS major version.")
+
+    if generated_path.exists():
+        if file_looks_managed(generated_path):
+            report.add_ok("Generated repo vars file found: {}".format(generated_path))
+        else:
+            report.add_error(
+                "Generated repo vars exists but is not aerolitctl-managed: {}".format(
+                    generated_path
+                )
+            )
+    else:
+        report.add_warning(
+            "Generated repo vars file not created yet: {}".format(generated_path)
+        )
+
+    try:
+        normalize_client_path(path_for_ansible)
+    except RepoConfigError as exc:
+        report.add_error(str(exc))
+
+    return report
+
+
+def print_repos_summary(bundle_path, path_for_ansible, entries):
+    """Print readable repository discovery summary."""
+    bundle_path = absolute_path(bundle_path)
+    generated_path = repos_generated_vars_file(bundle_path)
+    server_pair = server_bootstrap_pair(entries)
+    grouped = grouped_provisioning_repos(entries)
+
+    print("AeroLIT managed repository configuration")
+    print("")
+    print("{:<32} {}".format("Bundle path:", bundle_path))
+    print("{:<32} {}".format("Client bundle path:", path_for_ansible))
+    print("{:<32} {}".format("Generated vars:", generated_path))
+    print("{:<32} {}".format("Current server OS:", server_pair["os_key"] or "unknown"))
+    print("{:<32} {}".format("Total repos planned:", len(entries)))
+    print("")
+
+    print("Server bootstrap repos:")
+    if server_pair["baseos"]:
+        print("  BaseOS: {}".format(server_pair["baseos"]["server_baseurl"]))
+    else:
+        print("  BaseOS: not discovered")
+
+    if server_pair["appstream"]:
+        print("  AppStream: {}".format(server_pair["appstream"]["server_baseurl"]))
+    else:
+        print("  AppStream: not discovered")
+
+    print("")
+    print("Provisioning repos:")
+
+    for os_key, repos in grouped.items():
+        print("  {}:".format(os_key))
+
+        if not repos:
+            print("    - none discovered")
+            continue
+
+        for repo in repos:
+            print(
+                "    - {} [{} / {}]".format(
+                    repo["id"],
+                    repo["role"],
+                    repo["source_kind"],
+                )
+            )
+            print("      server: {}".format(repo["server_baseurl"]))
+            print("      client: {}".format(repo["client_baseurl"]))
+
+    unknown = [
+        entry
+        for entry in entries
+        if not entry.get("os_key")
+    ]
+    if unknown:
+        print("")
+        print("Repos discovered with unknown OS:")
+        for repo in unknown:
+            print("  - {}: {}".format(repo["id"], repo["server_baseurl"]))
+
+
+def run_configure_repos(args):
+    """Run aerolitctl configure repos."""
+    try:
+        bundle_path = getattr(args, "bundle_path", None)
+        if bundle_path:
+            bundle_path = absolute_path(bundle_path)
+        else:
+            bundle_path = configured_bundle_path()
+
+        path_for_ansible = normalize_client_path(
+            getattr(args, "path_for_ansible", None) or DEFAULT_PATH_FOR_ANSIBLE
+        )
+
+        dry_run = getattr(args, "dry_run", False)
+        show_only = getattr(args, "show", False)
+        validate_requested = getattr(args, "validate", False)
+        refresh_requested = getattr(args, "refresh", False)
+        force = getattr(args, "force", False)
+        no_backup = getattr(args, "no_backup", False)
+
+        entries = build_repo_plan(
+            bundle_path,
+            path_for_ansible=path_for_ansible,
+            args=args,
+        )
+
+        if not show_only and not validate_requested and not refresh_requested:
+            show_only = True
+
+        if show_only:
+            print_repos_summary(bundle_path, path_for_ansible, entries)
+
+        if refresh_requested:
+            print("")
+            print("AeroLIT configure repos plan")
+            print("")
+            print("{:<32} {}".format("Dry run:", dry_run))
+            print("{:<32} {}".format("Bundle path:", bundle_path))
+            print("{:<32} {}".format("Client bundle path:", path_for_ansible))
+            print(
+                "{:<32} {}".format(
+                    "Generated vars:",
+                    repos_generated_vars_file(bundle_path),
+                )
+            )
+            print("{:<32} {}".format("Planned repos:", len(entries)))
+            print("{:<32} {}".format("Backups enabled:", not no_backup))
+            print("{:<32} {}".format("Force overwrite:", force))
+            print("")
+
+            report = validate_repos_state(bundle_path, path_for_ansible, entries)
+            if report.errors:
+                print("")
+                print("Refusing to write invalid managed repository configuration.")
+                print("")
+                report.print_report()
+                return report.exit_code()
+
+            content = render_repos_generated_vars(
+                bundle_path,
+                path_for_ansible,
+                entries,
+            )
+            write_if_changed(
+                repos_generated_vars_file(bundle_path),
+                content,
+                dry_run=dry_run,
+                force=force,
+                no_backup=no_backup,
+            )
+
+            if dry_run:
+                print("")
+                print("Dry run complete. No files were changed.")
+            else:
+                print("")
+                print("AeroLIT repository configuration saved.")
+
+        if validate_requested or refresh_requested or show_only:
+            print("")
+            report = validate_repos_state(bundle_path, path_for_ansible, entries)
+            report.print_report()
+            return report.exit_code()
+
+        return 0
+
+    except RepoConfigError as exc:
+        print("ERROR: {}".format(exc))
+        return 1
