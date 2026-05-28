@@ -14,6 +14,7 @@ from .deploy_server import run_deploy_server
 from .status import run_status
 from .ansible import run_configure_ansible
 from .pxe import run_configure_pxe
+from .repos import run_configure_repos
 
 
 def cmd_version(args):
@@ -45,6 +46,11 @@ def cmd_configure_ansible(args):
 def cmd_configure_pxe(args):
     """Run configure pxe."""
     return run_configure_pxe(args)
+
+
+def cmd_configure_repos(args):
+    """Run configure repos."""
+    return run_configure_repos(args)
 
 
 def cmd_path_show(args):
@@ -183,6 +189,115 @@ def add_command_verbose(parser):
         default=argparse.SUPPRESS,
         help="Show more detailed output.",
     )
+
+
+def add_configure_repos_parser(configure_subparsers):
+    """Add aerolitctl configure repos parser."""
+    repos_parser = configure_subparsers.add_parser(
+        "repos",
+        help="Discover bundle repositories and generate AeroLIT repo variables.",
+    )
+
+    repos_parser.add_argument(
+        "--bundle-path",
+        default=None,
+        help="Bundle path. Defaults to configured bundle path.",
+    )
+    repos_parser.add_argument(
+        "--path-for-ansible",
+        default=None,
+        help=(
+            "Client-visible bundle path used for provisioning repo baseurls. "
+            "Defaults to /home/unix/sysadmin."
+        ),
+    )
+    repos_parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Show discovered/planned repository configuration.",
+    )
+    repos_parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Validate discovered/planned repository configuration.",
+    )
+    repos_parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help=(
+            "Write group_vars/all/aerolitctl_repos_generated.yml from discovered "
+            "bundle repos and explicit repo overrides."
+        ),
+    )
+    repos_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview refresh output without writing files.",
+    )
+    repos_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow replacement of an existing non-aerolitctl-managed repo vars file.",
+    )
+    repos_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not create timestamped backups before changing managed files.",
+    )
+
+    repos_parser.add_argument(
+        "--server-baseos-source",
+        default=None,
+        help=(
+            "Explicit BaseOS repo source for server bootstrap packages. "
+            "Can be a local path, file:// URL, http:// URL, or https:// URL."
+        ),
+    )
+    repos_parser.add_argument(
+        "--server-appstream-source",
+        default=None,
+        help=(
+            "Explicit AppStream repo source for server bootstrap packages. "
+            "Can be a local path, file:// URL, http:// URL, or https:// URL."
+        ),
+    )
+    repos_parser.add_argument(
+        "--provision-repo",
+        action="append",
+        default=[],
+        metavar="OS:ID=PATH_OR_URL",
+        help=(
+            "Add an explicit provisioning repo override, for example "
+            "rhel9:custom-tools=/opt/aerolit/aerolit-bundle/repos/rhel9/custom-tools. "
+            "Can be used more than once."
+        ),
+    )
+    repos_parser.add_argument(
+        "--provision-extra-repo",
+        action="append",
+        default=[],
+        metavar="OS:ID=PATH_OR_URL",
+        help=(
+            "Alias-style extra provisioning repo override using OS:ID=PATH_OR_URL. "
+            "Can be used more than once."
+        ),
+    )
+    repos_parser.add_argument(
+        "--no-auto-discovery",
+        "--disable-auto-discovery",
+        dest="no_auto_discovery",
+        action="store_true",
+        default=False,
+        help=(
+            "Do not automatically scan the bundle for repos. Only use explicitly "
+            "provided server/provisioning repo sources."
+        ),
+    )
+
+    add_command_verbose(repos_parser)
+    repos_parser.set_defaults(func=cmd_configure_repos)
+
+    return repos_parser
 
 
 def add_configure_pxe_parser(configure_subparsers):
@@ -1078,6 +1193,7 @@ def build_parser():
 
     add_command_verbose(ansible_parser)
 
+    add_configure_repos_parser(configure_subparsers)
     add_configure_pxe_parser(configure_subparsers)
     add_configure_server_parser(configure_subparsers)
     add_deploy_parser(subparsers)
