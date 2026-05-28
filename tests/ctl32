@@ -2360,7 +2360,7 @@ def run_configure_server(
         print("Server configuration saved.")
         print("")
         print("No system services were changed.")
-        print("A later deploy command will apply network/NFS/PXE service changes.")
+        print("A later deploy command will apply network, PXE Server, and Ansible Controller / NFS changes.")
 
     report.print_summary()
 
