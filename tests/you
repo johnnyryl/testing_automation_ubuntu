@@ -1,3 +1,17 @@
+dnf makecache --disablerepo='*' --enablerepo='aerolit-server-bootstrap-*'
+
+dnf list --disablerepo='*' --enablerepo='aerolit-server-bootstrap-*' \
+  podman nfs-utils dnsmasq firewalld
+
+dnf list --disablerepo='*' --enablerepo='aerolit-server-bootstrap-*' ansible-core
+
+
+
+
+
+
+
+
 
 aerolitctl configure repos --write-server-bootstrap \
   --server-bootstrap-repo-file /tmp/zz-aerolit-server-bootstrap.repo
