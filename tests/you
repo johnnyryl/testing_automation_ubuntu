@@ -1,3 +1,79 @@
+Yes — test it by temporarily hiding the generated repo vars file, then running deploy with --skip-repo-vars-refresh.
+
+The file you need to simulate as missing is:
+
+/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml
+
+Run this exactly:
+
+REPO_VARS="/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml"
+BACKUP="${REPO_VARS}.edge-test-backup"
+mv "$REPO_VARS" "$BACKUP"
+aerolitctl deploy server --dry-run --skip-repo-vars-refresh
+RC=$?
+mv "$BACKUP" "$REPO_VARS"
+echo "deploy exit code was: $RC"
+
+What you want after the improvement is:
+
+ERROR: Repository vars refresh was skipped, but repo vars file is missing:
+  /opt/aerolit/.../aerolitctl_repos_generated.yml
+Run without --skip-repo-vars-refresh, or run:
+  aerolitctl configure repos --refresh
+
+And the exit code should be:
+
+deploy exit code was: 1
+
+What you do not want is for it to continue and show Ansible dry-run commands using:
+
+-e @/opt/aerolit/.../aerolitctl_repos_generated.yml
+
+when that file is missing.
+
+After restoring the file, confirm normal behavior still works:
+
+aerolitctl deploy server --dry-run --skip-repo-vars-refresh
+
+Expected after restore:
+
+Refresh repo vars               : no
+
+and no error, because the file exists.
+
+One more useful test: hide the file again, but do not skip refresh:
+
+REPO_VARS="/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml"
+BACKUP="${REPO_VARS}.edge-test-backup"
+mv "$REPO_VARS" "$BACKUP"
+aerolitctl deploy server --dry-run
+RC=$?
+mv "$BACKUP" "$REPO_VARS"
+echo "deploy exit code was: $RC"
+
+Expected there: it should not fail, because refresh is enabled. In dry-run it should say something like:
+
+Would create: generated repository vars
+
+That pair of tests proves both sides:
+
+--skip-repo-vars-refresh + missing file = fail clearly
+normal repo prep + missing file = generate/would-generate it
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 8. Test Phase 5 dry-run first
 
 Run these from the repo root:
