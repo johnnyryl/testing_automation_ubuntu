@@ -1,3 +1,174 @@
+3. Run compile checks
+
+From your repo root:
+
+python3 -m compileall src tools
+python3 -m py_compile src/aerolitctl/repos.py
+python3 -m py_compile src/aerolitctl/cli.py
+
+Expected: no errors.
+
+4. Confirm the new help flags exist
+
+Run:
+
+aerolitctl configure repos --help | grep -E 'write-server-bootstrap|server-bootstrap-repo-file|ensure-server-prereqs|server-prereq-package|server-bootstrap-only'
+
+Expected to show all five:
+
+--write-server-bootstrap
+--server-bootstrap-repo-file
+--ensure-server-prereqs
+--server-prereq-package
+--server-bootstrap-only
+5. Re-test Phases 1–3
+
+Run:
+
+aerolitctl configure repos --show
+aerolitctl configure repos --validate
+aerolitctl configure repos --refresh --dry-run
+aerolitctl configure repos --refresh
+
+Expected:
+
+RHEL 8 repos discovered.
+RHEL 7/9/10 absent repos show as [INFO], not [WARN].
+aerolitctl_repos_generated.yml is created/updated.
+No failures.
+6. Re-test Phase 4 manual repo writing
+
+Dry run first:
+
+aerolitctl configure repos --write-server-bootstrap --dry-run
+
+Then real write:
+
+aerolitctl configure repos --write-server-bootstrap
+
+Then verify:
+
+cat /etc/yum.repos.d/zz-aerolit-server-bootstrap.repo
+
+dnf repoquery \
+  --disablerepo='*' \
+  --enablerepo='aerolit-server-bootstrap-*' \
+  ansible-core podman nfs-utils dnsmasq firewalld
+
+Expected: it should resolve those packages from the AeroLIT bootstrap repos.
+
+7. Test the new Phase 4 automatic fallback
+
+Dry run first:
+
+aerolitctl configure repos --ensure-server-prereqs --dry-run
+
+Then test bootstrap-only dry run:
+
+aerolitctl configure repos --ensure-server-prereqs --server-bootstrap-only --dry-run
+
+Then real run:
+
+aerolitctl configure repos --ensure-server-prereqs --server-bootstrap-only
+
+That command is the real Phase 4 completion test. It means:
+
+Check missing packages.
+Use the generated AeroLIT server bootstrap repo.
+Clean metadata.
+Install missing packages.
+Leave the repo configured.
+
+Afterward, verify:
+
+rpm -q ansible-core podman nfs-utils dnsmasq firewalld
+Status after these changes
+
+After this, I would mark it:
+
+Phase 1: done
+Phase 2: done
+Phase 3: done
+Phase 4: done
+Phase 5: not started
+Phase 6: not started
+
+Phase 5 is next: wiring this into deploy server so the normal happy path can just be:
+
+aerolitctl deploy server
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 dnf repoquery --disablerepo='*' --enablerepo='aerolit-server-bootstrap-*' ansible-core podman nfs-utils dnsmasq firewalld
 
 dnf list --available --disablerepo='*' --enablerepo='aerolit-server-bootstrap-*' ansible-core podman nfs-utils dnsmasq firewalld
