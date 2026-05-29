@@ -1,4 +1,26 @@
 
+aerolitctl configure repos --write-server-bootstrap \
+  --server-bootstrap-repo-file /tmp/zz-aerolit-server-bootstrap.repo
+
+cat /tmp/zz-aerolit-server-bootstrap.repo
+
+aerolitctl configure repos --write-server-bootstrap
+
+cat /etc/yum.repos.d/zz-aerolit-server-bootstrap.repo
+dnf repolist | grep aerolit
+
+
+
+
+
+
+
+
+
+
+
+
+
 python3 -m py_compile src/aerolitctl/repos.py
 python3 -m py_compile src/aerolitctl/cli.py
 
