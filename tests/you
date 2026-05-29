@@ -1,3 +1,129 @@
+Yes — this is not Phase 5 repo wiring anymore. You made it past that. This is now inside the PXE Ansible role / pxe-content service validation.
+
+The important clue is: it succeeded once, then failed on a rerun. That usually means either:
+
+1. the validation task is running too fast after the service restart, or
+2. the service is running but not serving the exact file/content the validation expects, or
+3. the role is not fully idempotent around restarting/removing/recreating the podman container.
+
+Do this next. First capture the real failure without the giant service JSON drowning it out:
+
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+export ANSIBLE_CONFIG="$PWD/ansible.cfg"
+ansible-playbook \
+  -i localhost, \
+  -c local \
+  -e @/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml \
+  -e @/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/pxe_server.yml \
+  2>&1 | tee /tmp/aerolit-pxe-server-rerun.log
+echo "ansible rc=${PIPESTATUS[0]}"
+
+Then immediately run:
+
+grep -nE "FAILED|fatal:|Validate pxe-content|Wait for pxe-content|pxe-content is serving" \
+  /tmp/aerolit-pxe-server-rerun.log
+tail -n 120 /tmp/aerolit-pxe-server-rerun.log
+
+Now check whether the service is actually serving content:
+
+systemctl --no-pager -l status pxe-content
+podman ps -a --filter name=pxe-content
+podman images | grep -i pxe
+curl -sv http://127.0.0.1:18080/boot.ipxe 2>&1 | head -80
+curl -sv http://192.168.109.10:18080/boot.ipxe 2>&1 | head -80
+ls -lah /srv/ipxe
+find /srv/ipxe -maxdepth 3 -type f | sort | head -80
+journalctl -u pxe-content --no-pager -n 120
+
+Also show the validation task code:
+
+grep -Rns \
+  "Validate pxe-content is serving expected content\|Wait for pxe-content port\|pxe_content_validate\|uri:" \
+  /opt/aerolit/aerolit-bundle/collections-hub/collections/ansible_collections/aerolit/deployments/roles/pxe_content/tasks
+
+My bet: the fix will be in this file:
+
+/opt/aerolit/aerolit-bundle/collections-hub/collections/ansible_collections/aerolit/deployments/roles/pxe_content/tasks/service.yml
+
+Specifically, the task named something like:
+
+- name: Validate pxe-content is serving expected content
+
+probably needs retries/delay, because “port is reachable” does not always mean “content is ready.” The service can start, the port can open, and the generator/container may still need a few seconds before /boot.ipxe or the expected content is actually valid.
+
+The pattern I’d want in that role is something like this:
+
+- name: Validate pxe-content is serving expected content
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ pxe_content_host_port }}/boot.ipxe"
+    return_content: true
+    status_code: 200
+  register: pxe_content_validation
+  changed_when: false
+  failed_when: false
+  retries: 24
+  delay: 5
+  until:
+    - pxe_content_validation.status | default(0) == 200
+    - pxe_content_validation.content is defined
+    - pxe_content_validation.content | length > 0
+- name: Assert pxe-content validation succeeded
+  ansible.builtin.assert:
+    that:
+      - pxe_content_validation.status | default(0) == 200
+      - pxe_content_validation.content is defined
+      - pxe_content_validation.content | length > 0
+    fail_msg: >-
+      pxe-content service started, but expected HTTP content was not ready or not served.
+      Check /srv/ipxe, /etc/pxe-content/pxe-content.env, and journalctl -u pxe-content.
+
+But don’t paste that blindly yet — first run the grep/tail/curl commands above so we can see whether it’s failing because the endpoint is empty/404, because the container is not actually running, or because the validation is just too impatient.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Good news: the stale NFS export problem is fixed. The deploy made it past:
 
 exportfs -rav
