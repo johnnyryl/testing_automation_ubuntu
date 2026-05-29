@@ -1,5 +1,11 @@
 
+python3 -m py_compile src/aerolitctl/repos.py
+python3 -m py_compile src/aerolitctl/cli.py
 
+aerolitctl configure repos --help | grep -E 'write-server-bootstrap|server-bootstrap-repo-file'
+aerolitctl configure repos --show
+aerolitctl configure repos --refresh --dry-run
+aerolitctl configure repos --write-server-bootstrap --dry-run
 
 python3 - <<'PY'
 import yaml
