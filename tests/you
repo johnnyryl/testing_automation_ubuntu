@@ -1,3 +1,10 @@
+dnf repoquery --disablerepo='*' --enablerepo='aerolit-server-bootstrap-*' ansible-core podman nfs-utils dnsmasq firewalld
+
+dnf list --available --disablerepo='*' --enablerepo='aerolit-server-bootstrap-*' ansible-core podman nfs-utils dnsmasq firewalld
+
+
+
+
 dnf clean all
 rm -rf /var/cache/dnf/aerolit-server-bootstrap-*
 dnf makecache --disablerepo='*' --enablerepo='aerolit-server-bootstrap-*'
