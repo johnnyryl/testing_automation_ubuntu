@@ -1,3 +1,90 @@
+The failure is clear now: pxe-content is running, but it is serving from the wrong content root.
+
+Your service is mounting this:
+
+/srv/ipxe:/iso:ro,Z
+
+But your screenshot shows /srv/ipxe is basically empty. Your real ISO/repo content is here:
+
+/opt/aerolit/aerolit-bundle/extracted_isos
+
+So the container starts, port 18080 opens, but /boot.ipxe never becomes valid. That is why validation retries for 6 minutes and then fails with:
+
+pxe-content did not return expected status 200 from http://127.0.0.1:18080/boot.ipxe
+
+Do this fix next.
+
+cd /root/aerolitctl
+aerolitctl configure pxe \
+  --pxe-content-iso-root /opt/aerolit/aerolit-bundle/extracted_isos
+
+Then confirm the bad /srv/ipxe value is gone from the generated vars:
+
+grep -RnsE 'pxe_content_(bundle_root|extracted_isos_root|iso_root|image_source|image_tar|tar_src|runtime_image)' \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all
+
+What you want to see is something like:
+
+pxe_content_extracted_isos_root: /opt/aerolit/aerolit-bundle/extracted_isos
+pxe_content_iso_root: /iso
+pxe_content_image_source: tar
+
+Then force the service to rebuild with the corrected mount:
+
+systemctl stop pxe-content || true
+podman rm -f pxe-content || true
+systemctl daemon-reload
+
+Now rerun through aerolitctl, not the manual playbook:
+
+aerolitctl deploy server --server-bootstrap-only
+
+After it runs, check the actual mounted source:
+
+systemctl cat pxe-content | grep -E -- '--volume|Volume|Image|EnvironmentFile|ExecStart'
+podman inspect pxe-content \
+  --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+
+Expected mount should be:
+
+/opt/aerolit/aerolit-bundle/extracted_isos -> /iso
+
+not:
+
+/srv/ipxe -> /iso
+
+Then verify HTTP:
+
+curl -sv --max-time 10 http://127.0.0.1:18080/boot.ipxe 2>&1 | head -80
+curl -sv --max-time 10 http://192.168.109.10:18080/boot.ipxe 2>&1 | head -80
+
+Expected result: HTTP 200, not hanging, not 404, not timeout.
+
+One important thing: do not keep fixing this by manually running the playbook with extra vars. The whole Phase 5 point is that aerolitctl deploy server needs to carry the right vars itself. Right now the remaining issue is not repo Phase 5; it is that the saved/generated PXE content root still points at the old /srv/ipxe style path instead of the bundle path.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Yes — this is not Phase 5 repo wiring anymore. You made it past that. This is now inside the PXE Ansible role / pxe-content service validation.
 
 The important clue is: it succeeded once, then failed on a rerun. That usually means either:
