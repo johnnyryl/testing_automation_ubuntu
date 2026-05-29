@@ -1,3 +1,93 @@
+After making that change, run this
+python3 -m compileall src tools
+python3 -m py_compile src/aerolitctl/deploy_server.py
+
+Then rerun the missing-file edge test:
+
+REPO_VARS="/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml"
+BACKUP="${REPO_VARS}.edge-test-backup"
+
+rm -f "$BACKUP"
+mv "$REPO_VARS" "$BACKUP"
+
+aerolitctl deploy server --dry-run --skip-repo-vars-refresh
+RC=$?
+
+mv "$BACKUP" "$REPO_VARS"
+
+echo "deploy exit code was: $RC"
+
+Expected now:
+
+ERROR: Repository vars refresh was skipped, but repo vars file is missing:
+deploy exit code was: 1
+
+That proves the edge case is fixed.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Yes — test it by temporarily hiding the generated repo vars file, then running deploy with --skip-repo-vars-refresh.
 
 The file you need to simulate as missing is:
