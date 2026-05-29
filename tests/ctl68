@@ -18,6 +18,7 @@ import datetime
 import os
 import re
 import shutil
+import subprocess
 from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
@@ -28,6 +29,15 @@ from .config import get_bundle_path, load_config
 GENERATED_REPOS_MARKER = "# Generated AeroLIT repository variables"
 SERVER_BOOTSTRAP_REPO_MARKER = "# Generated AeroLIT server bootstrap repository"
 DEFAULT_SERVER_BOOTSTRAP_REPO_FILE = "/etc/yum.repos.d/zz-aerolit-server-bootstrap.repo"
+SERVER_BOOTSTRAP_REPO_ENABLE_GLOB = "aerolit-server-bootstrap-*"
+
+SERVER_PREREQUISITE_PACKAGES = [
+    "ansible-core",
+    "podman",
+    "nfs-utils",
+    "dnsmasq",
+    "firewalld",
+]
 
 DEFAULT_PATH_FOR_ANSIBLE = "/home/unix/sysadmin"
 SUPPORTED_RHEL_KEYS = ["rhel7", "rhel8", "rhel9", "rhel10"]
@@ -765,6 +775,23 @@ def server_bootstrap_pair(entries, os_major=None):
     return result
 
 
+def discover_provisioning_repos(entries):
+    """Return discovered provisioning repos grouped by RHEL key.
+
+    This is a small Phase 1 compatibility wrapper around the newer grouped
+    repository helper.
+    """
+    return grouped_provisioning_repos(entries)
+
+
+def discover_server_bootstrap_repos(entries, os_major=None):
+    """Return discovered server bootstrap BaseOS/AppStream repo pair.
+
+    This is a small Phase 1 compatibility wrapper around server_bootstrap_pair().
+    """
+    return server_bootstrap_pair(entries, os_major=os_major)
+
+
 def server_bootstrap_repo_file(path=None):
     """Return the server bootstrap yum/dnf repo file path."""
     return absolute_path(path or DEFAULT_SERVER_BOOTSTRAP_REPO_FILE)
@@ -889,6 +916,362 @@ def write_server_bootstrap_repo(
 
     print("Created: server bootstrap repo")
     return "created"
+
+
+def normalize_package_list(packages=None):
+    """Return a stable list of package names.
+
+    Accepts None, a string, or a list. Strings may be comma or whitespace
+    separated so CLI callers can pass repeated args or comma-separated values.
+    """
+    if packages is None:
+        packages = SERVER_PREREQUISITE_PACKAGES
+
+    if isinstance(packages, str):
+        raw_items = re.split(r"[\s,]+", packages.strip())
+    else:
+        raw_items = []
+        for item in packages:
+            raw_items.extend(re.split(r"[\s,]+", str(item).strip()))
+
+    result = []
+    seen = set()
+
+    for item in raw_items:
+        item = str(item).strip()
+        if not item:
+            continue
+
+        if item in seen:
+            continue
+
+        seen.add(item)
+        result.append(item)
+
+    return result
+
+
+def normalize_repo_patterns(value=None):
+    """Return repo patterns from None, string, or list input."""
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        raw_items = re.split(r"[\s,]+", value.strip())
+    else:
+        raw_items = []
+        for item in value:
+            raw_items.extend(re.split(r"[\s,]+", str(item).strip()))
+
+    result = []
+    seen = set()
+
+    for item in raw_items:
+        item = str(item).strip()
+        if not item:
+            continue
+
+        if item in seen:
+            continue
+
+        seen.add(item)
+        result.append(item)
+
+    return result
+
+
+def package_manager_command():
+    """Return available package manager command."""
+    if shutil.which("dnf"):
+        return "dnf"
+
+    if shutil.which("yum"):
+        return "yum"
+
+    raise RepoConfigError("Neither dnf nor yum was found on this system.")
+
+
+def run_command(command, dry_run=False, check=False, capture_output=False):
+    """Run a command and return rc/stdout/stderr."""
+    command = [str(item) for item in command]
+
+    if dry_run:
+        print("Would run: {}".format(" ".join(command)))
+        return 0, "", ""
+
+    if capture_output:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+        stdout, stderr = process.communicate()
+    else:
+        process = subprocess.Popen(command)
+        stdout, stderr = process.communicate()
+
+    if check and process.returncode != 0:
+        message = "Command failed with exit code {}: {}".format(
+            process.returncode,
+            " ".join(command),
+        )
+
+        if stderr:
+            message = "{}\n{}".format(message, stderr.strip())
+
+        raise RepoConfigError(message)
+
+    return process.returncode, stdout or "", stderr or ""
+
+
+def repo_option_args(enablerepo=None, disablerepo=None):
+    """Return dnf/yum repo enable/disable option args."""
+    args = []
+
+    for repo in normalize_repo_patterns(disablerepo):
+        args.append("--disablerepo={}".format(repo))
+
+    for repo in normalize_repo_patterns(enablerepo):
+        args.append("--enablerepo={}".format(repo))
+
+    return args
+
+
+def installed_server_packages(packages=None):
+    """Return prerequisite packages that are currently installed."""
+    packages = normalize_package_list(packages)
+
+    if not packages:
+        return []
+
+    if not shutil.which("rpm"):
+        raise RepoConfigError("rpm command was not found on this system.")
+
+    installed = []
+
+    for package in packages:
+        rc, _stdout, _stderr = run_command(
+            ["rpm", "-q", package],
+            capture_output=True,
+        )
+
+        if rc == 0:
+            installed.append(package)
+
+    return installed
+
+
+def missing_server_packages(packages=None):
+    """Return prerequisite packages that are not currently installed."""
+    packages = normalize_package_list(packages)
+    installed = set(installed_server_packages(packages))
+
+    return [
+        package
+        for package in packages
+        if package not in installed
+    ]
+
+
+def dnf_can_resolve_packages(packages, enablerepo=None, disablerepo=None):
+    """Return True if dnf/yum can resolve all packages from selected repos."""
+    packages = normalize_package_list(packages)
+
+    if not packages:
+        return True
+
+    manager = package_manager_command()
+    repo_args = repo_option_args(enablerepo=enablerepo, disablerepo=disablerepo)
+    unresolved = []
+
+    for package in packages:
+        repoquery_command = [manager] + repo_args + ["-q", "repoquery", package]
+        rc, stdout, _stderr = run_command(
+            repoquery_command,
+            capture_output=True,
+        )
+
+        if rc == 0 and stdout.strip():
+            continue
+
+        list_command = [manager] + repo_args + ["-q", "list", "available", package]
+        rc, stdout, _stderr = run_command(
+            list_command,
+            capture_output=True,
+        )
+
+        if rc == 0 and stdout.strip():
+            continue
+
+        unresolved.append(package)
+
+    if unresolved:
+        print(
+            "Unable to resolve package(s): {}".format(
+                ", ".join(unresolved)
+            )
+        )
+        return False
+
+    return True
+
+
+def clean_dnf_metadata(enablerepo=None, disablerepo=None, dry_run=False):
+    """Clean and rebuild package manager metadata for selected repos."""
+    manager = package_manager_command()
+    repo_args = repo_option_args(enablerepo=enablerepo, disablerepo=disablerepo)
+
+    run_command(
+        [manager] + repo_args + ["clean", "metadata"],
+        dry_run=dry_run,
+        check=not dry_run,
+    )
+
+    run_command(
+        [manager] + repo_args + ["makecache"],
+        dry_run=dry_run,
+        check=not dry_run,
+    )
+
+
+def install_server_packages(packages, enablerepo=None, disablerepo=None, dry_run=False):
+    """Install missing server prerequisite packages through dnf/yum."""
+    requested_packages = normalize_package_list(packages)
+    missing_packages = missing_server_packages(requested_packages)
+
+    if not missing_packages:
+        print("Server prerequisite packages are already installed.")
+        return 0
+
+    manager = package_manager_command()
+    repo_args = repo_option_args(enablerepo=enablerepo, disablerepo=disablerepo)
+
+    print(
+        "Installing missing server prerequisite package(s): {}".format(
+            ", ".join(missing_packages)
+        )
+    )
+
+    command = [manager, "-y"] + repo_args + ["install"] + missing_packages
+
+    if dry_run:
+        run_command(command, dry_run=True)
+        return 0
+
+    run_command(command, check=True)
+
+    still_missing = missing_server_packages(requested_packages)
+    if still_missing:
+        raise RepoConfigError(
+            "Package install finished, but these prerequisite packages are still missing: {}".format(
+                ", ".join(still_missing)
+            )
+        )
+
+    return 0
+
+
+def ensure_server_prerequisites_with_repo_fallback(
+    entries,
+    repo_file=None,
+    packages=None,
+    dry_run=False,
+    force=False,
+    no_backup=False,
+    bootstrap_only=False,
+):
+    """Ensure server prerequisite packages exist, using AeroLIT repo fallback.
+
+    Flow:
+    - Determine missing prerequisite packages.
+    - Try existing enabled system repos first unless bootstrap_only=True.
+    - If existing repos cannot resolve the packages, write the AeroLIT server
+      bootstrap repo.
+    - Clean/rebuild metadata for the bootstrap repo.
+    - Install missing packages from aerolit-server-bootstrap-*.
+    - Leave the generated repo configured.
+    """
+    packages = normalize_package_list(packages)
+    missing_packages = missing_server_packages(packages)
+
+    print("AeroLIT server prerequisite package plan")
+    print("")
+    print("{:<32} {}".format("Dry run:", dry_run))
+    print("{:<32} {}".format("Bootstrap only:", bootstrap_only))
+    print("{:<32} {}".format("Repo file:", server_bootstrap_repo_file(repo_file)))
+    print("{:<32} {}".format("Requested packages:", ", ".join(packages)))
+    print(
+        "{:<32} {}".format(
+            "Missing packages:",
+            ", ".join(missing_packages) if missing_packages else "none",
+        )
+    )
+    print("")
+
+    if not missing_packages:
+        print("All server prerequisite packages are already installed.")
+        return 0
+
+    if not bootstrap_only:
+        print("Checking existing enabled system repos first...")
+        if dnf_can_resolve_packages(missing_packages):
+            print("Existing enabled repos can resolve missing prerequisite packages.")
+            return install_server_packages(
+                missing_packages,
+                dry_run=dry_run,
+            )
+
+        print("")
+        print("Existing enabled repos cannot resolve all missing prerequisite packages.")
+        print("Falling back to the AeroLIT server bootstrap repo.")
+        print("")
+
+    write_server_bootstrap_repo(
+        entries,
+        repo_file=repo_file,
+        dry_run=dry_run,
+        force=force,
+        no_backup=no_backup,
+    )
+
+    clean_dnf_metadata(
+        enablerepo=SERVER_BOOTSTRAP_REPO_ENABLE_GLOB,
+        disablerepo="*",
+        dry_run=dry_run,
+    )
+
+    if dry_run:
+        print("")
+        print(
+            "Would verify package resolution using repo pattern: {}".format(
+                SERVER_BOOTSTRAP_REPO_ENABLE_GLOB
+            )
+        )
+        print(
+            "Would install missing packages from AeroLIT server bootstrap repo: {}".format(
+                ", ".join(missing_packages)
+            )
+        )
+        return 0
+
+    if not dnf_can_resolve_packages(
+        missing_packages,
+        enablerepo=SERVER_BOOTSTRAP_REPO_ENABLE_GLOB,
+        disablerepo="*",
+    ):
+        raise RepoConfigError(
+            "AeroLIT server bootstrap repo was written, but it cannot resolve: {}".format(
+                ", ".join(missing_packages)
+            )
+        )
+
+    return install_server_packages(
+        missing_packages,
+        enablerepo=SERVER_BOOTSTRAP_REPO_ENABLE_GLOB,
+        disablerepo="*",
+        dry_run=False,
+    )
 
 
 def render_repo_item(lines, repo, indent, baseurl_key):
@@ -1445,6 +1828,9 @@ def run_configure_repos(args):
         no_backup = getattr(args, "no_backup", False)
         write_server_bootstrap_requested = getattr(args, "write_server_bootstrap", False)
         server_bootstrap_repo_path = getattr(args, "server_bootstrap_repo_file", None)
+        ensure_server_prereqs_requested = getattr(args, "ensure_server_prereqs", False)
+        server_prereq_packages = getattr(args, "server_prereq_package", None) or None
+        server_bootstrap_only = getattr(args, "server_bootstrap_only", False)
 
         entries = build_repo_plan(
             bundle_path,
@@ -1459,6 +1845,7 @@ def run_configure_repos(args):
             and not validate_requested
             and not refresh_requested
             and not write_server_bootstrap_requested
+            and not ensure_server_prereqs_requested
         ):
             show_only = True
 
@@ -1554,7 +1941,39 @@ def run_configure_repos(args):
                 print("")
                 print("AeroLIT server bootstrap repo saved.")
 
-        if validate_requested or refresh_requested or show_only or write_server_bootstrap_requested:
+        if ensure_server_prereqs_requested:
+            print("")
+
+            report = validate_repos_state(
+                bundle_path,
+                path_for_ansible,
+                entries,
+                requested_os_keys=requested_os_keys,
+            )
+            if report.errors:
+                print("")
+                print("Refusing to ensure server prerequisites with invalid repository state.")
+                print("")
+                report.print_report()
+                return report.exit_code()
+
+            ensure_server_prerequisites_with_repo_fallback(
+                entries,
+                repo_file=server_bootstrap_repo_path,
+                packages=server_prereq_packages,
+                dry_run=dry_run,
+                force=force,
+                no_backup=no_backup,
+                bootstrap_only=server_bootstrap_only,
+            )
+
+        if (
+            validate_requested
+            or refresh_requested
+            or show_only
+            or write_server_bootstrap_requested
+            or ensure_server_prereqs_requested
+        ):
             print("")
             report = validate_repos_state(
                 bundle_path,
