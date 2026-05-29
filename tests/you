@@ -1,3 +1,50 @@
+REPO_VARS="/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml"
+BACKUP="${REPO_VARS}.edge-test-backup"
+
+rm -f "$BACKUP"
+mv "$REPO_VARS" "$BACKUP"
+
+aerolitctl deploy server \
+  --dry-run \
+  --skip-server-prereqs \
+  --skip-interface \
+  --skip-nfs \
+  --skip-firewall \
+  --skip-pxe \
+  --skip-controller
+
+RC=$?
+
+mv "$BACKUP" "$REPO_VARS"
+
+echo "deploy exit code was: $RC"
+
+
+
+
+aerolitctl deploy server --dry-run --server-bootstrap-only
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 After making that change, run this
 python3 -m compileall src tools
 python3 -m py_compile src/aerolitctl/deploy_server.py
