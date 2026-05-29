@@ -1,3 +1,34 @@
+
+
+
+
+
+deploy_nfs(plan, report, dry_run=dry_run, skip=skip_nfs)
+
+controller_will_manage_nfs = bool(
+    plan.get("controller_enabled") and not skip_controller
+)
+
+if controller_will_manage_nfs and not skip_nfs:
+    report.add(
+        "skipped",
+        "Wrapper NFS deployment skipped because ansible_controller.yml manages NFS",
+    )
+
+deploy_nfs(
+    plan,
+    report,
+    dry_run=dry_run,
+    skip=(skip_nfs or controller_will_manage_nfs),
+)
+
+
+
+
+
+
+
+
 You fixed the PXE content root problem. The evidence is good:
 
 /opt/aerolit/aerolit-bundle/extracted_isos -> /iso
