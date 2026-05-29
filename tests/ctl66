@@ -14,6 +14,16 @@ from pathlib import Path
 from .config import get_bundle_path, load_config
 from .paths import collections_hub_path, aerolitctl_server_generated_vars_file
 from .pxe import print_pxe_status_summary
+from .repos import (
+    DEFAULT_PATH_FOR_ANSIBLE,
+    RepoConfigError,
+    build_repo_plan,
+    ensure_server_prerequisites_with_repo_fallback,
+    render_repos_generated_vars,
+    repos_generated_vars_file,
+    validate_repos_state,
+    write_if_changed,
+)
 from .server import (
     DEFAULT_BIND_ADDRESS,
     DEFAULT_HTTP_PORT,
@@ -481,6 +491,154 @@ def print_deploy_plan(plan, generated_vars_path):
     print("")
 
 
+class RepoPreflightArgs(object):
+    """Minimal args object used by repos.build_repo_plan during deploy."""
+
+    def __init__(self):
+        self.no_auto_discovery = False
+        self.disable_auto_discovery = False
+        self.server_baseos_source = None
+        self.server_appstream_source = None
+        self.provision_repo = []
+        self.provision_extra_repo = []
+
+
+def repo_client_path_from_plan(plan):
+    """Return client-visible bundle path for generated provisioning repo vars."""
+    nfs = plan.get("nfs", {}) or {}
+
+    if nfs.get("enabled") and nfs.get("target_mount_path"):
+        return nfs.get("target_mount_path")
+
+    return DEFAULT_PATH_FOR_ANSIBLE
+
+
+def record_repo_write_result(report, result, repo_vars_path):
+    """Record generated repo vars write result in the deploy summary."""
+    if result in ("created", "updated"):
+        report.add(
+            "changed",
+            "Refreshed provisioning repo vars: {}".format(repo_vars_path),
+        )
+    elif result == "unchanged":
+        report.add(
+            "existing",
+            "Provisioning repo vars already current: {}".format(repo_vars_path),
+        )
+    elif result in ("would_create", "would_update"):
+        report.add(
+            "dry_run",
+            "Would refresh provisioning repo vars: {}".format(repo_vars_path),
+        )
+
+
+def deploy_repository_preflight(
+    plan,
+    report,
+    bundle_path,
+    dry_run=False,
+    skip_repo_prep=False,
+    skip_server_prereqs=False,
+    skip_repo_vars_refresh=False,
+    server_bootstrap_only=False,
+):
+    """Prepare repos before applying server deployment.
+
+    This is Phase 5 wiring:
+    - discover bundle repos
+    - ensure server prerequisite packages are available
+    - refresh generated provisioning repo vars
+    """
+    repo_vars_path = repos_generated_vars_file(bundle_path)
+
+    if skip_repo_prep:
+        report.add("skipped", "Repository preflight skipped by option")
+        return repo_vars_path
+
+    path_for_ansible = repo_client_path_from_plan(plan)
+    repo_args = RepoPreflightArgs()
+
+    entries = build_repo_plan(
+        bundle_path,
+        path_for_ansible=path_for_ansible,
+        args=repo_args,
+    )
+
+    validation = validate_repos_state(
+        bundle_path,
+        path_for_ansible,
+        entries,
+        requested_os_keys=set(),
+    )
+
+    if validation.errors:
+        validation.print_report()
+        raise RuntimeError(
+            "Repository preflight failed because repository state is invalid."
+        )
+
+    print("")
+    print("#" * 80)
+    print("# AeroLIT deploy repository preflight")
+    print("#" * 80)
+    print("")
+    print_plan_value("Client bundle path", path_for_ansible)
+    print_plan_value("Repo vars file", repo_vars_path)
+    print_plan_value("Repos discovered", len(entries))
+    print_plan_value("Ensure server prereqs", not skip_server_prereqs)
+    print_plan_value("Refresh repo vars", not skip_repo_vars_refresh)
+    print_plan_value("Server bootstrap only", server_bootstrap_only)
+    print("")
+
+    if skip_server_prereqs:
+        report.add("skipped", "Server prerequisite package handling skipped by option")
+    else:
+        try:
+            ensure_server_prerequisites_with_repo_fallback(
+                entries,
+                repo_file=None,
+                packages=None,
+                dry_run=dry_run,
+                force=False,
+                no_backup=False,
+                bootstrap_only=server_bootstrap_only,
+            )
+            if dry_run:
+                report.add(
+                    "dry_run",
+                    "Would ensure server prerequisite packages are installed",
+                )
+            else:
+                report.add(
+                    "existing",
+                    "Server prerequisite packages are installed or were installed",
+                )
+        except RepoConfigError as exc:
+            raise RuntimeError(str(exc))
+
+    if skip_repo_vars_refresh:
+        report.add("skipped", "Provisioning repo vars refresh skipped by option")
+    else:
+        try:
+            content = render_repos_generated_vars(
+                bundle_path,
+                path_for_ansible,
+                entries,
+            )
+            result = write_if_changed(
+                repo_vars_path,
+                content,
+                dry_run=dry_run,
+                force=False,
+                no_backup=False,
+            )
+            record_repo_write_result(report, result, repo_vars_path)
+        except RepoConfigError as exc:
+            raise RuntimeError(str(exc))
+
+    return repo_vars_path
+
+
 def find_nmcli_connection_for_interface(interface):
     """Return the active NetworkManager connection name for an interface."""
     rc, stdout, stderr = run_command(
@@ -841,10 +999,12 @@ def run_server_playbook(
     playbook_name,
     generated_vars_path,
     dry_run=False,
+    extra_vars_files=None,
 ):
     """Run one existing server playbook."""
     playbooks_dir = Path(playbooks_dir)
     playbook = playbooks_dir / playbook_name
+    extra_vars_files = extra_vars_files or []
 
     if not playbook.exists():
         raise RuntimeError("Required playbook not found: {}".format(playbook))
@@ -857,8 +1017,13 @@ def run_server_playbook(
         "local",
         "-e",
         "@{}".format(generated_vars_path),
-        str(playbook),
     ]
+
+    for vars_file in extra_vars_files:
+        if vars_file and Path(vars_file).exists():
+            command.extend(["-e", "@{}".format(vars_file)])
+
+    command.append(str(playbook))
 
     run_logged_command(
         report,
@@ -879,6 +1044,7 @@ def deploy_ansible_playbooks(
     dry_run=False,
     skip_pxe=False,
     skip_controller=False,
+    repo_vars_path=None,
 ):
     """Run PXE/controller playbooks from the bundle."""
     collections_hub = collections_hub_path(bundle_path)
@@ -907,6 +1073,17 @@ def deploy_ansible_playbooks(
             "Ansible playbooks directory not found: {}".format(playbooks_dir)
         )
 
+    extra_vars_files = []
+    if repo_vars_path and Path(repo_vars_path).exists():
+        extra_vars_files.append(repo_vars_path)
+    elif repo_vars_path:
+        report.add(
+            "warnings",
+            "Repository vars file not found; continuing without it: {}".format(
+                repo_vars_path
+            ),
+        )
+
     if not skip_pxe:
         run_server_playbook(
             report,
@@ -914,6 +1091,7 @@ def deploy_ansible_playbooks(
             "pxe_server.yml",
             generated_vars_path,
             dry_run=dry_run,
+            extra_vars_files=extra_vars_files,
         )
     else:
         report.add("skipped", "PXE playbook skipped")
@@ -925,6 +1103,7 @@ def deploy_ansible_playbooks(
             "ansible_controller.yml",
             generated_vars_path,
             dry_run=dry_run,
+            extra_vars_files=extra_vars_files,
         )
     else:
         report.add("skipped", "Controller playbook skipped")
@@ -938,6 +1117,10 @@ def run_deploy_server(
     skip_firewall=False,
     skip_pxe=False,
     skip_controller=False,
+    skip_repo_prep=False,
+    skip_server_prereqs=False,
+    skip_repo_vars_refresh=False,
+    server_bootstrap_only=False,
     verbose=False,
 ):
     """Deploy the saved AeroLIT server configuration."""
@@ -962,6 +1145,17 @@ def run_deploy_server(
         print("Show complete. No files or services were changed.")
         return 0
 
+    repo_vars_path = deploy_repository_preflight(
+        plan,
+        report,
+        bundle_path,
+        dry_run=dry_run,
+        skip_repo_prep=skip_repo_prep,
+        skip_server_prereqs=skip_server_prereqs,
+        skip_repo_vars_refresh=skip_repo_vars_refresh,
+        server_bootstrap_only=server_bootstrap_only,
+    )
+
     deploy_interface(plan, report, dry_run=dry_run, skip=skip_interface)
     deploy_nfs(plan, report, dry_run=dry_run, skip=skip_nfs)
     deploy_firewall(plan, report, dry_run=dry_run, skip=skip_firewall)
@@ -973,6 +1167,7 @@ def run_deploy_server(
         dry_run=dry_run,
         skip_pxe=skip_pxe,
         skip_controller=skip_controller,
+        repo_vars_path=repo_vars_path,
     )
 
     print("")
