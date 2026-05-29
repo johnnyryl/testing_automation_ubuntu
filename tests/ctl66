@@ -590,6 +590,13 @@ def deploy_repository_preflight(
     print_plan_value("Server bootstrap only", server_bootstrap_only)
     print("")
 
+    if skip_repo_vars_refresh and not Path(repo_vars_path).exists():
+        raise RuntimeError(
+            "Repository vars refresh was skipped, but repo vars file is missing: {}\n"
+            "Run deploy without --skip-repo-vars-refresh so AeroLIT can generate it, or run:\n"
+            "  aerolitctl configure repos --refresh".format(repo_vars_path)
+        )
+
     if skip_server_prereqs:
         report.add("skipped", "Server prerequisite package handling skipped by option")
     else:
