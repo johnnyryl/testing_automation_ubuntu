@@ -1,3 +1,135 @@
+You fixed the PXE content root problem. The evidence is good:
+
+/opt/aerolit/aerolit-bundle/extracted_isos -> /iso
+/etc/aerolit/overrides/pxe -> /overrides
+HTTP/1.1 200 OK from /boot.ipxe
+
+Also, don’t worry about this line by itself:
+
+Image=registry.gitlab.us.lmco.com/lit/containers/pxe-content:latest
+
+That is okay as long as the service uses --pull never and the image exists locally. It is using the local image tag now.
+
+But I see two remaining issues before Phase 5 is truly clean.
+
+1. Your boot.ipxe is still pointing clients at the wrong server IP
+
+Your curl works against:
+
+http://192.168.109.10:18080/boot.ipxe
+
+But the file content says:
+
+set server 192.168.109.139
+
+That means a real PXE client may successfully download boot.ipxe, then try to fetch follow-on content from 192.168.109.139, not 192.168.109.10.
+
+Fix that first:
+
+cd /root/aerolitctl
+aerolitctl configure pxe \
+  --pxe-server-ip 192.168.109.10 \
+  --pxe-http-port 18080 \
+  --pxe-content-iso-root /opt/aerolit/aerolit-bundle/extracted_isos
+
+Then rerun only the PXE side:
+
+aerolitctl deploy server --server-bootstrap-only --skip-controller
+
+Then confirm the generated boot file is correct:
+
+curl -s http://127.0.0.1:18080/boot.ipxe | grep -E '^set server|^set port|^set base'
+curl -s http://192.168.109.10:18080/boot.ipxe | grep -E '^set server|^set port|^set base'
+
+Expected:
+
+set server 192.168.109.10
+set port 18080
+set base http://${server}:${port}
+
+2. Your full deploy is now failing in ansible_controller.yml, not PXE
+
+This line is the important one:
+
+ERROR: Command failed rc=2: Run ansible_controller.yml
+
+So the PXE role is no longer the main blocker. The next problem is the controller playbook, but aerolitctl is hiding the actual Ansible task failure because it captures stdout.
+
+Run the controller playbook manually with the same vars so we can see the real failure:
+
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+export ANSIBLE_CONFIG="$PWD/ansible.cfg"
+set -o pipefail
+ansible-playbook \
+  -i localhost, \
+  -c local \
+  -e @/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml \
+  -e @/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/ansible_controller.yml \
+  -vv \
+  2>&1 | tee /tmp/aerolit-ansible-controller-failure.log
+echo "ansible rc=${PIPESTATUS[0]}"
+
+Then pull out the failure:
+
+grep -nE 'FAILED!|fatal:|ERROR|Cannot|No such|permission|denied|metadata|repo|exportfs' \
+  /tmp/aerolit-ansible-controller-failure.log | tail -100
+
+Where I’d mark this right now
+
+I would say:
+
+Phase 1: done
+Phase 2: done
+Phase 3: done
+Phase 4: done
+Phase 5 repo-preflight wiring: done
+Phase 5 full happy-path deploy: not done yet
+
+You’re very close. The repo preflight is working. PXE content serving is working. The immediate fix is the stale 192.168.109.139 in boot.ipxe, then isolate the ansible_controller.yml failure.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 The failure is clear now: pxe-content is running, but it is serving from the wrong content root.
 
 Your service is mounting this:
