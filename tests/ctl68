@@ -26,6 +26,8 @@ from .config import get_bundle_path, load_config
 
 
 GENERATED_REPOS_MARKER = "# Generated AeroLIT repository variables"
+SERVER_BOOTSTRAP_REPO_MARKER = "# Generated AeroLIT server bootstrap repository"
+DEFAULT_SERVER_BOOTSTRAP_REPO_FILE = "/etc/yum.repos.d/zz-aerolit-server-bootstrap.repo"
 
 DEFAULT_PATH_FOR_ANSIBLE = "/home/unix/sysadmin"
 SUPPORTED_RHEL_KEYS = ["rhel7", "rhel8", "rhel9", "rhel10"]
@@ -763,6 +765,132 @@ def server_bootstrap_pair(entries, os_major=None):
     return result
 
 
+def server_bootstrap_repo_file(path=None):
+    """Return the server bootstrap yum/dnf repo file path."""
+    return absolute_path(path or DEFAULT_SERVER_BOOTSTRAP_REPO_FILE)
+
+
+def server_bootstrap_repo_section_id(repo):
+    """Return a safe server bootstrap .repo section id."""
+    os_key = repo.get("os_key") or "unknown"
+    role = repo.get("role") or "repo"
+    return sanitize_repo_id("aerolit-server-bootstrap-{}-{}".format(os_key, role))
+
+
+def render_server_bootstrap_repo_content(entries, os_major=None):
+    """Render /etc/yum.repos.d repo content for server bootstrap packages."""
+    server_pair = server_bootstrap_pair(entries, os_major=os_major)
+    os_key = server_pair.get("os_key")
+
+    if not os_key:
+        raise RepoConfigError(
+            "Cannot render server bootstrap repo because current server OS could not be detected."
+        )
+
+    missing = []
+    if not server_pair.get("baseos"):
+        missing.append("BaseOS")
+    if not server_pair.get("appstream"):
+        missing.append("AppStream")
+
+    if missing:
+        raise RepoConfigError(
+            "Cannot render server bootstrap repo for {} because {} repo(s) were not discovered.".format(
+                os_key,
+                ", ".join(missing),
+            )
+        )
+
+    lines = [
+        SERVER_BOOTSTRAP_REPO_MARKER,
+        "# Created by aerolitctl.",
+        "# Used as a local fallback when server prerequisite packages are missing.",
+        "# Safe to leave enabled for disconnected AeroLIT servers.",
+        "",
+    ]
+
+    for role in ["baseos", "appstream"]:
+        repo = server_pair[role]
+        section_id = server_bootstrap_repo_section_id(repo)
+
+        lines.extend(
+            [
+                "[{}]".format(section_id),
+                "name=AeroLIT server bootstrap {} {}".format(os_key, role),
+                "baseurl={}".format(repo["server_baseurl"]),
+                "enabled=1",
+                "gpgcheck=0",
+                "",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+def server_bootstrap_repo_looks_managed(path):
+    """Return True when an existing server bootstrap repo file is safe to update."""
+    path = Path(path)
+
+    if not path.exists():
+        return True
+
+    content = read_text(path)
+    return SERVER_BOOTSTRAP_REPO_MARKER in content
+
+
+def write_server_bootstrap_repo(
+    entries,
+    repo_file=None,
+    dry_run=False,
+    force=False,
+    no_backup=False,
+):
+    """Create/update the server bootstrap yum/dnf repo file."""
+    repo_file = server_bootstrap_repo_file(repo_file)
+    content = render_server_bootstrap_repo_content(entries)
+    exists = repo_file.exists()
+    current = read_text(repo_file) if exists else None
+
+    if current == content:
+        print("Already current: server bootstrap repo")
+        return "unchanged"
+
+    if exists and not force and not server_bootstrap_repo_looks_managed(repo_file):
+        raise RepoConfigError(
+            "{} exists but does not look like an aerolitctl-managed server bootstrap repo. "
+            "Refusing to overwrite it without --force.".format(repo_file)
+        )
+
+    if dry_run:
+        if exists:
+            backup_file(
+                repo_file,
+                dry_run=True,
+                no_backup=no_backup,
+                label="server bootstrap repo",
+            )
+            print("Would update: server bootstrap repo")
+            return "would_update"
+
+        print("Would create: server bootstrap repo")
+        return "would_create"
+
+    backup_file(
+        repo_file,
+        dry_run=False,
+        no_backup=no_backup,
+        label="server bootstrap repo",
+    )
+    write_text(repo_file, content)
+
+    if exists:
+        print("Updated: server bootstrap repo")
+        return "updated"
+
+    print("Created: server bootstrap repo")
+    return "created"
+
+
 def render_repo_item(lines, repo, indent, baseurl_key):
     """Render one repo item as a YAML list item at indent."""
     spaces = " " * indent
@@ -1315,6 +1443,8 @@ def run_configure_repos(args):
         refresh_requested = getattr(args, "refresh", False)
         force = getattr(args, "force", False)
         no_backup = getattr(args, "no_backup", False)
+        write_server_bootstrap_requested = getattr(args, "write_server_bootstrap", False)
+        server_bootstrap_repo_path = getattr(args, "server_bootstrap_repo_file", None)
 
         entries = build_repo_plan(
             bundle_path,
@@ -1324,7 +1454,12 @@ def run_configure_repos(args):
 
         requested_os_keys = collect_requested_os_keys(args)
 
-        if not show_only and not validate_requested and not refresh_requested:
+        if (
+            not show_only
+            and not validate_requested
+            and not refresh_requested
+            and not write_server_bootstrap_requested
+        ):
             show_only = True
 
         if show_only:
@@ -1381,7 +1516,45 @@ def run_configure_repos(args):
                 print("")
                 print("AeroLIT repository configuration saved.")
 
-        if validate_requested or refresh_requested or show_only:
+        if write_server_bootstrap_requested:
+            print("")
+            print("AeroLIT server bootstrap repo plan")
+            print("")
+            print("{:<32} {}".format("Dry run:", dry_run))
+            print("{:<32} {}".format("Repo file:", server_bootstrap_repo_file(server_bootstrap_repo_path)))
+            print("{:<32} {}".format("Backups enabled:", not no_backup))
+            print("{:<32} {}".format("Force overwrite:", force))
+            print("")
+
+            report = validate_repos_state(
+                bundle_path,
+                path_for_ansible,
+                entries,
+                requested_os_keys=requested_os_keys,
+            )
+            if report.errors:
+                print("")
+                print("Refusing to write invalid server bootstrap repo.")
+                print("")
+                report.print_report()
+                return report.exit_code()
+
+            write_server_bootstrap_repo(
+                entries,
+                repo_file=server_bootstrap_repo_path,
+                dry_run=dry_run,
+                force=force,
+                no_backup=no_backup,
+            )
+
+            if dry_run:
+                print("")
+                print("Dry run complete. No server bootstrap repo file was changed.")
+            else:
+                print("")
+                print("AeroLIT server bootstrap repo saved.")
+
+        if validate_requested or refresh_requested or show_only or write_server_bootstrap_requested:
             print("")
             report = validate_repos_state(
                 bundle_path,
