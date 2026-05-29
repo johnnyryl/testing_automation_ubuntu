@@ -1,3 +1,111 @@
+PKG="$(
+  for p in tree wget rsync lsof vim-enhanced bind-utils tcpdump unzip policycoreutils-python-utils; do
+    if ! rpm -q "$p" >/dev/null 2>&1 && \
+       dnf repoquery --disablerepo='*' --enablerepo='aerolit-server-bootstrap-*' "$p" >/dev/null 2>&1; then
+      echo "$p"
+      break
+    fi
+  done
+)"
+
+echo "Test package: $PKG"
+
+
+
+
+aerolitctl configure repos \
+  --ensure-server-prereqs \
+  --server-bootstrap-only \
+  --server-prereq-package "$PKG" \
+  --dry-run
+
+
+
+aerolitctl configure repos \
+  --ensure-server-prereqs \
+  --server-bootstrap-only \
+  --server-prereq-package "$PKG"
+
+rpm -q "$PKG"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 3. Run compile checks
 
 From your repo root:
