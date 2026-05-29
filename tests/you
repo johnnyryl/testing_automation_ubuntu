@@ -1,3 +1,65 @@
+dnf clean all
+rm -rf /var/cache/dnf/aerolit-server-bootstrap-*
+dnf makecache --disablerepo='*' --enablerepo='aerolit-server-bootstrap-*'
+
+
+BASE=/opt/aerolit/aerolit-bundle/extracted_isos/rhel8iso
+
+for repo in BaseOS AppStream; do
+  echo "== $repo =="
+  cd "$BASE/$repo" || exit 1
+
+  href=$(sed -n 's/.*href="\([^"]*productid\.gz\)".*/\1/p' repodata/repomd.xml | head -n1)
+
+  echo "productid href: $href"
+
+  if [ -n "$href" ]; then
+    ls -lh "$href"
+    sha256sum "$href"
+    gzip -t "$href" && echo "gzip OK" || echo "gzip FAILED"
+  else
+    echo "No productid.gz entry found in repomd.xml"
+  fi
+
+  echo
+done
+
+
+
+
+mkdir -p /mnt/rhel8iso
+
+mount -o loop /path/to/rhel8.iso /mnt/rhel8iso
+
+rm -rf /opt/aerolit/aerolit-bundle/extracted_isos/rhel8iso
+mkdir -p /opt/aerolit/aerolit-bundle/extracted_isos/rhel8iso
+
+cp -a /mnt/rhel8iso/. /opt/aerolit/aerolit-bundle/extracted_isos/rhel8iso/
+
+umount /mnt/rhel8iso
+
+
+
+
+
+
+
+
+dnf clean all
+rm -rf /var/cache/dnf/aerolit-server-bootstrap-*
+dnf makecache --disablerepo='*' --enablerepo='aerolit-server-bootstrap-*'
+
+
+
+
+
+
+
+
+
+
+
+
 dnf makecache --disablerepo='*' --enablerepo='aerolit-server-bootstrap-*'
 
 dnf list --disablerepo='*' --enablerepo='aerolit-server-bootstrap-*' \
