@@ -251,6 +251,32 @@ def add_configure_repos_parser(configure_subparsers):
         ),
     )
     repos_parser.add_argument(
+        "--ensure-server-prereqs",
+        action="store_true",
+        help=(
+            "Ensure server prerequisite packages are installed. "
+            "Tries existing repos first, then writes/uses the AeroLIT server bootstrap repo as fallback."
+        ),
+    )
+    repos_parser.add_argument(
+        "--server-prereq-package",
+        action="append",
+        default=[],
+        metavar="PACKAGE",
+        help=(
+            "Override the server prerequisite package list for --ensure-server-prereqs. "
+            "Can be used more than once. Defaults to ansible-core, podman, nfs-utils, dnsmasq, firewalld."
+        ),
+    )
+    repos_parser.add_argument(
+        "--server-bootstrap-only",
+        action="store_true",
+        help=(
+            "For --ensure-server-prereqs, skip existing enabled repos and use only "
+            "aerolit-server-bootstrap-* repos."
+        ),
+    )
+    repos_parser.add_argument(
         "--force",
         action="store_true",
         help="Allow replacement of an existing non-aerolitctl-managed repo vars file.",
