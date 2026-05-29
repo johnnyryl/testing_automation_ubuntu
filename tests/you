@@ -1,3 +1,195 @@
+8. Test Phase 5 dry-run first
+
+Run these from the repo root:
+
+python3 -m compileall src tools
+python3 -m py_compile src/aerolitctl/deploy_server.py
+python3 -m py_compile src/aerolitctl/cli.py
+
+Then confirm the new deploy flags exist:
+
+aerolitctl deploy server --help | grep -E 'skip-repo-prep|skip-server-prereqs|skip-repo-vars-refresh|server-bootstrap-only'
+
+Expected flags:
+
+--skip-repo-prep
+--skip-server-prereqs
+--skip-repo-vars-refresh
+--server-bootstrap-only
+
+Then run the real Phase 5 proof command:
+
+aerolitctl deploy server --dry-run --server-bootstrap-only
+
+Expected new behavior:
+
+# AeroLIT deploy repository preflight
+Client bundle path              : /home/unix/sysadmin
+Repo vars file                  : /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml
+Repos discovered                : 3
+Ensure server prereqs           : yes
+Refresh repo vars               : yes
+Server bootstrap only           : yes
+
+Then it should show either:
+
+All server prerequisite packages are already installed.
+
+or:
+
+Would install missing packages from AeroLIT server bootstrap repo: ...
+
+And the Ansible dry-run command should include both vars files:
+
+-e @/opt/aerolit/aerolit-bundle/collections-hub/ansible/...server generated vars...
+-e @/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml
+
+That means Phase 5 is wired correctly.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+I would not add more code yet. Run the tests now.
+
+Use this order:
+
+python3 -m compileall src tools
+python3 -m py_compile src/aerolitctl/deploy_server.py
+python3 -m py_compile src/aerolitctl/cli.py
+
+Then:
+
+aerolitctl deploy server --help | grep -E 'skip-repo-prep|skip-server-prereqs|skip-repo-vars-refresh|server-bootstrap-only'
+
+Then the important Phase 5 dry-run:
+
+aerolitctl deploy server --dry-run --server-bootstrap-only
+
+What you want to confirm:
+
+# AeroLIT deploy repository preflight
+
+and:
+
+Client bundle path
+Repo vars file
+Repos discovered
+Ensure server prereqs
+Refresh repo vars
+Server bootstrap only
+
+Then look lower in the dry-run output for the Ansible command. It should include both vars files:
+
+-e @...aerolitctl_server_generated...
+-e @...aerolitctl_repos_generated.yml
+
+One small note: even if compile passes, the real proof is the dry-run output. The code placement looks right, but the dry-run tells us whether the saved server config, repo discovery, generated vars path, and playbook command all line up together.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 PKG="$(
   for p in tree wget rsync lsof vim-enhanced bind-utils tcpdump unzip policycoreutils-python-utils; do
     if ! rpm -q "$p" >/dev/null 2>&1 && \
