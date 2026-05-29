@@ -163,6 +163,10 @@ def cmd_deploy_server(args):
         skip_firewall=args.skip_firewall,
         skip_pxe=args.skip_pxe,
         skip_controller=args.skip_controller,
+        skip_repo_prep=args.skip_repo_prep,
+        skip_server_prereqs=args.skip_server_prereqs,
+        skip_repo_vars_refresh=args.skip_repo_vars_refresh,
+        server_bootstrap_only=args.server_bootstrap_only,
         verbose=getattr(args, "verbose", False),
     )
 
@@ -857,6 +861,35 @@ def add_deploy_parser(subparsers):
         "--skip-controller",
         action="store_true",
         help="Do not run the Ansible controller playbook.",
+    )
+    server_parser.add_argument(
+        "--skip-repo-prep",
+        action="store_true",
+        help=(
+            "Skip automatic repository preparation. This skips both server "
+            "prerequisite package handling and generated provisioning repo vars refresh."
+        ),
+    )
+    server_parser.add_argument(
+        "--skip-server-prereqs",
+        action="store_true",
+        help="Do not automatically install missing server prerequisite packages.",
+    )
+    server_parser.add_argument(
+        "--skip-repo-vars-refresh",
+        action="store_true",
+        help=(
+            "Do not automatically refresh collections-hub/ansible/group_vars/all/"
+            "aerolitctl_repos_generated.yml before running deploy playbooks."
+        ),
+    )
+    server_parser.add_argument(
+        "--server-bootstrap-only",
+        action="store_true",
+        help=(
+            "For deploy server prerequisite handling, skip existing enabled repos "
+            "and use only aerolit-server-bootstrap-* repos."
+        ),
     )
 
     add_command_verbose(server_parser)
