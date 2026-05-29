@@ -235,6 +235,22 @@ def add_configure_repos_parser(configure_subparsers):
         help="Preview refresh output without writing files.",
     )
     repos_parser.add_argument(
+        "--write-server-bootstrap",
+        action="store_true",
+        help=(
+            "Write /etc/yum.repos.d/zz-aerolit-server-bootstrap.repo from the "
+            "discovered current-OS BaseOS/AppStream bundle repos."
+        ),
+    )
+    repos_parser.add_argument(
+        "--server-bootstrap-repo-file",
+        default=None,
+        help=(
+            "Override the server bootstrap repo file path. "
+            "Defaults to /etc/yum.repos.d/zz-aerolit-server-bootstrap.repo."
+        ),
+    )
+    repos_parser.add_argument(
         "--force",
         action="store_true",
         help="Allow replacement of an existing non-aerolitctl-managed repo vars file.",
