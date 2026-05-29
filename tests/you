@@ -1,3 +1,121 @@
+Good news: the stale NFS export problem is fixed. The deploy made it past:
+
+exportfs -rav
+
+Now it is failing at the next stage:
+
+Run pxe_server.yml
+
+So this is not the same /aerolit_rhel8_standard issue anymore. The repo preflight worked, NFS got past the old export problem, and now the PXE Ansible playbook is failing with rc=2.
+
+The deploy output is hiding the useful Ansible failure details, so do not rerun the whole deploy yet. Run just the PXE playbook directly so we can see the real error.
+
+Run this exactly:
+
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+export ANSIBLE_CONFIG="$PWD/ansible.cfg"
+set -o pipefail
+ansible-playbook \
+  -i localhost, \
+  -c local \
+  -e @/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml \
+  -e @/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/pxe_server.yml \
+  -vv \
+  2>&1 | tee /tmp/aerolit-pxe-server-failure.log
+echo "ansible rc=${PIPESTATUS[0]}"
+
+Then run:
+
+tail -n 120 /tmp/aerolit-pxe-server-failure.log
+
+That should show the actual task or variable that failed.
+
+Also run this quick check before anything else:
+
+ls -l /opt/aerolit/aerolit-bundle/collections-hub/ansible/pxe_server.yml
+ls -l /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+ls -l /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml
+
+What I can say from your screenshot right now:
+
+Phase 5 repo wiring is doing what we wanted. It found repos, ensured prereqs, refreshed repo vars, and passed both vars files into Ansible. The failure is now inside the existing pxe_server.yml execution path. Next step is finding the real Ansible task failure from that log.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 REPO_VARS="/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml"
 BACKUP="${REPO_VARS}.edge-test-backup"
 
