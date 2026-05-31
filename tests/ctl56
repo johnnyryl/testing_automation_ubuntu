@@ -22,15 +22,23 @@ from .paths import (
     ansible_group_vars_template_dir,
     ansible_inventory_dir,
     ansible_inventory_template_dir,
+    ansible_controller_playbook,
     collections_hub_path,
     aerolitctl_server_generated_vars_file,
     gitlab_ci_file,
     provision_gitlab_template,
+    pxe_server_playbook,
     scheduled_gitlab_template,
     stig_gitlab_template,
     sync_preserve_file,
     system_update_gitlab_template,
     templates_dir,
+)
+from .status import (
+    controller_enabled_from_config,
+    generated_vars_look_current,
+    nfs_enabled_from_config,
+    pxe_enabled_from_config,
 )
 
 
@@ -79,17 +87,20 @@ def command_exists(name):
     return shutil.which(name) is not None
 
 
-def run_command(command):
+def run_command(command, cwd=None):
     """Run a command and return return code and stripped output."""
     try:
         process = subprocess.Popen(
             command,
+            cwd=str(cwd) if cwd else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
         )
         stdout, stderr = process.communicate()
-        output = (stdout or stderr or "").strip()
+        output = "\n".join(
+            item.strip() for item in [stdout, stderr] if item and item.strip()
+        )
         return process.returncode, output
     except OSError as exc:
         return 127, str(exc)
@@ -317,6 +328,165 @@ def check_port_available(report, bind_address, port):
         sock.close()
 
 
+def read_text_file(path):
+    """Read a text file while tolerating non-UTF8 bytes."""
+    with open(str(path), "r", encoding="utf-8", errors="ignore") as handle:
+        return handle.read()
+
+
+def generated_var_value(content, key):
+    """Return a simple top-level generated var value as text."""
+    prefix = "{}:".format(key)
+
+    for line in content.splitlines():
+        if line.startswith(prefix):
+            return line.split(":", 1)[1].strip()
+
+    return None
+
+
+def check_generated_server_vars(report, bundle_path, config):
+    """Check that generated server vars are present and aligned enough for deploy."""
+    generated_vars_path = aerolitctl_server_generated_vars_file(bundle_path)
+
+    if not generated_vars_path.exists():
+        report.add_failure(
+            "Generated server vars missing: {}. Run: aerolitctl configure server".format(
+                generated_vars_path
+            )
+        )
+        return
+
+    try:
+        content = read_text_file(generated_vars_path)
+    except IOError as exc:
+        report.add_failure(
+            "Could not read generated server vars {}: {}".format(
+                generated_vars_path,
+                exc,
+            )
+        )
+        return
+
+    if generated_vars_look_current(generated_vars_path, config):
+        report.add_ok("Generated server vars look current: {}".format(generated_vars_path))
+    else:
+        report.add_warning(
+            "Generated server vars may be stale or incomplete: {}. "
+            "Run: aerolitctl configure server".format(generated_vars_path)
+        )
+
+    server = config.get("server", {}) or {}
+    pxe = config.get("pxe", {}) or {}
+
+    pxe_enabled = pxe_enabled_from_config(server, pxe)
+    controller_enabled = controller_enabled_from_config(server)
+    nfs_enabled = nfs_enabled_from_config(server)
+
+    expected_keys = []
+
+    if pxe_enabled:
+        expected_keys.extend(
+            [
+                "pxe_content_manage_firewall",
+                "pxe_dnsmasq_manage_firewall",
+            ]
+        )
+
+    if controller_enabled and nfs_enabled:
+        expected_keys.extend(
+            [
+                "nfs_server_manage_exports",
+                "nfs_server_manage_services",
+                "nfs_server_manage_firewall",
+            ]
+        )
+
+    for key in expected_keys:
+        value = generated_var_value(content, key)
+
+        if value is None:
+            report.add_warning(
+                "Generated server vars missing expected role variable: {}".format(key)
+            )
+        else:
+            report.add_ok("Generated server var {}: {}".format(key, value))
+
+
+def check_ansible_playbook_syntax(report, bundle_path, playbook_path, label):
+    """Run ansible-playbook --syntax-check for one local playbook."""
+    if not command_exists("ansible-playbook"):
+        report.add_warning(
+            "Ansible syntax check skipped for {}; ansible-playbook not found".format(
+                label
+            )
+        )
+        return
+
+    playbook_path = Path(playbook_path)
+
+    if not playbook_path.exists():
+        report.add_failure("{} playbook missing: {}".format(label, playbook_path))
+        return
+
+    generated_vars_path = aerolitctl_server_generated_vars_file(bundle_path)
+
+    command = [
+        "ansible-playbook",
+        "--syntax-check",
+        "-i",
+        "localhost,",
+        "-c",
+        "local",
+    ]
+
+    if generated_vars_path.exists():
+        command.extend(["-e", "@{}".format(generated_vars_path)])
+
+    command.append(playbook_path.name)
+
+    code, output = run_command(command, cwd=ansible_dir(bundle_path))
+
+    if code == 0:
+        report.add_ok("{} syntax check passed: {}".format(label, playbook_path))
+    else:
+        report.add_failure(
+            "{} syntax check failed: {}; output: {}".format(
+                label,
+                playbook_path,
+                output,
+            )
+        )
+
+
+def check_ansible_playbooks(report, bundle_path, config):
+    """Check enabled deploy playbooks can parse with generated vars."""
+    server = config.get("server", {}) or {}
+    pxe = config.get("pxe", {}) or {}
+
+    if pxe_enabled_from_config(server, pxe):
+        check_ansible_playbook_syntax(
+            report,
+            bundle_path,
+            pxe_server_playbook(bundle_path),
+            "PXE server",
+        )
+    else:
+        report.add_warning("PXE playbook syntax check skipped; PXE is disabled")
+
+    if controller_enabled_from_config(server):
+        check_ansible_playbook_syntax(
+            report,
+            bundle_path,
+            ansible_controller_playbook(bundle_path),
+            "Ansible controller",
+        )
+    else:
+        report.add_warning(
+            "Ansible controller syntax check skipped; controller/NFS is disabled"
+        )
+
+
 def check_bundle_layout(report, bundle_path):
     """Check configured bundle layout."""
     bundle_path = Path(bundle_path)
@@ -471,6 +641,8 @@ def run_doctor():
     report.add_ok("Configured bundle path: {}".format(bundle_path))
 
     check_bundle_layout(report, bundle_path)
+    check_generated_server_vars(report, bundle_path, config)
+    check_ansible_playbooks(report, bundle_path, config)
     add_pxe_doctor_findings(report, bundle_path)
 
     pxe_config = config.get("pxe", {})
