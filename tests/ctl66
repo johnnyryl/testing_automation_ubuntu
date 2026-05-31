@@ -1,8 +1,12 @@
 """Apply saved AeroLIT server configuration.
 
 This module is the deploy side of ``aerolitctl configure server``.
-It reads the saved server intent, applies host-side network/NFS/firewall
-changes, and runs the existing PXE/controller Ansible playbooks.
+It reads saved server intent, refreshes generated Ansible variables,
+prepares repositories, applies optional interface configuration, and runs
+the existing PXE/controller Ansible playbooks.
+
+Functional Ansible roles own real service changes such as PXE content,
+dnsmasq, NFS exports, and firewall rules.
 """
 
 import os
@@ -33,6 +37,7 @@ from .server import (
     DEFAULT_NFS_EXPORTS_FILE,
     DEFAULT_TARGET_MOUNT_PATH,
     current_server_config,
+    generated_vars_text,
     interface_has_ip,
     interface_ipv4_addresses,
     parse_ipv4_address,
@@ -202,33 +207,6 @@ def mode_enables(mode, target):
     return False
 
 
-def effective_firewall_intent(
-    firewall,
-    pxe_enabled=False,
-    nfs_enabled=False,
-    pxe_http_port=DEFAULT_HTTP_PORT,
-):
-    """Build effective firewall intent from the active saved mode.
-
-    This intentionally derives services/ports from the effective plan so stale
-    saved firewall values cannot cause deploy to apply the wrong mode's rules.
-    """
-    services = []
-    ports = []
-
-    if nfs_enabled:
-        services.extend(["nfs", "mountd", "rpc-bind"])
-
-    if pxe_enabled:
-        ports.append("{}/tcp".format(pxe_http_port or DEFAULT_HTTP_PORT))
-
-    return {
-        "manage": normalize_bool(firewall.get("manage"), True),
-        "services": services,
-        "ports": ports,
-    }
-
-
 def load_deploy_plan(config, bundle_path):
     """Build a deploy plan from /etc/aerolit/aerolitctl.yml."""
     raw_server = config.get("server", {}) or {}
@@ -319,12 +297,9 @@ def load_deploy_plan(config, bundle_path):
         "nfs": nfs,
     }
 
-    plan["firewall"] = effective_firewall_intent(
-        firewall,
-        pxe_enabled=plan.get("pxe_enabled"),
-        nfs_enabled=plan.get("nfs", {}).get("enabled"),
-        pxe_http_port=plan.get("pxe_http_port"),
-    )
+    plan["firewall"] = {
+        "manage": normalize_bool(firewall.get("manage"), True),
+    }
 
     validate_deploy_plan(plan)
     return plan
@@ -486,13 +461,12 @@ def print_deploy_plan(plan, generated_vars_path):
     print("")
     print("Firewall:")
     print_plan_value("Manage firewall", firewall.get("manage"))
-    print_plan_value("Services", ", ".join(firewall.get("services") or []) or "none")
-    print_plan_value("Ports", ", ".join(firewall.get("ports") or []) or "none")
+    print_plan_value("Rules owner", "functional Ansible roles")
     print("")
-
 
 class RepoPreflightArgs(object):
     """Minimal args object used by repos.build_repo_plan during deploy."""
+
 
     def __init__(self):
         self.no_auto_discovery = False
@@ -609,6 +583,7 @@ def deploy_repository_preflight(
                 force=False,
                 no_backup=False,
                 bootstrap_only=server_bootstrap_only,
+                firewall_manage=plan.get("firewall", {}).get("manage", True),
             )
             if dry_run:
                 report.add(
@@ -719,44 +694,6 @@ def deploy_interface(plan, report, dry_run=False, skip=False):
     )
 
 
-def ensure_directory(path, report, dry_run=False, root=False):
-    """Ensure a directory exists."""
-    path = Path(path)
-    if path.exists():
-        if not path.is_dir():
-            raise RuntimeError("{} exists but is not a directory".format(path))
-        report.add("existing", "{} directory exists".format(path))
-        return
-
-    run_logged_command(
-        report,
-        ["mkdir", "-p", str(path)],
-        dry_run=dry_run,
-        root=root,
-        description="Create directory",
-    )
-
-
-def ensure_nfs_utils(report, dry_run=False):
-    """Ensure exportfs is available."""
-    if command_exists("exportfs"):
-        report.add("existing", "exportfs is available")
-        return
-
-    if not command_exists("dnf"):
-        raise RuntimeError(
-            "exportfs is missing and dnf is not available to install nfs-utils"
-        )
-
-    run_logged_command(
-        report,
-        ["dnf", "install", "-y", "nfs-utils"],
-        dry_run=dry_run,
-        root=True,
-        description="Install nfs-utils",
-    )
-
-
 def ensure_ansible_playbook(report, dry_run=False, package="ansible-core"):
     """Ensure ansible-playbook is available."""
     if command_exists("ansible-playbook"):
@@ -846,148 +783,36 @@ def install_text_file(report, path, content, dry_run=False, mode="0644"):
             pass
 
 
-def render_exports_file(nfs):
-    """Render /etc/exports.d content for the AeroLIT bundle export."""
-    export_path = nfs.get("export_path")
-    allowed = "*" if nfs.get("allow_all_clients") else nfs.get("allowed_clients")
-    return "# Managed by AeroLIT deploy server\n{} {}(rw,sync,no_subtree_check)\n".format(
-        export_path,
-        allowed,
-    )
+def runtime_deploy_plan(plan, skip_firewall=False, skip_nfs=False):
+    """Return deploy-time plan with skip flags applied for generated vars."""
+    runtime = dict(plan)
+    runtime["firewall"] = dict(plan.get("firewall", {}) or {})
+    runtime["nfs"] = dict(plan.get("nfs", {}) or {})
+
+    if skip_firewall:
+        runtime["firewall"]["manage"] = False
+
+    if skip_nfs:
+        runtime["nfs"]["enabled"] = False
+
+    return runtime
 
 
-def deploy_nfs(plan, report, dry_run=False, skip=False):
-    """Apply NFS export, service, and local permissions."""
-    if skip:
-        report.add("skipped", "Ansible Controller / NFS deployment skipped by option")
-        return
-
-    nfs = plan.get("nfs", {})
-    if not nfs.get("enabled"):
-        report.add("skipped", nfs_disabled_reason(plan))
-        return
-
-    export_path = Path(nfs.get("export_path"))
-    create_export_path = nfs.get("create_export_path", False)
-
-    if not export_path.exists() and not create_export_path:
-        raise RuntimeError(
-            "NFS export path {} does not exist. Re-run configure server and allow "
-            "deploy to create it, or create it manually.".format(export_path)
-        )
-
-    ensure_directory(export_path, report, dry_run=dry_run, root=True)
-    ensure_directory(export_path / "files", report, dry_run=dry_run, root=True)
-    ensure_directory(export_path / "repos", report, dry_run=dry_run, root=True)
-
-    owner = nfs.get("mount_owner") or DEFAULT_MOUNT_OWNER
-    group = nfs.get("mount_group") or DEFAULT_MOUNT_GROUP
-    mode = str(nfs.get("mount_mode") or DEFAULT_MOUNT_MODE)
-
-    run_logged_command(
-        report,
-        [
-            "chown",
-            "{}:{}".format(owner, group),
-            str(export_path),
-            str(export_path / "files"),
-            str(export_path / "repos"),
-        ],
-        dry_run=dry_run,
-        root=True,
-        description="Set NFS export ownership",
-    )
-    run_logged_command(
-        report,
-        [
-            "chmod",
-            mode,
-            str(export_path),
-            str(export_path / "files"),
-            str(export_path / "repos"),
-        ],
-        dry_run=dry_run,
-        root=True,
-        description="Set NFS export directory mode",
-    )
+def refresh_server_generated_vars(
+    plan,
+    report,
+    generated_vars_path,
+    dry_run=False,
+):
+    """Refresh server generated vars from the active deploy plan."""
+    content = generated_vars_text(plan)
 
     install_text_file(
         report,
-        nfs.get("exports_file") or DEFAULT_NFS_EXPORTS_FILE,
-        render_exports_file(nfs),
+        generated_vars_path,
+        content,
         dry_run=dry_run,
         mode="0644",
-    )
-
-    ensure_nfs_utils(report, dry_run=dry_run)
-
-    run_logged_command(
-        report,
-        ["systemctl", "enable", "--now", "rpcbind", "nfs-server"],
-        dry_run=dry_run,
-        root=True,
-        description="Enable and start NFS services",
-    )
-    run_logged_command(
-        report,
-        ["exportfs", "-rav"],
-        dry_run=dry_run,
-        root=True,
-        description="Refresh NFS exports",
-    )
-
-
-def deploy_firewall(plan, report, dry_run=False, skip=False):
-    """Apply firewall intent."""
-    if skip:
-        report.add("skipped", "Firewall deployment skipped by option")
-        return
-
-    firewall = plan.get("firewall", {})
-    if not firewall.get("manage"):
-        report.add("skipped", "Firewall management intent is disabled")
-        return
-
-    services = firewall.get("services") or []
-    ports = firewall.get("ports") or []
-
-    if not services and not ports:
-        report.add("skipped", "No firewall services or ports were configured")
-        return
-
-    if not command_exists("firewall-cmd"):
-        report.add("warnings", "firewall-cmd not found; skipping firewall changes")
-        return
-
-    rc, stdout, stderr = run_command(["systemctl", "is-active", "--quiet", "firewalld"])
-    if rc != 0:
-        report.add("warnings", "firewalld is not active; skipping firewall changes")
-        return
-
-    for service in services:
-        run_logged_command(
-            report,
-            ["firewall-cmd", "--permanent", "--add-service={}".format(service)],
-            dry_run=dry_run,
-            root=True,
-            description="Open firewall service",
-        )
-
-    for port in ports:
-        run_logged_command(
-            report,
-            ["firewall-cmd", "--permanent", "--add-port={}".format(port)],
-            dry_run=dry_run,
-            root=True,
-            description="Open firewall port",
-        )
-
-    run_logged_command(
-        report,
-        ["firewall-cmd", "--reload"],
-        dry_run=dry_run,
-        root=True,
-        description="Reload firewalld",
     )
 
 
@@ -1069,11 +894,19 @@ def deploy_ansible_playbooks(
     ensure_ansible_playbook(report, dry_run=dry_run)
 
     if not Path(generated_vars_path).exists():
-        raise RuntimeError(
-            "Generated vars file not found: {}. Run: aerolitctl configure server".format(
-                generated_vars_path
+        if dry_run:
+            report.add(
+                "dry_run",
+                "Generated vars would be refreshed before running playbooks: {}".format(
+                    generated_vars_path
+                ),
             )
-        )
+        else:
+            raise RuntimeError(
+                "Generated vars file not found after refresh: {}".format(
+                    generated_vars_path
+                )
+            )
 
     if not playbooks_dir.exists():
         raise RuntimeError(
@@ -1152,8 +985,26 @@ def run_deploy_server(
         print("Show complete. No files or services were changed.")
         return 0
 
-    repo_vars_path = deploy_repository_preflight(
+    runtime_plan = runtime_deploy_plan(
         plan,
+        skip_firewall=skip_firewall,
+        skip_nfs=skip_nfs,
+    )
+
+    if skip_firewall:
+        report.add(
+            "skipped",
+            "Firewall role variables disabled by deploy option",
+        )
+
+    if skip_nfs:
+        report.add(
+            "skipped",
+            "NFS role variables disabled by deploy option",
+        )
+
+    repo_vars_path = deploy_repository_preflight(
+        runtime_plan,
         report,
         bundle_path,
         dry_run=dry_run,
@@ -1163,11 +1014,17 @@ def run_deploy_server(
         server_bootstrap_only=server_bootstrap_only,
     )
 
+    refresh_server_generated_vars(
+        runtime_plan,
+        report,
+        generated_vars_path,
+        dry_run=dry_run,
+    )
+
     deploy_interface(plan, report, dry_run=dry_run, skip=skip_interface)
-    deploy_nfs(plan, report, dry_run=dry_run, skip=skip_nfs)
-    deploy_firewall(plan, report, dry_run=dry_run, skip=skip_firewall)
+
     deploy_ansible_playbooks(
-        plan,
+        runtime_plan,
         report,
         bundle_path,
         generated_vars_path,
