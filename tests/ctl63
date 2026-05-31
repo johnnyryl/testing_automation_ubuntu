@@ -396,6 +396,48 @@ def expect_generated_vars(path, expected):
             )
 
 
+def expected_server_vars_for_mode(mode, no_nfs=False, firewall_manage=True):
+    """Return expected generated server vars for one configure server mode."""
+    pxe_enabled = mode in ("pxe", "full")
+    controller_enabled = mode in ("controller", "full")
+    nfs_enabled = bool(controller_enabled and not no_nfs)
+
+    return {
+        "aerolit_server_mode": mode,
+        "aerolit_pxe_enabled": str(pxe_enabled).lower(),
+        "aerolit_controller_enabled": str(controller_enabled).lower(),
+        "aerolit_nfs_enabled": str(nfs_enabled).lower(),
+        "pxe_content_manage_firewall": str(
+            bool(firewall_manage and pxe_enabled)
+        ).lower(),
+        "pxe_dnsmasq_manage_firewall": str(
+            bool(firewall_manage and pxe_enabled)
+        ).lower(),
+        "nfs_server_manage_exports": str(nfs_enabled).lower(),
+        "nfs_server_manage_services": str(nfs_enabled).lower(),
+        "nfs_server_manage_firewall": str(
+            bool(firewall_manage and nfs_enabled)
+        ).lower(),
+    }
+
+
+def expect_no_python_firewall_actions(output, label):
+    """Assert deploy output does not show old Python-owned firewall actions."""
+    assert_not_regex(output, r"Would run Open firewall service:", label)
+    assert_not_regex(output, r"Would run Open firewall port:", label)
+    assert_not_regex(output, r"firewall-cmd.*--add-service", label)
+    assert_not_regex(output, r"firewall-cmd.*--add-port", label)
+
+
+def assert_role_owned_firewall_plan(output, label):
+    """Assert deploy output reflects role-owned firewall management."""
+    assert_contains(output, "Rules owner", label)
+    assert_contains(output, "functional Ansible roles", label)
+    assert_contains(output, "Effective deploy mode", label)
+    assert_contains(output, "enabled from configure server", label)
+    expect_no_python_firewall_actions(output, label)
+
+
 def bundle_manifest_path(args):
     """Return the expected AeroLIT bundle manifest path."""
     return Path(args.bundle_path) / "aerolit-bundle.yml"
@@ -509,10 +551,18 @@ def configure_server_command(args, mode, no_nfs=False):
         args.network,
         "--gateway",
         args.gateway,
+        "--no-configure-interface",
+        "--firewall-manage",
+        "--pxe-http-port",
+        "18080",
+        "--pxe-http-bind-address",
+        "0.0.0.0",
         "--nfs-export-path",
         args.nfs_export_path,
         "--nfs-allow-clients",
         args.allowed_clients,
+        "--nfs-exports-file",
+        "/etc/exports.d/aerolit-bundle.exports",
         "--target-mount-path",
         args.target_mount_path,
     ]
@@ -577,17 +627,20 @@ def test_environment_preflight(args):
 
     if args.require_firewalld:
         if shutil.which("firewall-cmd") is None:
-            raise TestFailure(
-                "firewall-cmd was not found. Use --no-require-firewalld to skip "
-                "strict firewall action assertions on this host."
+            print(
+                "NOTE: firewall-cmd was not found. This is no longer fatal for "
+                "merge-readiness because firewall rules are applied by Ansible roles."
             )
-
-        rc, stdout, stderr = command_output(["systemctl", "is-active", "--quiet", "firewalld"])
-        if rc != 0:
-            raise TestFailure(
-                "firewalld is not active. Use --no-require-firewalld to skip "
-                "strict firewall action assertions on this host."
+        else:
+            rc, stdout, stderr = command_output(
+                ["systemctl", "is-active", "--quiet", "firewalld"]
             )
+            if rc != 0:
+                print(
+                    "NOTE: firewalld is not active. This is no longer fatal for "
+                    "merge-readiness because this test validates generated role vars, "
+                    "not live firewall state."
+                )
 
     print("aerolitctl path : {}".format(aerolitctl_path))
     print("source wrapper  : {}".format(args.aerolitctl_wrapper))
@@ -644,7 +697,18 @@ def test_cli_help_and_parser(args):
         ["aerolitctl", "configure", "pxe", "--show"],
         ["aerolitctl", "configure", "pxe", "--validate"],
         ["aerolitctl", "configure", "pxe", "--dry-run", "--reset-standard-profiles"],
-        ["aerolitctl", "configure", "pxe", "--dry-run", "--disable-dnsmasq-dhcp"],
+        [
+            "aerolitctl",
+            "configure",
+            "pxe",
+            "--dry-run",
+            "--watch-interval",
+            "15",
+            "--generated-ks-edit-policy",
+            "preserve",
+            "--validation-failure-policy",
+            "warn",
+        ],
     ]
 
     help_output = run_cmd(["aerolitctl", "configure", "server", "--help"])
@@ -663,11 +727,19 @@ def test_cli_help_and_parser(args):
     assert_contains(pxe_help, "--disable-profile", "configure pxe help")
     assert_contains(pxe_help, "--implement-profile", "configure pxe help")
     assert_contains(pxe_help, "--placeholder-profile", "configure pxe help")
-    assert_contains(pxe_help, "--pxe-server-ip", "configure pxe help")
-    assert_contains(pxe_help, "--pxe-http-port", "configure pxe help")
-    assert_contains(pxe_help, "--enable-dnsmasq-dhcp", "configure pxe help")
-    assert_contains(pxe_help, "--disable-dnsmasq-dhcp", "configure pxe help")
-    assert_contains(pxe_help, "--dnsmasq-dhcp-range", "configure pxe help")
+    assert_contains(pxe_help, "--watch-interval", "configure pxe help")
+    assert_contains(pxe_help, "--generated-ks-edit-policy", "configure pxe help")
+    assert_contains(pxe_help, "--validation-failure-policy", "configure pxe help")
+
+    assert_not_contains(pxe_help, "--pxe-server-ip", "configure pxe help")
+    assert_not_contains(pxe_help, "--pxe-http-port", "configure pxe help")
+    assert_not_contains(pxe_help, "--dnsmasq-interface", "configure pxe help")
+    assert_not_contains(pxe_help, "--enable-dnsmasq-dhcp", "configure pxe help")
+    assert_not_contains(pxe_help, "--disable-dnsmasq-dhcp", "configure pxe help")
+    assert_not_contains(pxe_help, "--dnsmasq-dhcp-range", "configure pxe help")
+    assert_not_contains(pxe_help, "--enable-dnsmasq-firewall", "configure pxe help")
+    assert_not_contains(pxe_help, "--disable-dnsmasq-firewall", "configure pxe help")
+    assert_not_contains(pxe_help, "--dnsmasq-firewall-zone", "configure pxe help")
 
     for command in commands:
         run_cmd(command)
@@ -781,63 +853,56 @@ def test_real_configure_modes(args):
         (
             "pxe",
             False,
-            {
-                "aerolit_server_mode": "pxe",
-                "aerolit_pxe_enabled": "true",
-                "aerolit_controller_enabled": "false",
-                "aerolit_nfs_enabled": "false",
-            },
+            expected_server_vars_for_mode("pxe"),
             [
                 r"Mode\s*: pxe",
                 r"PXE Server:",
                 r"Enabled\s*: yes",
                 r"Ansible Controller / NFS:",
                 r"Reason\s*: disabled by mode pxe",
+                r"pxe_content role var\s*: yes",
+                r"pxe_dnsmasq role var\s*: yes",
+                r"nfs_server role var\s*: no",
             ],
         ),
         (
             "controller",
             False,
-            {
-                "aerolit_server_mode": "controller",
-                "aerolit_pxe_enabled": "false",
-                "aerolit_controller_enabled": "true",
-                "aerolit_nfs_enabled": "true",
-            },
+            expected_server_vars_for_mode("controller"),
             [
                 r"Mode\s*: controller",
                 r"PXE Server:",
                 r"Reason\s*: disabled by mode controller",
                 r"Ansible Controller / NFS:",
                 r"NFS enabled\s*: yes",
+                r"pxe_content role var\s*: no",
+                r"pxe_dnsmasq role var\s*: no",
+                r"nfs_server role var\s*: yes",
+                r"nfs_server exports var\s*: yes",
+                r"nfs_server services var\s*: yes",
             ],
         ),
         (
             "full",
             False,
-            {
-                "aerolit_server_mode": "full",
-                "aerolit_pxe_enabled": "true",
-                "aerolit_controller_enabled": "true",
-                "aerolit_nfs_enabled": "true",
-            },
+            expected_server_vars_for_mode("full"),
             [
                 r"Mode\s*: full",
                 r"PXE Server:",
                 r"Enabled\s*: yes",
                 r"Ansible Controller / NFS:",
                 r"NFS enabled\s*: yes",
+                r"pxe_content role var\s*: yes",
+                r"pxe_dnsmasq role var\s*: yes",
+                r"nfs_server role var\s*: yes",
+                r"nfs_server exports var\s*: yes",
+                r"nfs_server services var\s*: yes",
             ],
         ),
         (
             "controller",
             True,
-            {
-                "aerolit_server_mode": "controller",
-                "aerolit_pxe_enabled": "false",
-                "aerolit_controller_enabled": "true",
-                "aerolit_nfs_enabled": "false",
-            },
+            expected_server_vars_for_mode("controller", no_nfs=True),
             [
                 r"Mode\s*: controller",
                 r"PXE Server:",
@@ -845,6 +910,11 @@ def test_real_configure_modes(args):
                 r"Ansible Controller / NFS:",
                 r"NFS enabled\s*: no",
                 r"NFS reason\s*: NFS disabled by explicit option or saved configuration",
+                r"pxe_content role var\s*: no",
+                r"pxe_dnsmasq role var\s*: no",
+                r"nfs_server role var\s*: no",
+                r"nfs_server exports var\s*: no",
+                r"nfs_server services var\s*: no",
             ],
         ),
     ]
@@ -880,27 +950,8 @@ def configure_and_capture_deploy(args, mode, log_name):
 
 
 def assert_firewall_action_expectations(args, output, mode_label):
-    """Assert firewall dry-run actions when strict firewall assertions are enabled."""
-    if not args.require_firewalld:
-        return
-
-    if mode_label == "pxe":
-        assert_regex(output, r"Would run Open firewall port:.*18080/tcp", "deploy pxe")
-        assert_not_regex(output, r"Would run Open firewall service:.*--add-service=nfs", "deploy pxe")
-        return
-
-    if mode_label == "controller":
-        assert_regex(output, r"Would run Open firewall service:.*--add-service=nfs", "deploy controller")
-        assert_regex(output, r"Would run Open firewall service:.*--add-service=mountd", "deploy controller")
-        assert_regex(output, r"Would run Open firewall service:.*--add-service=rpc-bind", "deploy controller")
-        assert_not_regex(output, r"Would run Open firewall port:.*18080/tcp", "deploy controller")
-        return
-
-    if mode_label == "full":
-        assert_regex(output, r"Would run Open firewall service:.*--add-service=nfs", "deploy full")
-        assert_regex(output, r"Would run Open firewall service:.*--add-service=mountd", "deploy full")
-        assert_regex(output, r"Would run Open firewall service:.*--add-service=rpc-bind", "deploy full")
-        assert_regex(output, r"Would run Open firewall port:.*18080/tcp", "deploy full")
+    """Assert deploy uses role-owned firewall management, not Python firewall-cmd work."""
+    assert_role_owned_firewall_plan(output, "deploy {}".format(mode_label))
 
 
 def test_deploy_mode_matrix(args):
@@ -911,13 +962,8 @@ def test_deploy_mode_matrix(args):
     assert_regex(pxe_output, r"Enabled\s*: yes", "deploy pxe")
     assert_contains(pxe_output, "Would run Run pxe_server.yml", "deploy pxe")
     assert_contains(pxe_output, "Controller playbook skipped", "deploy pxe")
-    assert_regex(
-        pxe_output,
-        r"Ansible Controller / NFS:[\s\S]*?Reason\s*: disabled by mode pxe",
-        "deploy pxe controller/NFS disabled reason",
-    )
+    assert_contains(pxe_output, "disabled by mode pxe", "deploy pxe")
     assert_not_contains(pxe_output, "Would run Run ansible_controller.yml", "deploy pxe")
-    assert_not_contains(pxe_output, "Would run Enable and start NFS services", "deploy pxe")
     assert_firewall_action_expectations(args, pxe_output, "pxe")
 
     controller_output = configure_and_capture_deploy(args, "controller", "deploy-controller.log")
@@ -943,8 +989,8 @@ def test_deploy_skip_flags(args):
 
     checks = [
         ("--skip-interface", "Interface configuration skipped by option"),
-        ("--skip-nfs", "Ansible Controller / NFS deployment skipped by option"),
-        ("--skip-firewall", "Firewall deployment skipped by option"),
+        ("--skip-nfs", "NFS role variables disabled by deploy option"),
+        ("--skip-firewall", "Firewall role variables disabled by deploy option"),
         ("--skip-pxe", "PXE playbook skipped"),
         ("--skip-controller", "Controller playbook skipped"),
     ]
@@ -952,6 +998,67 @@ def test_deploy_skip_flags(args):
     for flag, expected in checks:
         output = run_cmd(["aerolitctl", "deploy", "server", "--dry-run", flag])
         assert_contains(output, expected, "deploy {}".format(flag))
+
+        if flag == "--skip-firewall":
+            assert_contains(
+                output,
+                "disabled by --skip-firewall",
+                "deploy --skip-firewall",
+            )
+            expect_no_python_firewall_actions(output, "deploy --skip-firewall")
+
+
+def test_deploy_skip_firewall_generated_vars_toggle(args):
+    """Confirm --skip-firewall rewrites generated role firewall vars safely."""
+    run_cmd(configure_server_command(args, "full"))
+
+    expect_generated_vars(
+        args.generated_vars_path,
+        {
+            "pxe_content_manage_firewall": "true",
+            "pxe_dnsmasq_manage_firewall": "true",
+            "nfs_server_manage_exports": "true",
+            "nfs_server_manage_services": "true",
+            "nfs_server_manage_firewall": "true",
+        },
+    )
+
+    run_cmd(
+        [
+            "aerolitctl",
+            "deploy",
+            "server",
+            "--skip-firewall",
+            "--skip-interface",
+            "--skip-repo-prep",
+            "--skip-pxe",
+            "--skip-controller",
+        ]
+    )
+
+    expect_generated_vars(
+        args.generated_vars_path,
+        {
+            "pxe_content_manage_firewall": "false",
+            "pxe_dnsmasq_manage_firewall": "false",
+            "nfs_server_manage_exports": "true",
+            "nfs_server_manage_services": "true",
+            "nfs_server_manage_firewall": "false",
+        },
+    )
+
+    run_cmd(configure_server_command(args, "full"))
+
+    expect_generated_vars(
+        args.generated_vars_path,
+        {
+            "pxe_content_manage_firewall": "true",
+            "pxe_dnsmasq_manage_firewall": "true",
+            "nfs_server_manage_exports": "true",
+            "nfs_server_manage_services": "true",
+            "nfs_server_manage_firewall": "true",
+        },
+    )
 
 
 def test_deploy_show_vs_dry_run(args, hash_paths):
@@ -985,11 +1092,24 @@ def test_deploy_show_vs_dry_run(args, hash_paths):
 
 
 def test_status_read_only(args, hash_paths):
-    """Confirm status is read-only."""
+    """Confirm status is read-only and reports role firewall vars."""
     before = sha256_paths(hash_paths)
 
-    run_cmd(["aerolitctl", "status"])
-    run_cmd(["aerolitctl", "status", "--verbose"])
+    output = run_cmd(["aerolitctl", "status"])
+    verbose_output = run_cmd(["aerolitctl", "status", "--verbose"])
+
+    for text, label in [
+        (output, "status"),
+        (verbose_output, "status --verbose"),
+    ]:
+        assert_contains(text, "Firewall intent:", label)
+        assert_contains(text, "Rules owner", label)
+        assert_contains(text, "functional Ansible roles", label)
+        assert_contains(text, "pxe_content role var", label)
+        assert_contains(text, "pxe_dnsmasq role var", label)
+        assert_contains(text, "nfs_server role var", label)
+        assert_contains(text, "nfs_server exports var", label)
+        assert_contains(text, "nfs_server services var", label)
 
     after = sha256_paths(hash_paths)
     assert_hashes_same(before, after, "status-read-only")
@@ -1182,34 +1302,27 @@ def test_configure_pxe_dry_run_read_only(args, hash_paths):
             "configure",
             "pxe",
             "--dry-run",
-            "--pxe-server-ip",
-            args.server_ip,
-            "--pxe-http-port",
-            "18080",
-            "--dnsmasq-interface",
-            args.interface,
-            "--enable-dnsmasq-dhcp",
-            "--enable-dnsmasq-tftp",
-            "--dnsmasq-dhcp-range",
-            args.dhcp_start,
-            args.dhcp_end,
-            "255.255.255.0",
-            "--dnsmasq-gateway",
-            "",
-            "--dnsmasq-dns-servers",
-            args.server_ip,
-            "--enable-dnsmasq-firewall",
-            "--dnsmasq-firewall-zone",
-            "public",
+            "--watch-interval",
+            "15",
+            "--generated-ks-edit-policy",
+            "preserve",
+            "--validation-failure-policy",
+            "warn",
         ],
         [
             "aerolitctl",
             "configure",
             "pxe",
             "--dry-run",
-            "--disable-dnsmasq-dhcp",
-            "--disable-dnsmasq-tftp",
-            "--disable-dnsmasq-firewall",
+            "--set-profile-title",
+            "minimal",
+            "Minimal Installs",
+            "--set-profile-label",
+            "minimal",
+            "Minimal",
+            "--set-profile-menu-target",
+            "minimal",
+            "minimal",
         ],
     ]
 
@@ -1250,25 +1363,12 @@ def test_real_configure_pxe_writes(args):
             "minimal",
             "--implement-profile",
             "small_disk",
-            "--pxe-server-ip",
-            args.server_ip,
-            "--pxe-http-port",
-            "18080",
-            "--dnsmasq-interface",
-            args.interface,
-            "--enable-dnsmasq-dhcp",
-            "--enable-dnsmasq-tftp",
-            "--dnsmasq-dhcp-range",
-            args.dhcp_start,
-            args.dhcp_end,
-            "255.255.255.0",
-            "--dnsmasq-gateway",
-            "",
-            "--dnsmasq-dns-servers",
-            args.server_ip,
-            "--enable-dnsmasq-firewall",
-            "--dnsmasq-firewall-zone",
-            "public",
+            "--watch-interval",
+            "15",
+            "--generated-ks-edit-policy",
+            "preserve",
+            "--validation-failure-policy",
+            "warn",
         ]
     )
 
@@ -1287,12 +1387,18 @@ def test_real_configure_pxe_writes(args):
         "- 'developer_workstation'",
         "PXE generated vars enabled profiles",
     )
-    assert_contains(generated_text, "pxe_content_volume_mounts:", "PXE generated vars")
-    assert_contains(generated_text, "/overrides:ro,Z", "PXE generated vars")
+    assert_contains(generated_text, "pxe_content_extra_env:", "PXE generated vars")
     assert_contains(generated_text, "PXE_OVERRIDE_ROOT: '/overrides'", "PXE generated vars")
-    assert_contains(generated_text, "pxe_dnsmasq_enable_dhcp: true", "PXE generated vars")
-    assert_contains(generated_text, "pxe_dnsmasq_enable_tftp: true", "PXE generated vars")
-    assert_contains(generated_text, "pxe_dnsmasq_gateway: ''", "PXE generated vars")
+    assert_contains(generated_text, "PXE_OVERRIDE_PROFILE_ROOT: '/overrides/profiles'", "PXE generated vars")
+    assert_contains(generated_text, "PXE_OVERRIDE_TEMPLATE_ROOT: '/overrides/templates'", "PXE generated vars")
+    assert_contains(generated_text, "PXE_GENERATED_KS_EDIT_POLICY: 'preserve'", "PXE generated vars")
+    assert_contains(generated_text, "PXE_VALIDATION_FAILURE_POLICY: 'warn'", "PXE generated vars")
+    assert_contains(generated_text, "PXE_WATCH_INTERVAL: '15'", "PXE generated vars")
+
+    assert_not_contains(generated_text, "pxe_content_volume_mounts:", "PXE generated vars")
+    assert_not_contains(generated_text, "pxe_dnsmasq_enable_dhcp:", "PXE generated vars")
+    assert_not_contains(generated_text, "pxe_dnsmasq_enable_tftp:", "PXE generated vars")
+    assert_not_contains(generated_text, "pxe_dnsmasq_gateway:", "PXE generated vars")
 
     minimal_profile = profile_root / "minimal.yml"
     small_disk_profile = profile_root / "small_disk.yml"
@@ -1346,14 +1452,38 @@ def test_real_configure_pxe_writes(args):
     assert_contains(status_output, "PXE configuration:", "status PXE summary")
     assert_contains(status_output, "Configured: yes", "status PXE summary")
     assert_contains(status_output, "Profiles enabled: minimal, small_disk", "status PXE summary")
-    assert_contains(status_output, "PXE content role mount: configured", "status PXE summary")
+    assert_contains(status_output, "Profiles implemented: minimal, small_disk", "status PXE summary")
     assert_contains(status_output, "PXE generated vars:", "status PXE summary")
+    assert_contains(
+        status_output,
+        "Server/network handoff: managed by configure server",
+        "status PXE summary",
+    )
+    assert_contains(status_output, "Watch interval: 15", "status PXE summary")
+    assert_contains(
+        status_output,
+        "Generated Kickstart edit policy: preserve",
+        "status PXE summary",
+    )
+    assert_contains(
+        status_output,
+        "Validation failure policy: warn",
+        "status PXE summary",
+    )
+    assert_not_contains(status_output, "PXE content role mount:", "status PXE summary")
 
     doctor_output = run_cmd(["aerolitctl", "doctor"])
     assert_contains(doctor_output, "PXE generated vars found", "doctor PXE summary")
     assert_contains(doctor_output, "PXE override root found", "doctor PXE summary")
+    assert_contains(doctor_output, "PXE profile overrides found", "doctor PXE summary")
     assert_contains(doctor_output, "PXE profiles enabled: minimal, small_disk", "doctor PXE summary")
+    assert_contains(doctor_output, "PXE profiles implemented: minimal, small_disk", "doctor PXE summary")
     assert_contains(
+        doctor_output,
+        "PXE server IP, HTTP port, dnsmasq, firewall, ISO root, and container mounts are managed by configure server.",
+        "doctor PXE summary",
+    )
+    assert_not_contains(
         doctor_output,
         "PXE content role mounts are configured",
         "doctor PXE summary",
@@ -1379,7 +1509,27 @@ def test_real_configure_pxe_writes(args):
     )
     assert_contains(
         deploy_show_output,
-        "PXE content role mount: configured",
+        "Server/network handoff: managed by configure server",
+        "deploy --show PXE summary",
+    )
+    assert_contains(
+        deploy_show_output,
+        "Watch interval: 15",
+        "deploy --show PXE summary",
+    )
+    assert_contains(
+        deploy_show_output,
+        "Generated Kickstart edit policy: preserve",
+        "deploy --show PXE summary",
+    )
+    assert_contains(
+        deploy_show_output,
+        "Validation failure policy: warn",
+        "deploy --show PXE summary",
+    )
+    assert_not_contains(
+        deploy_show_output,
+        "PXE content role mount:",
         "deploy --show PXE summary",
     )
     assert_contains(
@@ -1672,7 +1822,12 @@ def test_path_bundle_doctor(args):
     run_cmd(["aerolitctl", "path", "show"])
     run_cmd(["aerolitctl", "bundle", "show"])
     run_cmd(["aerolitctl", "bundle", "validate"])
-    run_cmd(["aerolitctl", "doctor"])
+
+    doctor_output = run_cmd(["aerolitctl", "doctor"])
+    assert_contains(doctor_output, "Generated server vars", "doctor")
+    assert_contains(doctor_output, "pxe_content_manage_firewall", "doctor")
+    assert_contains(doctor_output, "pxe_dnsmasq_manage_firewall", "doctor")
+    assert_contains(doctor_output, "nfs_server_manage_firewall", "doctor")
 
 
 def test_configure_init_dry_run(args):
@@ -1767,8 +1922,8 @@ def build_parser():
         "--no-require-firewalld",
         action="store_true",
         help=(
-            "Do not require firewalld to be active and do not enforce strict "
-            "firewall dry-run action assertions."
+            "Compatibility option. Firewalld is no longer required for merge-readiness "
+            "because firewall rules are owned by Ansible roles."
         ),
     )
 
@@ -1916,6 +2071,7 @@ def main():
                 ("real configure pxe managed writes/status/doctor", lambda: test_real_configure_pxe_writes(args)),
                 ("deploy server mode dry-run matrix", lambda: test_deploy_mode_matrix(args)),
                 ("deploy server skip flags", lambda: test_deploy_skip_flags(args)),
+                ("deploy skip-firewall generated vars toggle", lambda: test_deploy_skip_firewall_generated_vars_toggle(args)),
                 ("deploy show vs dry-run", lambda: test_deploy_show_vs_dry_run(args, hash_paths)),
                 ("status read-only", lambda: test_status_read_only(args, hash_paths)),
                 ("configure server dry-run read-only", lambda: test_configure_dry_run_read_only(args, hash_paths)),
