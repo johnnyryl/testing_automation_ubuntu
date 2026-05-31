@@ -1,3 +1,119 @@
+Yes — **this looks right** for the `server.py` side. The uploaded file now has the dnsmasq firewall zone default, the two dnsmasq helper functions, the dnsmasq generated vars, the contract validation, and the configure-server display lines. 
+
+I also checked it as Python, and it **compiles cleanly**.
+
+The only thing I’d change is cosmetic, not functional: add one extra blank line before this line:
+
+```python
+def build_generated_vars(plan):
+```
+
+Right now it will still run fine, but two blank lines between top-level functions is cleaner.
+
+Now test exactly this:
+
+```bash
+python3 -m compileall src tools
+```
+
+Then regenerate:
+
+```bash
+aerolitctl configure server
+```
+
+Then confirm the generated file has the new vars:
+
+```bash
+grep -E 'pxe_dnsmasq_(interface|enable_dhcp|enable_tftp|pxe_server_ip|tftp_server_ip|http_port|dhcp_range_start|dhcp_range_end|dhcp_netmask|gateway|dns_servers|manage_firewall|firewall_zone|open_tftp_port|open_http_port|extra_firewall_ports)' \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+```
+
+You want to see values like:
+
+```yaml
+pxe_dnsmasq_interface: ens160
+pxe_dnsmasq_pxe_server_ip: 192.168.109.10
+pxe_dnsmasq_tftp_server_ip: 192.168.109.10
+pxe_dnsmasq_http_port: 18080
+pxe_dnsmasq_dhcp_range_start: 192.168.109.100
+pxe_dnsmasq_dhcp_range_end: 192.168.109.149
+pxe_dnsmasq_manage_firewall: true
+pxe_dnsmasq_firewall_zone: public
+```
+
+Then run:
+
+```bash
+aerolitctl deploy server --dry-run --skip-firewall
+```
+
+and:
+
+```bash
+aerolitctl deploy server --dry-run
+```
+
+One important distinction: this fixes the **aerolitctl-generated variables** for `pxe_dnsmasq`. It does not yet clean up the `pxe_dnsmasq` role defaults themselves. That is okay for deploy through `aerolitctl`, because generated vars should override role defaults, but the next cleanup should be making the role defaults less hardcoded so the role is safer standalone too.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Yes. A good “done with pxe_content” proof should show three things:
 
 1. Python generates the pxe_content_* values.
