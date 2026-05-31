@@ -2679,10 +2679,6 @@ def print_plan(plan, bundle_path):
     firewall = plan.get("firewall", {})
 
     print("")
-    print("Firewall intent for later deploy:")
-    print_plan_value("Manage firewall", yes_no(firewall.get("manage")))
-
-    print("")
     print("Role firewall variables that will be generated:")
     print_plan_value(
         "pxe_content manages firewall",
@@ -2699,6 +2695,10 @@ def print_plan(plan, bundle_path):
     print_plan_value(
         "pxe_dnsmasq firewall zone",
         pxe_dnsmasq_firewall_zone_for_plan(plan),
+    )
+    print_plan_value(
+        "nfs_server manages firewall",
+        yes_no(nfs_server_manage_firewall_for_plan(plan)),
     )
     print("")
 
