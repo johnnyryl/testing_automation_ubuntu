@@ -29,6 +29,7 @@ from .paths import (
 DEFAULT_MODE = "full"
 DEFAULT_HTTP_PORT = 18080
 DEFAULT_BIND_ADDRESS = "0.0.0.0"
+DEFAULT_PXE_DNSMASQ_FIREWALL_ZONE = "public"
 DEFAULT_LAB_NETWORK = "192.168.109.0/24"
 
 DEFAULT_PXE_CONTENT_IMAGE = (
@@ -1555,6 +1556,19 @@ def pxe_content_manage_firewall_for_plan(plan):
     )
 
 
+def pxe_dnsmasq_manage_firewall_for_plan(plan):
+    """Return whether pxe_dnsmasq should apply DHCP/TFTP firewall rules."""
+    return bool(
+        firewall_manage_enabled(plan)
+        and plan.get("pxe_enabled", False)
+    )
+
+
+def pxe_dnsmasq_firewall_zone_for_plan(plan):
+    """Return firewalld zone used by the pxe_dnsmasq role."""
+    return DEFAULT_PXE_DNSMASQ_FIREWALL_ZONE
+
+
 def current_server_config(config):
     """Return server config dict with defaults."""
     server = config.setdefault("server", {})
@@ -1744,6 +1758,120 @@ def validate_generated_vars_contract(plan, data):
             )
         )
 
+    expected_interface = str(plan.get("interface") or "").strip()
+    actual_interface = str(data.get("pxe_dnsmasq_interface") or "").strip()
+
+    if actual_interface != expected_interface:
+        raise ValueError(
+            "Generated vars contract error: pxe_dnsmasq_interface should be {}, got {}".format(
+                expected_interface,
+                actual_interface or "missing",
+            )
+        )
+
+    for key in ("pxe_dnsmasq_pxe_server_ip", "pxe_dnsmasq_tftp_server_ip"):
+        actual_ip = str(data.get(key) or "").strip()
+
+        if actual_ip != expected_ip:
+            raise ValueError(
+                "Generated vars contract error: {} should be {}, got {}".format(
+                    key,
+                    expected_ip,
+                    actual_ip or "missing",
+                )
+            )
+
+    try:
+        actual_dnsmasq_http_port = int(data.get("pxe_dnsmasq_http_port"))
+    except (TypeError, ValueError):
+        raise ValueError(
+            "Generated vars contract error: pxe_dnsmasq_http_port should be {}, got {}".format(
+                expected_port,
+                data.get("pxe_dnsmasq_http_port", "missing"),
+            )
+        )
+
+    if actual_dnsmasq_http_port != expected_port:
+        raise ValueError(
+            "Generated vars contract error: pxe_dnsmasq_http_port should be {}, got {}".format(
+                expected_port,
+                actual_dnsmasq_http_port,
+            )
+        )
+
+    expected_pxe_enabled = bool(plan.get("pxe_enabled", False))
+
+    for key in (
+        "pxe_dnsmasq_enable_dhcp",
+        "pxe_dnsmasq_enable_tftp",
+        "pxe_dnsmasq_open_tftp_port",
+        "pxe_dnsmasq_open_http_port",
+    ):
+        actual_value = bool(data.get(key, False))
+
+        if actual_value != expected_pxe_enabled:
+            raise ValueError(
+                "Generated vars contract error: {} should be {}, got {}".format(
+                    key,
+                    expected_pxe_enabled,
+                    actual_value,
+                )
+            )
+
+    expected_dnsmasq_scalars = [
+        ("pxe_dnsmasq_dhcp_range_start", plan.get("dhcp_start")),
+        ("pxe_dnsmasq_dhcp_range_end", plan.get("dhcp_end")),
+        ("pxe_dnsmasq_dhcp_netmask", plan.get("dhcp_netmask")),
+        ("pxe_dnsmasq_gateway", plan.get("gateway") or ""),
+        ("pxe_dnsmasq_firewall_zone", pxe_dnsmasq_firewall_zone_for_plan(plan)),
+    ]
+
+    for key, expected_value in expected_dnsmasq_scalars:
+        actual_value = str(data.get(key) or "").strip()
+        expected_value = str(expected_value or "").strip()
+
+        if actual_value != expected_value:
+            raise ValueError(
+                "Generated vars contract error: {} should be {}, got {}".format(
+                    key,
+                    expected_value or "empty",
+                    actual_value or "missing",
+                )
+            )
+
+    expected_dns_servers = list(plan.get("dns_servers") or [])
+    actual_dns_servers = data.get("pxe_dnsmasq_dns_servers", [])
+
+    if actual_dns_servers != expected_dns_servers:
+        raise ValueError(
+            "Generated vars contract error: pxe_dnsmasq_dns_servers should be {}, got {}".format(
+                expected_dns_servers,
+                actual_dns_servers,
+            )
+        )
+
+    expected_dnsmasq_manage_firewall = pxe_dnsmasq_manage_firewall_for_plan(plan)
+    actual_dnsmasq_manage_firewall = bool(
+        data.get("pxe_dnsmasq_manage_firewall", False)
+    )
+
+    if actual_dnsmasq_manage_firewall != expected_dnsmasq_manage_firewall:
+        raise ValueError(
+            "Generated vars contract error: pxe_dnsmasq_manage_firewall should be {}, got {}".format(
+                expected_dnsmasq_manage_firewall,
+                actual_dnsmasq_manage_firewall,
+            )
+        )
+
+    actual_extra_firewall_ports = data.get("pxe_dnsmasq_extra_firewall_ports", [])
+
+    if actual_extra_firewall_ports != []:
+        raise ValueError(
+            "Generated vars contract error: pxe_dnsmasq_extra_firewall_ports should be [], got {}".format(
+                actual_extra_firewall_ports,
+            )
+        )
+
     bundle_path_value = str(plan.get("bundle_path") or "").strip()
 
     if not bundle_path_value:
@@ -1826,6 +1954,7 @@ def validate_generated_vars_contract(plan, data):
                 actual_extra_host_dirs,
             )
         )
+
 
 def build_generated_vars(plan):
     """Build generated Ansible vars using existing AeroLIT conventions."""
@@ -1913,6 +2042,23 @@ def build_generated_vars(plan):
         "pxe_dhcp_netmask": plan.get("dhcp_netmask"),
         "pxe_gateway": plan.get("gateway"),
         "pxe_dns_servers": list(plan.get("dns_servers") or []),
+
+        "pxe_dnsmasq_interface": plan.get("interface"),
+        "pxe_dnsmasq_enable_dhcp": bool(plan.get("pxe_enabled", False)),
+        "pxe_dnsmasq_enable_tftp": bool(plan.get("pxe_enabled", False)),
+        "pxe_dnsmasq_pxe_server_ip": plan.get("server_ip"),
+        "pxe_dnsmasq_tftp_server_ip": plan.get("server_ip"),
+        "pxe_dnsmasq_http_port": plan.get("pxe_http_port"),
+        "pxe_dnsmasq_dhcp_range_start": plan.get("dhcp_start"),
+        "pxe_dnsmasq_dhcp_range_end": plan.get("dhcp_end"),
+        "pxe_dnsmasq_dhcp_netmask": plan.get("dhcp_netmask"),
+        "pxe_dnsmasq_gateway": plan.get("gateway") or "",
+        "pxe_dnsmasq_dns_servers": list(plan.get("dns_servers") or []),
+        "pxe_dnsmasq_manage_firewall": pxe_dnsmasq_manage_firewall_for_plan(plan),
+        "pxe_dnsmasq_firewall_zone": pxe_dnsmasq_firewall_zone_for_plan(plan),
+        "pxe_dnsmasq_open_tftp_port": bool(plan.get("pxe_enabled", False)),
+        "pxe_dnsmasq_open_http_port": bool(plan.get("pxe_enabled", False)),
+        "pxe_dnsmasq_extra_firewall_ports": [],
     }
 
     if nfs.get("enabled", False):
@@ -2525,6 +2671,14 @@ def print_plan(plan, bundle_path):
     print_plan_value(
         "pxe_content ports",
         ", ".join(pxe_content_firewall_ports_for_plan(plan)) or "none",
+    )
+    print_plan_value(
+        "pxe_dnsmasq manages firewall",
+        yes_no(pxe_dnsmasq_manage_firewall_for_plan(plan)),
+    )
+    print_plan_value(
+        "pxe_dnsmasq firewall zone",
+        pxe_dnsmasq_firewall_zone_for_plan(plan),
     )
     print("")
 
