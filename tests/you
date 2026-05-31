@@ -1,3 +1,17 @@
+ss -ltnp | grep ':18080' || true
+podman ps --format 'table {{.Names}}\t{{.Ports}}\t{{.Status}}'
+curl -I http://127.0.0.1:18080/boot.ipxe || true
+
+
+
+
+
+
+
+
+
+
+
 Yes — run those checks and send me the output, and if they pass we can call the firewall-variable wiring done.
 
 But do it in this order so we do not accidentally chase noise.
