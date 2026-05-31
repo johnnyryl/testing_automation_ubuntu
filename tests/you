@@ -1,3 +1,30 @@
+A good rule from here: we only change code if it supports that contract. No more “nice to have” cleanup unless it blocks the deploy model.
+
+Next, I would do this:
+
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+
+ansible-playbook --syntax-check \
+  -i localhost, \
+  -c local \
+  -e @group_vars/all/aerolitctl_server_generated.yml \
+  pxe_server.yml
+
+Then run:
+
+aerolitctl deploy server --dry-run --skip-firewall
+aerolitctl deploy server --dry-run
+
+If those show the dnsmasq vars correctly and no syntax/var errors, then we can say:
+
+pxe_content and pxe_dnsmasq are ready enough to move on.
+
+Then we do the exact same contract review for nfs_server.
+
+
+
+
+
 Yes — these pictures help. For pxe-dnsmasq, I would not change all these files. Most of the role looks fine.
 
 The main cleanup is:
