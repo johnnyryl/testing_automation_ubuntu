@@ -1,3 +1,19 @@
+pxe_content_image: "registry.gitlab.us.lmco.com/lit/containers/pxe-content:latest"
+
+# Image name used at runtime by Quadlet.
+# In registry mode this usually matches pxe_content_image.
+# In tar mode this must match the tag embedded in the loaded tar.
+pxe_content_runtime_image: "{{ pxe_content_image }}"
+
+
+
+
+
+
+
+
+
+
 Almost — the pxe-content role is mostly aligned now, but I would not call pxe-content done yet until you fix/verify these last few things.
 
 The role is good in the big-picture ownership model:
