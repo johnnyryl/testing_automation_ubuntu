@@ -184,6 +184,19 @@ def yes_no(value):
     return "yes" if bool(value) else "no"
 
 
+def effective_firewall_mode(plan, skip_firewall=False):
+    """Return the effective firewall mode for this deploy run."""
+    saved_manage = plan.get("firewall", {}).get("manage", True)
+
+    if skip_firewall:
+        return "disabled by --skip-firewall"
+
+    if saved_manage:
+        return "enabled from configure server"
+
+    return "disabled by configure server"
+
+
 def require_value(plan, key, label):
     """Require a plan value."""
     value = plan.get(key)
@@ -398,7 +411,7 @@ def rendered_nfs_allowed_clients(nfs):
     return nfs.get("allowed_clients") or "none"
 
 
-def print_deploy_plan(plan, generated_vars_path):
+def print_deploy_plan(plan, generated_vars_path, skip_firewall=False):
     """Print the deploy plan."""
     print("")
     print("#" * 80)
@@ -460,9 +473,14 @@ def print_deploy_plan(plan, generated_vars_path):
     firewall = plan.get("firewall", {})
     print("")
     print("Firewall:")
-    print_plan_value("Manage firewall", firewall.get("manage"))
+    print_plan_value("Saved firewall intent", firewall.get("manage"))
+    print_plan_value(
+        "Effective deploy mode",
+        effective_firewall_mode(plan, skip_firewall=skip_firewall),
+    )
     print_plan_value("Rules owner", "functional Ansible roles")
     print("")
+
 
 class RepoPreflightArgs(object):
     """Minimal args object used by repos.build_repo_plan during deploy."""
@@ -976,7 +994,11 @@ def run_deploy_server(
     generated_vars_path = aerolitctl_server_generated_vars_file(bundle_path)
     plan = load_deploy_plan(config, bundle_path)
 
-    print_deploy_plan(plan, generated_vars_path)
+    print_deploy_plan(
+        plan,
+        generated_vars_path,
+        skip_firewall=skip_firewall,
+    )
 
     if show:
         print("")
