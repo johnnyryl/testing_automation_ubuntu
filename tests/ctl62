@@ -269,7 +269,7 @@ def add_configure_repos_parser(configure_subparsers):
         metavar="PACKAGE",
         help=(
             "Override the server prerequisite package list for --ensure-server-prereqs. "
-            "Can be used more than once. Defaults to ansible-core, podman, nfs-utils, dnsmasq, firewalld."
+            "Can be used more than once. Defaults to ansible-core, podman, nfs-utils, dnsmasq. firewalld is included only when firewall management is enabled."
         ),
     )
     repos_parser.add_argument(
@@ -366,7 +366,7 @@ def add_configure_pxe_parser(configure_subparsers):
     pxe_parser.add_argument(
         "--guided",
         action="store_true",
-        help="Prompt for common PXE profile, watcher, handoff, and dnsmasq settings.",
+        help="Prompt for common PXE profile and generator behavior settings.",
     )
     pxe_parser.add_argument(
         "--dry-run",
@@ -525,99 +525,9 @@ def add_configure_pxe_parser(configure_subparsers):
         help="PXE content validation failure policy.",
     )
     pxe_parser.add_argument(
-        "--pxe-content-iso-root",
-        default=None,
-        help="Host-side ISO/content root for the pxe-content role.",
-    )
-    pxe_parser.add_argument(
         "--reset-standard-profiles",
         action="store_true",
         help="Reset managed PXE profiles back to AeroLIT standard defaults.",
-    )
-
-    pxe_parser.add_argument(
-        "--pxe-server-ip",
-        help=(
-            "PXE server IP address clients should use for HTTP/iPXE handoff. "
-            "Writes pxe_content_server_ip, pxe_dnsmasq_pxe_server_ip, and "
-            "pxe_dnsmasq_tftp_server_ip."
-        ),
-    )
-    pxe_parser.add_argument(
-        "--pxe-http-port",
-        type=int,
-        help=(
-            "PXE HTTP port used for boot.ipxe handoff. "
-            "Writes pxe_content_host_port and pxe_dnsmasq_http_port."
-        ),
-    )
-
-    pxe_parser.add_argument(
-        "--dnsmasq-interface",
-        help="Network interface dnsmasq should bind to for PXE/DHCP.",
-    )
-    pxe_parser.add_argument(
-        "--enable-dnsmasq-dhcp",
-        dest="dnsmasq_enable_dhcp",
-        action="store_true",
-        default=None,
-        help="Enable DHCP behavior in the pxe-dnsmasq role.",
-    )
-    pxe_parser.add_argument(
-        "--disable-dnsmasq-dhcp",
-        dest="dnsmasq_enable_dhcp",
-        action="store_false",
-        default=None,
-        help="Disable DHCP behavior in the pxe-dnsmasq role.",
-    )
-    pxe_parser.add_argument(
-        "--enable-dnsmasq-tftp",
-        dest="dnsmasq_enable_tftp",
-        action="store_true",
-        default=None,
-        help="Enable TFTP behavior in the pxe-dnsmasq role.",
-    )
-    pxe_parser.add_argument(
-        "--disable-dnsmasq-tftp",
-        dest="dnsmasq_enable_tftp",
-        action="store_false",
-        default=None,
-        help="Disable TFTP behavior in the pxe-dnsmasq role.",
-    )
-    pxe_parser.add_argument(
-        "--dnsmasq-dhcp-range",
-        nargs=3,
-        metavar=("START", "END", "NETMASK"),
-        help="Set dnsmasq DHCP range start, end, and netmask.",
-    )
-    pxe_parser.add_argument(
-        "--dnsmasq-gateway",
-        help=(
-            "Set dnsmasq DHCP router/gateway option. "
-            "Use an empty string for direct cable / no upstream router."
-        ),
-    )
-    pxe_parser.add_argument(
-        "--dnsmasq-dns-servers",
-        help="Comma-separated DNS servers for dnsmasq DHCP clients.",
-    )
-    pxe_parser.add_argument(
-        "--enable-dnsmasq-firewall",
-        dest="dnsmasq_manage_firewall",
-        action="store_true",
-        default=None,
-        help="Allow pxe-dnsmasq to manage firewall ports.",
-    )
-    pxe_parser.add_argument(
-        "--disable-dnsmasq-firewall",
-        dest="dnsmasq_manage_firewall",
-        action="store_false",
-        default=None,
-        help="Prevent pxe-dnsmasq from managing firewall ports.",
-    )
-    pxe_parser.add_argument(
-        "--dnsmasq-firewall-zone",
-        help="Firewall zone used by the pxe-dnsmasq role.",
     )
 
     add_command_verbose(pxe_parser)
@@ -850,7 +760,7 @@ def add_deploy_parser(subparsers):
     server_parser.add_argument(
         "--skip-firewall",
         action="store_true",
-        help="Do not apply firewalld changes.",
+        help="Disable role-level firewall management for this deploy run.",
     )
     server_parser.add_argument(
         "--skip-pxe",
