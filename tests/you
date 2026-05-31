@@ -1,3 +1,47 @@
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+
+aerolitctl deploy server \
+  --skip-firewall \
+  --skip-interface \
+  --skip-repo-prep \
+  --skip-pxe \
+  --skip-controller
+
+grep -E '^(pxe_content_manage_firewall|pxe_dnsmasq_manage_firewall|nfs_server_manage_firewall):' \
+  group_vars/all/aerolitctl_server_generated.yml
+
+
+
+
+aerolitctl deploy server \
+  --skip-interface \
+  --skip-repo-prep \
+  --skip-pxe \
+  --skip-controller
+
+grep -E '^(pxe_content_manage_firewall|pxe_dnsmasq_manage_firewall|nfs_server_manage_firewall):' \
+  group_vars/all/aerolitctl_server_generated.yml
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 aerolitctl deploy server --dry-run --skip-firewall
 
 grep -E '^(pxe_content_manage_firewall|pxe_dnsmasq_manage_firewall|nfs_server_manage_firewall):' \
