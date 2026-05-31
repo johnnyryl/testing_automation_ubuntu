@@ -1,3 +1,12 @@
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+
+grep -E '^(pxe_content_manage_firewall|pxe_content_firewall_ports|pxe_dnsmasq_interface|pxe_dnsmasq_pxe_server_ip|pxe_dnsmasq_tftp_server_ip|pxe_dnsmasq_http_port|pxe_dnsmasq_dhcp_range_start|pxe_dnsmasq_dhcp_range_end|pxe_dnsmasq_dhcp_netmask|pxe_dnsmasq_gateway|pxe_dnsmasq_dns_servers|pxe_dnsmasq_manage_firewall|pxe_dnsmasq_firewall_zone|pxe_dnsmasq_open_tftp_port|pxe_dnsmasq_open_http_boot_port|pxe_dnsmasq_extra_firewall_ports):' \
+  group_vars/all/aerolitctl_server_generated.yml
+
+
+
+
+
 A good rule from here: we only change code if it supports that contract. No more “nice to have” cleanup unless it blocks the deploy model.
 
 Next, I would do this:
