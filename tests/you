@@ -1,3 +1,187 @@
+Yes — change the role first. Based on your screenshots, this role is already close. I would make these exact changes.
+
+1. defaults/main.yml
+
+Keep this:
+
+nfs_server_manage_firewall: true
+
+Keep this name too:
+
+nfs_server_firewalld_services:
+  - nfs
+  - mountd
+  - rpc-bind
+
+Add this right under the nfs_server_firewalld_services block:
+
+nfs_server_firewall_package_names:
+  - firewalld
+
+So that section should look like this:
+
+###############################################################################
+# 06. Firewall configuration
+###############################################################################
+nfs_server_firewalld_services:
+  - nfs
+  - mountd
+  - rpc-bind
+nfs_server_firewall_package_names:
+  - firewalld
+
+2. tasks/install.yml
+
+Replace the whole file with this:
+
+# UNCLASSIFIED
+- name: Install nfs server packages
+  package:
+    name: "{{ nfs_server_package_names }}"
+    state: present
+- name: Install firewall package(s) when firewall management is enabled
+  package:
+    name: "{{ nfs_server_firewall_package_names }}"
+    state: present
+  when: nfs_server_manage_firewall | bool
+# UNCLASSIFIED
+
+That makes nfs-server match the pattern you already used in pxe-dnsmasq.
+
+3. tasks/validate.yml
+
+In the existing firewall validation task, make sure it uses this variable:
+
+nfs_server_manage_firewall
+
+not:
+
+nfs_server_manage_firewalld
+
+Then add one more assertion for the firewall package list.
+
+The firewall validation task should be this:
+
+- name: Validate firewalld services list when firewall is managed
+  assert:
+    that:
+      - nfs_server_firewalld_services | length > 0
+      - nfs_server_firewall_package_names | length > 0
+    fail_msg: "nfs_server_firewalld_services and nfs_server_firewall_package_names must contain at least one item when nfs_server_manage_firewall is true."
+  when: nfs_server_manage_firewall | bool
+
+4. tasks/configure.yml
+
+Anywhere you currently have this:
+
+when: nfs_server_manage_firewalld | bool
+
+replace it with:
+
+when: nfs_server_manage_firewall | bool
+
+From your screenshots, these tasks need to use nfs_server_manage_firewall:
+
+- name: Gather service facts
+- name: Note when firewalld is not active
+- name: Open firewalld services for NFS
+
+The final firewall block should look like this:
+
+- name: Gather service facts
+  service_facts:
+  when: nfs_server_manage_firewall | bool
+- name: Note when firewalld is not active
+  debug:
+    msg: "firewalld is not active; leaving firewall configuration unchanged."
+  when:
+    - nfs_server_manage_firewall | bool
+    - ansible_facts.services.get('firewalld.service', {}).state != 'running'
+- name: Open firewalld services for NFS
+  firewalld:
+    service: "{{ item }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ nfs_server_firewalld_services }}"
+  when:
+    - nfs_server_manage_firewall | bool
+    - ansible_facts.services.get('firewalld.service', {}).state == 'running'
+
+Do not rename nfs_server_firewalld_services. That name is fine because it is specifically the list of services passed to firewalld.
+
+5. tasks/main.yml
+
+Your screenshot already looks good. Leave it like this:
+
+# UNCLASSIFIED
+- name: Validate nfs_server role inputs
+  import_tasks: validate.yml
+- name: Install nfs server packages
+  import_tasks: install.yml
+- name: Configure nfs server
+  import_tasks: configure.yml
+# UNCLASSIFIED
+
+6. Test the role syntax
+
+From the bundle Ansible directory:
+
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+ansible-playbook --syntax-check \
+  -i localhost, \
+  -c local \
+  -e @group_vars/all/aerolitctl_server_generated.yml \
+  ansible_controller.yml
+
+Then test the generated firewall toggle:
+
+grep -E '^(pxe_content_manage_firewall|pxe_dnsmasq_manage_firewall|nfs_server_manage_firewall):' \
+  group_vars/all/aerolitctl_server_generated.yml
+
+With normal deploy vars, you want:
+
+pxe_content_manage_firewall: true
+pxe_dnsmasq_manage_firewall: true
+nfs_server_manage_firewall: true
+
+With --skip-firewall, you want:
+
+pxe_content_manage_firewall: false
+pxe_dnsmasq_manage_firewall: false
+nfs_server_manage_firewall: false
+
+After this role is updated, then we move to server.py and make sure Python writes nfs_server_manage_firewall into aerolitctl_server_generated.yml.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
 
 grep -E '^(nfs_server_|pxe_content_manage_firewall|pxe_dnsmasq_manage_firewall)' \
