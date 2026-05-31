@@ -1,3 +1,127 @@
+Yes. A good “done with pxe_content” proof should show three things:
+
+1. Python generates the pxe_content_* values.
+2. The pxe_content role consumes only its own role vars.
+3. --skip-firewall disables the role firewall path without disabling the whole PXE role.
+
+Run this from the aerolitctl repo:
+
+cd ~/aerolitctl
+python3 -m compileall src tools
+git diff --check
+
+Both should pass. git diff --check should print nothing.
+
+Then prove the old ownership conflict is gone:
+
+grep -R "aerolitctl_pxe_server_ip\|pxe_dnsmasq_manage_firewall\|enable-dnsmasq-firewall\|disable-dnsmasq-firewall\|dnsmasq-firewall-zone" -n src/aerolitctl || true
+
+Expected result: no output.
+
+Then prove the current generated server vars contain the pxe_content handoff:
+
+grep -E "pxe_content_(server_ip|host_port|image_source|image|runtime_image|image_tar_path|manage_firewall|firewall_ports|volume_mounts|extra_host_dirs)" \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+
+Expected important lines should look like this:
+
+pxe_content_extra_host_dirs:
+pxe_content_firewall_ports:
+pxe_content_host_port: 18080
+pxe_content_image: registry.gitlab.us.lmco.com/lit/containers/pxe-content:latest
+pxe_content_image_source: tar
+pxe_content_image_tar_path: /opt/aerolit/aerolit-bundle/files/pxe/pxe-content.tar
+pxe_content_manage_firewall: true
+pxe_content_runtime_image: registry.gitlab.us.lmco.com/lit/containers/pxe-content:latest
+pxe_content_server_ip: 192.168.109.10
+pxe_content_volume_mounts:
+
+The exact order does not matter. The important part is that pxe_content_server_ip, pxe_content_host_port, pxe_content_manage_firewall, and pxe_content_firewall_ports are there.
+
+Then run the two deploy dry-runs:
+
+aerolitctl deploy server --dry-run --skip-firewall
+
+You want to see:
+
+Effective deploy mode : disabled by --skip-firewall
+Requested packages    : ansible-core, podman, nfs-utils, dnsmasq
+
+Meaning: firewalld is not requested when firewall is skipped.
+
+Then:
+
+aerolitctl deploy server --dry-run
+
+You want to see:
+
+Effective deploy mode : enabled from configure server
+Requested packages    : ansible-core, podman, nfs-utils, dnsmasq, firewalld
+
+Meaning: firewalld is requested only when firewall management is enabled.
+
+Then do the Ansible syntax proof:
+
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+ansible-playbook \
+  -i localhost, \
+  -c local \
+  --syntax-check \
+  -e @group_vars/all/aerolitctl_server_generated.yml \
+  pxe_server.yml
+
+Expected:
+
+playbook: pxe_server.yml
+
+If all of that passes, I would call pxe_content done for this cleanup.
+
+The final checkpoint commit would be:
+
+cd ~/aerolitctl
+git status
+git add src/aerolitctl/cli.py src/aerolitctl/deploy_server.py src/aerolitctl/pxe.py src/aerolitctl/repos.py src/aerolitctl/server.py src/aerolitctl/status.py
+git commit -m "Align pxe-content firewall and generated vars ownership"
+
+After that, yes — move to pxe_dnsmasq.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 cd ~/aerolitctl
 
 git diff --check
