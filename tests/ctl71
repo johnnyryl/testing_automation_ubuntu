@@ -1564,6 +1564,17 @@ def pxe_dnsmasq_manage_firewall_for_plan(plan):
     )
 
 
+def nfs_server_manage_firewall_for_plan(plan):
+    """Return whether nfs_server should apply NFS firewall services."""
+    nfs = plan.get("nfs", {}) or {}
+
+    return bool(
+        firewall_manage_enabled(plan)
+        and plan.get("controller_enabled", False)
+        and nfs.get("enabled", False)
+    )
+
+
 def pxe_dnsmasq_firewall_zone_for_plan(plan):
     """Return firewalld zone used by the pxe_dnsmasq role."""
     return DEFAULT_PXE_DNSMASQ_FIREWALL_ZONE
@@ -1959,6 +1970,10 @@ def validate_generated_vars_contract(plan, data):
 def build_generated_vars(plan):
     """Build generated Ansible vars using existing AeroLIT conventions."""
     nfs = plan.get("nfs", {})
+    nfs_enabled = bool(
+        plan.get("controller_enabled", False)
+        and nfs.get("enabled", False)
+    )
 
     bundle_path_value = str(plan.get("bundle_path") or "").strip()
 
@@ -2006,7 +2021,12 @@ def build_generated_vars(plan):
         "aerolit_server_mode": plan.get("mode"),
         "aerolit_pxe_enabled": bool(plan.get("pxe_enabled", False)),
         "aerolit_controller_enabled": bool(plan.get("controller_enabled", False)),
-        "aerolit_nfs_enabled": bool(nfs.get("enabled", False)),
+        "aerolit_nfs_enabled": nfs_enabled,
+
+        "nfs_server_manage_exports": nfs_enabled,
+        "nfs_server_manage_services": nfs_enabled,
+        "nfs_server_manage_firewall": nfs_server_manage_firewall_for_plan(plan),
+        "nfs_server_exports_file": nfs.get("exports_file") or DEFAULT_NFS_EXPORTS_FILE,
         "aerolit_server_interface": plan.get("interface"),
         "aerolit_server_network": plan.get("network"),
         "aerolit_server_ip_address": plan.get("server_ip"),
@@ -2061,7 +2081,7 @@ def build_generated_vars(plan):
         "pxe_dnsmasq_extra_firewall_ports": [],
     }
 
-    if nfs.get("enabled", False):
+    if nfs_enabled:
         server_ip = nfs.get("server_ip") or plan.get("server_ip")
         export_path = nfs.get("export_path")
         target_mount_path = nfs.get("target_mount_path")
