@@ -1,3 +1,20 @@
+sed -n '/^pxe_content_extra_host_dirs:/,/^pxe_dhcp_start:/p' \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+
+
+python3 -m compileall src/aerolitctl
+
+
+
+
+
+
+
+
+
+
+
+
 I do feel good about the direction, but I would phrase it this way:
 
 I feel good about the architecture and ownership cleanup. I do not want you to merge it yet until we run the checks, because this touched enough files that we need to prove there are no broken imports, stale CLI args, or missing generated variables.
