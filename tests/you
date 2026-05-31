@@ -1,3 +1,83 @@
+This confirms the issue clearly:
+
+ens160 has both:
+  192.168.109.10/24   # AeroLIT planned PXE IP
+  192.168.98.148/24   # DHCP/old network IP
+default route:
+  via 192.168.98.2 using 192.168.98.148
+DNS:
+  192.168.98.2
+
+So AeroLIT added/configured the 192.168.109.10 address, but the interface is still also using DHCP on 192.168.98.x.
+
+What I would do next
+
+First, run this one command so we know whether NetworkManager saved both addresses permanently:
+
+nmcli connection show ens160 | egrep 'ipv4.method|ipv4.addresses|ipv4.gateway|ipv4.dns|ipv4.ignore-auto'
+
+Then inspect the deploy code that configured the interface:
+
+grep -R "ip addr add\|+ipv4.addresses\|ipv4.addresses\|ipv4.method\|configure_interface\|nmcli" -n src/aerolitctl/deploy_server.py
+
+Paste those outputs next.
+
+Don’t manually remove the 192.168.98 address yet
+
+Not until we decide whether ens160 is supposed to be:
+
+A dedicated isolated PXE/provisioning NIC
+
+or:
+
+Your management/internet NIC plus a temporary PXE IP
+
+If ens160 is your only NIC and you remove 192.168.98.148, you may lose internet/GitLab access from the VM.
+
+The likely code issue
+
+If deploy_server.py uses something like this, it is appending:
+
+nmcli connection modify ens160 +ipv4.addresses 192.168.109.10/24
+
+That is why both IPs remain.
+
+For the “clean/right” isolated PXE design, it should use replacement behavior:
+
+nmcli connection modify ens160 \
+  ipv4.method manual \
+  ipv4.addresses 192.168.109.10/24 \
+  ipv4.gateway "" \
+  ipv4.dns "" \
+  ipv4.ignore-auto-dns yes
+
+But before we make that code change, I want to see the exact current deploy_server.py logic so we do not accidentally break the deploy flow.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Yeah, I agree. That is probably from the interface configuration step adding the new AeroLIT IP without removing the old one.
 
 Most likely cause:
