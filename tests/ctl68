@@ -36,6 +36,9 @@ SERVER_PREREQUISITE_PACKAGES = [
     "podman",
     "nfs-utils",
     "dnsmasq",
+]
+
+SERVER_FIREWALL_PREREQUISITE_PACKAGES = [
     "firewalld",
 ]
 
@@ -147,6 +150,51 @@ def yaml_value(value):
         return str(value)
 
     return yaml_quote(value)
+
+
+def normalize_bool(value, default=False):
+    """Normalize a config boolean."""
+    if value is None:
+        return default
+
+    if isinstance(value, bool):
+        return value
+
+    value = str(value).strip().lower()
+
+    if value in ("1", "true", "yes", "y", "on"):
+        return True
+
+    if value in ("0", "false", "no", "n", "off"):
+        return False
+
+    return default
+
+
+def firewall_management_enabled_from_config(default=True):
+    """Return saved server firewall intent from aerolitctl config."""
+    try:
+        config = load_config()
+    except Exception:
+        return default
+
+    server = config.get("server", {}) or {}
+    firewall = server.get("firewall", {}) or {}
+
+    return normalize_bool(firewall.get("manage"), default=default)
+
+
+def default_server_prerequisite_packages(firewall_manage=None):
+    """Return default server prerequisite packages for the saved firewall intent."""
+    packages = list(SERVER_PREREQUISITE_PACKAGES)
+
+    if firewall_manage is None:
+        firewall_manage = firewall_management_enabled_from_config(default=True)
+
+    if normalize_bool(firewall_manage, default=True):
+        packages.extend(SERVER_FIREWALL_PREREQUISITE_PACKAGES)
+
+    return packages
 
 
 def absolute_path(path, cwd=None):
@@ -918,14 +966,19 @@ def write_server_bootstrap_repo(
     return "created"
 
 
-def normalize_package_list(packages=None):
+def normalize_package_list(packages=None, firewall_manage=None):
     """Return a stable list of package names.
 
     Accepts None, a string, or a list. Strings may be comma or whitespace
     separated so CLI callers can pass repeated args or comma-separated values.
+
+    When packages is None, the default package list follows the saved firewall
+    intent. firewalld is included only when firewall management is enabled.
     """
     if packages is None:
-        packages = SERVER_PREREQUISITE_PACKAGES
+        packages = default_server_prerequisite_packages(
+            firewall_manage=firewall_manage,
+        )
 
     if isinstance(packages, str):
         raw_items = re.split(r"[\s,]+", packages.strip())
@@ -1180,6 +1233,7 @@ def ensure_server_prerequisites_with_repo_fallback(
     force=False,
     no_backup=False,
     bootstrap_only=False,
+    firewall_manage=None,
 ):
     """Ensure server prerequisite packages exist, using AeroLIT repo fallback.
 
@@ -1192,7 +1246,10 @@ def ensure_server_prerequisites_with_repo_fallback(
     - Install missing packages from aerolit-server-bootstrap-*.
     - Leave the generated repo configured.
     """
-    packages = normalize_package_list(packages)
+    packages = normalize_package_list(
+        packages,
+        firewall_manage=firewall_manage,
+    )
     missing_packages = missing_server_packages(packages)
 
     print("AeroLIT server prerequisite package plan")
