@@ -1,3 +1,15 @@
+
+grep -E 'pxe_content_manage_firewall|pxe_content_firewall_ports|pxe_content_server_ip|pxe_content_image_source|pxe_content_runtime_image|pxe_content_extra_host_dirs' \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+
+
+
+
+
+
+
+
+
 sed -n '/^pxe_content_extra_host_dirs:/,/^pxe_dhcp_start:/p' \
   /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
 
