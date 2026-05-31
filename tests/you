@@ -1,3 +1,105 @@
+Yeah, I agree. That is probably from the interface configuration step adding the new AeroLIT IP without removing the old one.
+
+Most likely cause:
+
+ens160 already had:      192.168.98.148/24
+aerolitctl added:        192.168.109.10/24
+result:                  both addresses on ens160
+
+That can happen if the deploy code uses something like ip addr add ... or nmcli ... +ipv4.addresses ... instead of replacing the interface’s IPv4 address list.
+
+First, verify whether the extra IP is temporary or persistent
+
+Run these:
+
+ip -4 addr show dev ens160
+ip route
+nmcli device show ens160 | egrep 'GENERAL.CONNECTION|IP4.ADDRESS|IP4.GATEWAY|IP4.DNS'
+nmcli connection show --active
+
+Then get the active connection name. It may be something like ens160, Wired connection 1, or System ens160.
+
+Then run:
+
+nmcli connection show "<CONNECTION_NAME>" | egrep 'ipv4.method|ipv4.addresses|ipv4.gateway|ipv4.dns|ipv4.ignore-auto'
+
+Replace <CONNECTION_NAME> with the actual active connection name.
+
+What we are looking for
+
+If you see both addresses under ipv4.addresses, then the extra IP is persistent in NetworkManager.
+
+If you see ipv4.method: auto, then 192.168.98.148 is probably DHCP and AeroLIT added 192.168.109.10 on top of it.
+
+If ip addr shows both but nmcli connection show only shows one, then one of them may be temporary/runtime-only.
+
+Manual cleanup for your current VM
+
+Assuming you want ens160 to be only:
+
+192.168.109.10/24
+
+and no gateway/DNS for the isolated PXE network, use:
+
+CONN="$(nmcli -t -f GENERAL.CONNECTION device show ens160 | cut -d: -f2-)"
+nmcli connection modify "$CONN" \
+  ipv4.method manual \
+  ipv4.addresses "192.168.109.10/24" \
+  ipv4.gateway "" \
+  ipv4.dns "" \
+  ipv4.ignore-auto-dns yes \
+  ipv6.method disabled
+nmcli connection down "$CONN"
+nmcli connection up "$CONN"
+ip -4 addr show dev ens160
+
+After that, you should only see:
+
+192.168.109.10/24
+
+on ens160.
+
+Code fix we probably need
+
+The deploy interface logic should replace the managed provisioning interface IP, not append to it.
+
+So if the current code uses either of these patterns, that is probably the bug:
+
+ip addr add 192.168.109.10/24 dev ens160
+
+or:
+
+nmcli connection modify "$CONN" +ipv4.addresses 192.168.109.10/24
+
+The correct long-term behavior should be closer to:
+
+nmcli connection modify "$CONN" \
+  ipv4.method manual \
+  ipv4.addresses "192.168.109.10/24"
+
+No +ipv4.addresses.
+
+For an isolated PXE network with gateway set to none, it should also clear gateway/DNS instead of preserving old DHCP settings:
+
+nmcli connection modify "$CONN" \
+  ipv4.gateway "" \
+  ipv4.dns "" \
+  ipv4.ignore-auto-dns yes
+
+The file we likely need to inspect/fix next is deploy_server.py, specifically the function that configures the interface/IP. Look for anything using:
+
+ip addr add
++ipv4.addresses
+nmcli connection modify
+ipv4.addresses
+
+That is where this probably comes from.
+
+
+
+
+
+
 
 grep -E 'pxe_content_manage_firewall|pxe_content_firewall_ports|pxe_content_server_ip|pxe_content_image_source|pxe_content_runtime_image|pxe_content_extra_host_dirs' \
   /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
