@@ -1,3 +1,69 @@
+Yes — the GUI shows the issue. You changed it back to DHCP, but DNS/routes are still disabled:
+
+* DNS automatic is OFF
+* Routes automatic is OFF
+* “Use this connection only for resources on its network” is checked
+
+That means the VM can get an IP like 192.168.98.148, but it still may not have DNS/default route, so git pull cannot resolve gitlab.us.lmco.com.
+
+Run this from the VM console:
+
+nmcli connection modify ens160 \
+  ipv4.method auto \
+  ipv4.addresses "" \
+  ipv4.gateway "" \
+  ipv4.dns "" \
+  ipv4.ignore-auto-routes no \
+  ipv4.ignore-auto-dns no \
+  ipv4.never-default no
+
+Then restart the connection:
+
+nmcli connection down ens160
+nmcli connection up ens160
+
+Now verify:
+
+ip route | grep default
+nmcli device show ens160 | egrep 'IP4.ADDRESS|IP4.GATEWAY|IP4.DNS'
+getent hosts gitlab.us.lmco.com
+
+You want to see:
+
+default via 192.168.98.2 ...
+IP4.GATEWAY: 192.168.98.2
+IP4.DNS[1]: 192.168.98.2
+
+Then pull from the actual repo directory:
+
+cd ~/aerolitctl
+git pull
+
+If DNS still does not show up, force the VMware NAT DNS temporarily:
+
+nmcli connection modify ens160 ipv4.dns "192.168.98.2" ipv4.ignore-auto-dns no
+nmcli connection down ens160
+nmcli connection up ens160
+getent hosts gitlab.us.lmco.com
+
+This is just to get internet back temporarily. It will remove the dedicated 192.168.109.10/24 provisioning-only setup until you run the AeroLIT deploy/interface step again.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 This confirms the issue clearly:
 
 ens160 has both:
