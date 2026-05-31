@@ -1,3 +1,135 @@
+Yes — **this file looks good now for the NFS/firewall generated-vars goal.**
+
+You now have the right pieces in `server.py`:
+
+```python
+def nfs_server_manage_firewall_for_plan(plan):
+```
+
+and inside `build_generated_vars()` you now correctly have:
+
+```python
+nfs = plan.get("nfs", {})
+nfs_enabled = bool(
+    plan.get("controller_enabled", False)
+    and nfs.get("enabled", False)
+)
+```
+
+Then you correctly use that for:
+
+```python
+"aerolit_nfs_enabled": nfs_enabled,
+"nfs_server_manage_exports": nfs_enabled,
+"nfs_server_manage_services": nfs_enabled,
+"nfs_server_manage_firewall": nfs_server_manage_firewall_for_plan(plan),
+```
+
+And you fixed the lower block to:
+
+```python
+if nfs_enabled:
+```
+
+That is exactly what I was trying to get you to change. 
+
+So I would **not keep editing this file right now**. Test it.
+
+Run:
+
+```bash
+cd ~/aerolitctl
+python3 -m compileall src tools
+```
+
+Then regenerate:
+
+```bash
+aerolitctl configure server
+```
+
+Then check the generated vars:
+
+```bash
+grep -E '^(pxe_content_manage_firewall|pxe_dnsmasq_manage_firewall|nfs_server_manage_exports|nfs_server_manage_services|nfs_server_manage_firewall|nfs_server_exports_file):' \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+```
+
+Expected normal output:
+
+```yaml
+pxe_content_manage_firewall: true
+pxe_dnsmasq_manage_firewall: true
+nfs_server_manage_exports: true
+nfs_server_manage_services: true
+nfs_server_manage_firewall: true
+nfs_server_exports_file: /etc/exports.d/aerolit-bundle.exports
+```
+
+Then test the skip-firewall toggle:
+
+```bash
+aerolitctl deploy server \
+  --skip-firewall \
+  --skip-interface \
+  --skip-repo-prep \
+  --skip-pxe \
+  --skip-controller
+
+grep -E '^(pxe_content_manage_firewall|pxe_dnsmasq_manage_firewall|nfs_server_manage_exports|nfs_server_manage_services|nfs_server_manage_firewall):' \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+```
+
+Expected:
+
+```yaml
+pxe_content_manage_firewall: false
+pxe_dnsmasq_manage_firewall: false
+nfs_server_manage_exports: true
+nfs_server_manage_services: true
+nfs_server_manage_firewall: false
+```
+
+Then restore normal generated vars:
+
+```bash
+aerolitctl configure server
+```
+
+If those pass, `server.py` is good for this firewall/NFS part.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Yes — change the role first. Based on your screenshots, this role is already close. I would make these exact changes.
 
 1. defaults/main.yml
