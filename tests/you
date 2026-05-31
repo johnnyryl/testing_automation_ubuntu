@@ -1,3 +1,181 @@
+Yes — run those checks and send me the output, and if they pass we can call the firewall-variable wiring done.
+
+But do it in this order so we do not accidentally chase noise.
+
+1. First prove the generated vars are correct
+
+Run:
+
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+aerolitctl configure server
+grep -E '^(pxe_content_manage_firewall|pxe_dnsmasq_manage_firewall|nfs_server_manage_exports|nfs_server_manage_services|nfs_server_manage_firewall):' \
+  group_vars/all/aerolitctl_server_generated.yml
+
+Expected when firewall is enabled:
+
+nfs_server_manage_exports: true
+nfs_server_manage_services: true
+nfs_server_manage_firewall: true
+pxe_content_manage_firewall: true
+pxe_dnsmasq_manage_firewall: true
+
+That proves configure server is generating the right role variables.
+
+2. Then prove the playbooks parse with those vars
+
+Run:
+
+ansible-playbook --syntax-check \
+  -i localhost, \
+  -c local \
+  -e @group_vars/all/aerolitctl_server_generated.yml \
+  pxe_server.yml
+
+Then:
+
+ansible-playbook --syntax-check \
+  -i localhost, \
+  -c local \
+  -e @group_vars/all/aerolitctl_server_generated.yml \
+  ansible_controller.yml
+
+Expected output should be basically:
+
+playbook: pxe_server.yml
+
+and:
+
+playbook: ansible_controller.yml
+
+No errors.
+
+3. Then prove --skip-firewall forces the role firewall vars off
+
+Run the safe skip test:
+
+aerolitctl deploy server \
+  --skip-firewall \
+  --skip-interface \
+  --skip-repo-prep \
+  --skip-pxe \
+  --skip-controller
+
+Then grep again:
+
+grep -E '^(pxe_content_manage_firewall|pxe_dnsmasq_manage_firewall|nfs_server_manage_exports|nfs_server_manage_services|nfs_server_manage_firewall):' \
+  group_vars/all/aerolitctl_server_generated.yml
+
+Expected:
+
+nfs_server_manage_exports: true
+nfs_server_manage_services: true
+nfs_server_manage_firewall: false
+pxe_content_manage_firewall: false
+pxe_dnsmasq_manage_firewall: false
+
+That proves --skip-firewall only disables firewall management, not NFS exports/services.
+
+4. Restore normal enabled vars afterward
+
+Run:
+
+aerolitctl configure server
+
+Then grep one final time:
+
+grep -E '^(pxe_content_manage_firewall|pxe_dnsmasq_manage_firewall|nfs_server_manage_exports|nfs_server_manage_services|nfs_server_manage_firewall):' \
+  group_vars/all/aerolitctl_server_generated.yml
+
+Expected back to:
+
+nfs_server_manage_exports: true
+nfs_server_manage_services: true
+nfs_server_manage_firewall: true
+pxe_content_manage_firewall: true
+pxe_dnsmasq_manage_firewall: true
+
+Then yes, send me the output
+
+Send me the grep outputs and the two syntax-check outputs. If those pass, I would consider the firewall variable alignment done across:
+
+server.py
+deploy_server.py
+pxe_content
+pxe_dnsmasq
+nfs_server
+
+I would not run the full real deploy yet unless you are ready for it to change the interface again. Your saved config has Deploy configures interface: yes, so a real deploy without --skip-interface can move ens160 back to the provisioning IP and possibly break normal internet access again.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 grep -E '^(nfs_server_manage_exports|nfs_server_manage_services|nfs_server_manage_firewall|pxe_content_manage_firewall|pxe_dnsmasq_manage_firewall):' \
   /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
 
