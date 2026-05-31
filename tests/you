@@ -1,3 +1,245 @@
+Almost — the pxe-content role is mostly aligned now, but I would not call pxe-content done yet until you fix/verify these last few things.
+
+The role is good in the big-picture ownership model:
+
+Python/server.py:
+  decides values
+  writes generated vars
+pxe_content role:
+  installs/packages
+  loads/pulls image
+  writes env file
+  writes Quadlet file
+  starts service
+  opens its own firewall port when told to
+
+That part is correct.
+
+What still needs to be fixed or verified for pxe-content
+
+1. Confirm server.py now generates every pxe-content var
+
+Since we removed pxe-content ownership from pxe.py, aerolitctl_server_generated.yml now needs to contain these:
+
+aerolit_bundle_root: "/opt/aerolit/aerolit-bundle"
+pxe_content_server_ip: "192.168.109.10"
+pxe_content_host_port: 18080
+pxe_content_iso_root: "/opt/aerolit/aerolit-bundle/extracted_isos"
+pxe_content_volume_mounts:
+  - "/opt/aerolit/aerolit-bundle/extracted_isos:/iso:ro,Z"
+  - "/etc/aerolit/overrides/pxe:/overrides:ro,Z"
+pxe_content_extra_host_dirs:
+  - "/etc/aerolit/overrides/pxe"
+  - "/etc/aerolit/overrides/pxe/profiles"
+  - "/etc/aerolit/overrides/pxe/templates"
+pxe_content_extra_env:
+  PXE_OVERRIDE_ROOT: "/overrides"
+  PXE_OVERRIDE_PROFILE_ROOT: "/overrides/profiles"
+  PXE_OVERRIDE_TEMPLATE_ROOT: "/overrides/templates"
+  PXE_GENERATED_KS_EDIT_POLICY: "preserve"
+  PXE_VALIDATION_FAILURE_POLICY: "warn"
+  PXE_WATCH_INTERVAL: "15"
+pxe_content_manage_firewall: true
+pxe_content_firewall_ports:
+  - "18080/tcp"
+pxe_content_image_source: "tar"
+pxe_content_image_tar_path: "/opt/aerolit/aerolit-bundle/files/pxe/pxe-content.tar"
+pxe_content_quadlet_pull_policy: "never"
+pxe_content_runtime_image: "WHATEVER_TAG_IS_INSIDE_THE_TAR"
+
+That generated file is the final contract. The role looks like it can consume these vars correctly.
+
+⸻
+
+2. Add pxe_content_extra_host_dirs to role defaults
+
+In roles/pxe-content/defaults/main.yml, add this near the volume mount section:
+
+# Additional host-side directories required by generated volume mounts.
+# AeroLIT normally uses this for /etc/aerolit/overrides/pxe and children.
+pxe_content_extra_host_dirs: []
+# Host directories this role should ensure before Quadlet starts.
+pxe_content_required_host_dirs: "{{ [pxe_content_iso_root] + (pxe_content_extra_host_dirs | default([])) }}"
+
+This fixes the issue where the generated Quadlet can mount:
+
+/etc/aerolit/overrides/pxe:/overrides:ro,Z
+
+but the role does not currently ensure that host path exists.
+
+⸻
+
+3. Replace the ISO-root directory task in install.yml
+
+Right now the role only ensures:
+
+pxe_content_iso_root
+
+exists.
+
+Replace the existing task named something like:
+
+- name: Ensure PXE extracted ISO root exists
+
+with this:
+
+- name: Ensure pxe-content host mount directories exist
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ pxe_content_required_host_dirs }}"
+  when:
+    - item | string | length > 1
+    - item | string != "/"
+
+That makes the role safe for both:
+
+/opt/aerolit/aerolit-bundle/extracted_isos
+/etc/aerolit/overrides/pxe
+/etc/aerolit/overrides/pxe/profiles
+/etc/aerolit/overrides/pxe/templates
+
+⸻
+
+4. Strengthen the ISO-root assert
+
+Your current assert checks that pxe_content_iso_root is longer than 1 and not /. I would replace it with this:
+
+- name: Assert PXE content ISO root is safe
+  assert:
+    that:
+      - pxe_content_iso_root | string | length > 1
+      - pxe_content_iso_root | string != "/"
+      - pxe_content_iso_root | string is match("^/")
+      - "' ' not in (pxe_content_iso_root | string)"
+    fail_msg: "pxe_content_iso_root must be an absolute safe directory path and cannot be '/'."
+
+That prevents relative paths from accidentally becoming Quadlet mounts.
+
+⸻
+
+5. Remove the /srv/ipxe fallback if you want the strict long-term design
+
+Your defaults still appear to have this kind of fallback behavior:
+
+pxe_content_extracted_isos_root: "{{ ... fallback to /srv/ipxe ... }}"
+
+For the stricter AeroLIT design, I would not silently fall back to /srv/ipxe.
+
+Use this instead:
+
+pxe_content_bundle_root: "{{ aerolit_bundle_root | default('') }}"
+pxe_content_extracted_isos_root: "{{ ((pxe_content_bundle_root | string | length) > 0) | ternary(pxe_content_bundle_root ~ '/extracted_isos', '') }}"
+pxe_content_iso_root: "{{ pxe_content_extracted_isos_root }}"
+
+Then the assert catches missing generated vars instead of quietly deploying against the wrong path.
+
+⸻
+
+6. The runtime image still needs final verification
+
+This is the one thing I cannot call done from screenshots alone.
+
+You need to know what tag is embedded inside:
+
+/opt/aerolit/aerolit-bundle/files/pxe/pxe-content.tar
+
+Run this:
+
+tar -xOf /opt/aerolit/aerolit-bundle/files/pxe/pxe-content.tar manifest.json | python3 -m json.tool
+
+Look for RepoTags.
+
+Then server.py should generate:
+
+pxe_content_runtime_image: "<that exact RepoTags value>"
+
+Example:
+
+pxe_content_runtime_image: "pxe-content:latest"
+
+or:
+
+pxe_content_runtime_image: "registry.gitlab.us.lmco.com/lit/containers/pxe-content:latest"
+
+This matters because podman load can succeed but the Quadlet service can still fail if Image= points to a different tag.
+
+⸻
+
+What looks good now
+
+These look right from the screenshots:
+
+pxe_content_image_source: "tar"
+pxe_content_server_ip: ""
+pxe_content_manage_firewall: true
+pxe_content_firewall_ports:
+  - "{{ pxe_content_host_port }}/tcp"
+
+And the role behavior looks right:
+
+install.yml:
+  validates vars
+  installs podman
+  installs firewalld only when firewall management is enabled
+  loads tar image
+  pulls registry image only in registry mode
+configure.yml:
+  writes env file
+  writes Quadlet container file
+  starts firewalld only when enabled
+  opens pxe-content firewall ports only when enabled
+service.yml:
+  enables/starts pxe-content
+  validates HTTP content
+templates:
+  pxe-content.env.j2 correctly writes PXE_SERVER and PXE_PORT
+  pxe-content.container.j2 correctly uses Image, PublishPort, Volume, EnvironmentFile, Pull
+
+Verdict
+
+Not quite done yet.
+
+For pxe-content, I would do these final items:
+
+1. Add pxe_content_extra_host_dirs / pxe_content_required_host_dirs defaults.
+2. Replace the ISO-root directory task with a generic host mount directory task.
+3. Strengthen the ISO-root assert to require an absolute path.
+4. Remove the /srv/ipxe fallback if you want strict generated-vars ownership.
+5. Verify the tar image RepoTags and make server.py generate matching pxe_content_runtime_image.
+6. Re-run configure server and confirm aerolitctl_server_generated.yml contains the final pxe_content_* contract.
+
+After that, I’d be comfortable saying pxe-content is aligned and moving to pxe_dnsmasq.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
