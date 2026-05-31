@@ -1,3 +1,200 @@
+Yes — these pictures help. For pxe-dnsmasq, I would not change all these files. Most of the role looks fine.
+
+The main cleanup is:
+
+1. defaults/main.yml — remove dangerous hardcoded environment values.
+2. tasks/install.yml — strengthen the assert so the role fails clearly if required vars were not provided.
+3. Leave these alone for now: tasks/configure.yml, tasks/service.yml, templates/dnsmasq-pxe.conf.j2, templates/dnsmasq-override.conf.j2, tasks/main.yml, and handlers/main.yml.
+
+1. Fix defaults/main.yml
+
+Replace the interface block
+
+Find this:
+
+# Interface / host networking
+pxe_dnsmasq_interface: "ens160"
+pxe_dnsmasq_bind_mode: "dynamic"
+pxe_dnsmasq_except_interfaces: []
+
+Replace with:
+
+# Interface / host networking
+# Required. aerolitctl configure server generates this from the selected provisioning NIC.
+pxe_dnsmasq_interface: ""
+pxe_dnsmasq_bind_mode: "dynamic"
+pxe_dnsmasq_except_interfaces: []
+
+Replace the DHCP range block
+
+Find this:
+
+# DHCP range for isolated PXE network
+pxe_dnsmasq_dhcp_range_start: "192.168.109.100"
+pxe_dnsmasq_dhcp_range_end: "192.168.109.200"
+pxe_dnsmasq_dhcp_netmask: "255.255.255.0"
+pxe_dnsmasq_dhcp_lease_time: "12h"
+
+Replace with:
+
+# DHCP range for isolated PXE network
+# Required when pxe_dnsmasq_enable_dhcp is true.
+# aerolitctl configure server generates these values.
+pxe_dnsmasq_dhcp_range_start: ""
+pxe_dnsmasq_dhcp_range_end: ""
+pxe_dnsmasq_dhcp_netmask: ""
+pxe_dnsmasq_dhcp_lease_time: "12h"
+
+Replace the PXE handoff block
+
+Find this:
+
+# HTTP handoff to the pxe-content service
+pxe_dnsmasq_pxe_server_ip: "192.168.109.139"
+pxe_dnsmasq_tftp_server_ip: "{{ pxe_dnsmasq_pxe_server_ip }}"
+pxe_dnsmasq_http_port: 18080
+pxe_dnsmasq_boot_script_url: "http://{{ pxe_dnsmasq_pxe_server_ip }}:{{ pxe_dnsmasq_http_port }}/boot.ipxe"
+
+Replace with:
+
+# HTTP handoff to the pxe-content service
+# Required. aerolitctl configure server generates the server IP and port.
+pxe_dnsmasq_pxe_server_ip: ""
+pxe_dnsmasq_tftp_server_ip: "{{ pxe_dnsmasq_pxe_server_ip }}"
+pxe_dnsmasq_http_port: 18080
+pxe_dnsmasq_boot_script_url: "http://{{ pxe_dnsmasq_pxe_server_ip }}:{{ pxe_dnsmasq_http_port }}/boot.ipxe"
+
+Change the firewall default
+
+Find this:
+
+# Firewall
+pxe_dnsmasq_manage_firewall: true
+
+Change only that first line to:
+
+# Firewall
+# Safe standalone default. aerolitctl generated vars enable this when firewall intent is enabled.
+pxe_dnsmasq_manage_firewall: false
+
+Leave the rest of that firewall block alone:
+
+pxe_dnsmasq_firewall_zone: "public"
+pxe_dnsmasq_open_tftp_port: true
+pxe_dnsmasq_open_http_port: true
+pxe_dnsmasq_extra_firewall_ports: []
+pxe_dnsmasq_firewall_packages:
+  - firewalld
+pxe_dnsmasq_firewall_base_ports:
+  - "67/udp"
+pxe_dnsmasq_firewall_tftp_ports:
+  - "69/udp"
+
+2. Fix tasks/install.yml
+
+In tasks/install.yml, replace the first assert task.
+
+Find this:
+
+- name: Assert required PXE server IP is set
+  assert:
+    that:
+      - pxe_dnsmasq_pxe_server_ip | length > 0
+    fail_msg: "pxe_dnsmasq_pxe_server_ip must be set."
+
+Replace it with this:
+
+- name: Assert required pxe-dnsmasq settings are set
+  assert:
+    that:
+      - pxe_dnsmasq_interface | string | length > 0
+      - pxe_dnsmasq_pxe_server_ip | string | length > 0
+      - pxe_dnsmasq_tftp_server_ip | string | length > 0
+      - (pxe_dnsmasq_http_port | int) >= 1
+      - (pxe_dnsmasq_http_port | int) <= 65535
+      - not (pxe_dnsmasq_enable_dhcp | bool) or (pxe_dnsmasq_dhcp_range_start | string | length > 0)
+      - not (pxe_dnsmasq_enable_dhcp | bool) or (pxe_dnsmasq_dhcp_range_end | string | length > 0)
+      - not (pxe_dnsmasq_enable_dhcp | bool) or (pxe_dnsmasq_dhcp_netmask | string | length > 0)
+    fail_msg: >-
+      pxe-dnsmasq requires interface, PXE server IP, HTTP port, and DHCP range
+      settings. When using aerolitctl, run aerolitctl configure server so
+      aerolitctl_server_generated.yml can provide these role variables.
+
+3. Do not change these yet
+
+From the pictures, these look okay for our current goal:
+
+tasks/configure.yml
+tasks/service.yml
+templates/dnsmasq-pxe.conf.j2
+templates/dnsmasq-override.conf.j2
+tasks/main.yml
+handlers/main.yml
+
+The firewall tasks in tasks/configure.yml already do the right thing because they are gated by:
+
+when: pxe_dnsmasq_manage_firewall | bool
+
+That means --skip-firewall can disable them through generated vars, and normal deploy can enable them.
+
+4. Test after those changes
+
+Run this in the pxe-dnsmasq role repo:
+
+ansible-playbook --syntax-check -i localhost, -c local \
+  -e @/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml \
+  tests/test.yml
+
+If you do not have a tests/test.yml, then at minimum run this from the bundle Ansible directory:
+
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+ansible-playbook --syntax-check \
+  -i localhost, \
+  -c local \
+  -e @group_vars/all/aerolitctl_server_generated.yml \
+  pxe_server.yml
+
+Then run the deploy dry-runs again:
+
+aerolitctl deploy server --dry-run --skip-firewall
+aerolitctl deploy server --dry-run
+
+After this, I’d call pxe_dnsmasq aligned enough to move on to nfs_server.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Yes — **this looks right** for the `server.py` side. The uploaded file now has the dnsmasq firewall zone default, the two dnsmasq helper functions, the dnsmasq generated vars, the contract validation, and the configure-server display lines. 
 
 I also checked it as Python, and it **compiles cleanly**.
