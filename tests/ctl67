@@ -497,9 +497,12 @@ def run_status(verbose=False):
     print("")
 
     print("Firewall intent:")
-    print_status_value("Manage firewall", yes_no(firewall.get("manage", False)))
-    print_status_value("Services", ", ".join(firewall.get("services") or []) or "none")
-    print_status_value("Ports", ", ".join(firewall.get("ports") or []) or "none")
+    print_status_value("Manage firewall", yes_no(firewall.get("manage", True)))
+    print_status_value("Rules owner", "functional Ansible roles")
+    print_status_value(
+        "Deploy override",
+        "aerolitctl deploy server --skip-firewall",
+    )
     print("")
 
     print_pxe_status_summary(bundle_path)
