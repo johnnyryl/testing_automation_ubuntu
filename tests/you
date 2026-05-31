@@ -1,3 +1,31 @@
+cd ~/aerolitctl
+
+git diff --check
+
+grep -R "enable-dnsmasq-firewall\|disable-dnsmasq-firewall\|dnsmasq-firewall-zone" -n src/aerolitctl || true
+
+grep -R "aerolitctl_pxe_server_ip\|pxe_dnsmasq_manage_firewall" -n src/aerolitctl || true
+
+aerolitctl deploy server --dry-run --skip-firewall
+aerolitctl deploy server --dry-run
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Yes — the GUI shows the issue. You changed it back to DHCP, but DNS/routes are still disabled:
 
 * DNS automatic is OFF
