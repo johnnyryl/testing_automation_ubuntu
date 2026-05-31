@@ -659,7 +659,15 @@ def find_nmcli_connection_for_interface(interface):
 
 
 def deploy_interface(plan, report, dry_run=False, skip=False):
-    """Apply interface IP configuration intent."""
+    """Apply interface IP configuration intent.
+
+    This makes the selected provisioning interface match the saved AeroLIT
+    server IP instead of appending the AeroLIT IP on top of DHCP.
+
+    Important: this treats the selected interface as a dedicated provisioning
+    interface. It sets a static IPv4 address, disables DHCP for that connection,
+    and prevents the connection from becoming the system default route.
+    """
     if skip:
         report.add("skipped", "Interface configuration skipped by option")
         return
@@ -672,10 +680,6 @@ def deploy_interface(plan, report, dry_run=False, skip=False):
     server_ip = plan.get("server_ip")
     prefix = plan.get("prefix")
     planned = "{}/{}".format(server_ip, prefix)
-
-    if interface_has_ip(interface, server_ip):
-        report.add("existing", "{} already has {}".format(interface, planned))
-        return
 
     if not command_exists("nmcli"):
         raise RuntimeError(
@@ -698,11 +702,31 @@ def deploy_interface(plan, report, dry_run=False, skip=False):
 
     run_logged_command(
         report,
-        ["nmcli", "connection", "modify", connection, "+ipv4.addresses", planned],
+        [
+            "nmcli",
+            "connection",
+            "modify",
+            connection,
+            "ipv4.method",
+            "manual",
+            "ipv4.addresses",
+            planned,
+            "ipv4.gateway",
+            "",
+            "ipv4.dns",
+            "",
+            "ipv4.ignore-auto-routes",
+            "yes",
+            "ipv4.ignore-auto-dns",
+            "yes",
+            "ipv4.never-default",
+            "yes",
+        ],
         dry_run=dry_run,
         root=True,
-        description="Add planned server IP to interface connection",
+        description="Set dedicated provisioning interface IP",
     )
+
     run_logged_command(
         report,
         ["nmcli", "connection", "up", connection],
