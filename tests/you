@@ -1,3 +1,88 @@
+I do feel good about the direction, but I would phrase it this way:
+
+I feel good about the architecture and ownership cleanup. I do not want you to merge it yet until we run the checks, because this touched enough files that we need to prove there are no broken imports, stale CLI args, or missing generated variables.
+
+The big thing: we did not delete all of that just for firewall.
+
+The firewall problem exposed a bigger issue: pxe.py, server.py, deploy_server.py, and the roles were all starting to share ownership of the same things.
+
+The cleanup was really this:
+
+configure server / server.py owns:
+  server IP
+  PXE HTTP port
+  interface
+  DHCP/dnsmasq settings
+  firewall intent
+  role firewall vars
+  ISO root
+  pxe-content image/tar mode
+  role handoff vars
+configure pxe / pxe.py owns:
+  PXE profiles
+  profile overrides
+  template overrides
+  generator behavior
+  PXE menu/Kickstart policy
+
+So yes, the huge deletion from pxe.py makes sense if most of what came out was server IP, dnsmasq, DHCP, HTTP port, ISO root, volume mount, and firewall ownership logic. That stuff did not belong in configure pxe.
+
+The file I would be most suspicious of from that screenshot is repos.py +2048 -0. That does not look like a small firewall cleanup. It may be completely valid if you added the repo auto-discovery work, but I would review that separately from this PXE/firewall change so you do not accidentally mix two large efforts.
+
+Before moving to pxe_dnsmasq, I would run these quick confidence checks:
+
+cd /path/to/your/aerolitctl/repo
+python3 -m compileall src/aerolitctl
+
+Then check for deleted CLI/options still being referenced:
+
+grep -R "enable-dnsmasq-firewall\|disable-dnsmasq-firewall\|dnsmasq-firewall-zone" -n src/aerolitctl || true
+grep -R "aerolitctl_pxe_server_ip\|pxe_dnsmasq_pxe_server_ip\|pxe_dnsmasq_manage_firewall" -n src/aerolitctl || true
+
+Then regenerate/check server vars and make sure the important role vars are present:
+
+grep -E 'pxe_content_(server_ip|host_port|manage_firewall|firewall_ports|image_source|runtime_image|quadlet_pull_policy|volume_mounts|extra_host_dirs)' \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+
+And syntax-check Ansible:
+
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+ansible-playbook pxe_server.yml --syntax-check
+
+My honest take: yes, the amount deleted is believable, especially the pxe.py -760, because we intentionally moved server/dnsmasq/firewall ownership out of configure pxe. But because cli.py, deploy_server.py, server.py, and pxe.py all changed together, we should validate the Python wiring before doing the next role.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 pxe_content_image: "registry.gitlab.us.lmco.com/lit/containers/pxe-content:latest"
 
 # Image name used at runtime by Quadlet.
