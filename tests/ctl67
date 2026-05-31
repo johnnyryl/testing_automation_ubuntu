@@ -48,6 +48,35 @@ def generated_var_present(content, key, value):
     return "{}: {}".format(key, yaml_scalar_text(value)) in content
 
 
+def generated_var_value(content, key):
+    """Return a simple top-level generated var value as text."""
+    prefix = "{}:".format(key)
+
+    for line in content.splitlines():
+        if line.startswith(prefix):
+            return line.split(":", 1)[1].strip()
+
+    return None
+
+
+def generated_bool_status(content, key):
+    """Return yes/no/missing for a simple generated boolean var."""
+    value = generated_var_value(content, key)
+
+    if value is None:
+        return "missing"
+
+    value = value.strip().lower()
+
+    if value in ("true", "yes", "1", "on"):
+        return "yes"
+
+    if value in ("false", "no", "0", "off"):
+        return "no"
+
+    return value
+
+
 def present_missing(path):
     """Return present/missing text for a path."""
     return "present" if Path(path).exists() else "missing"
@@ -149,11 +178,13 @@ def generated_vars_look_current(generated_vars_path, config):
     server = config.get("server", {}) or {}
     pxe = config.get("pxe", {}) or {}
     nfs = server.get("nfs", {}) or {}
+    firewall = server.get("firewall", {}) or {}
 
     mode = server.get("mode")
     pxe_enabled = pxe_enabled_from_config(server, pxe)
     controller_enabled = controller_enabled_from_config(server)
     nfs_enabled = nfs_enabled_from_config(server)
+    firewall_manage = bool(firewall.get("manage", True))
 
     expected = []
 
@@ -163,6 +194,11 @@ def generated_vars_look_current(generated_vars_path, config):
     expected.append(("aerolit_pxe_enabled", pxe_enabled))
     expected.append(("aerolit_controller_enabled", controller_enabled))
     expected.append(("aerolit_nfs_enabled", nfs_enabled))
+    expected.append(("pxe_content_manage_firewall", bool(firewall_manage and pxe_enabled)))
+    expected.append(("pxe_dnsmasq_manage_firewall", bool(firewall_manage and pxe_enabled)))
+    expected.append(("nfs_server_manage_exports", nfs_enabled))
+    expected.append(("nfs_server_manage_services", nfs_enabled))
+    expected.append(("nfs_server_manage_firewall", bool(firewall_manage and nfs_enabled)))
 
     if server.get("interface"):
         expected.append(("aerolit_server_interface", server.get("interface")))
@@ -503,6 +539,35 @@ def run_status(verbose=False):
         "Deploy override",
         "aerolitctl deploy server --skip-firewall",
     )
+
+    if server_generated_vars.exists():
+        try:
+            generated_content = server_generated_vars.read_text()
+        except IOError:
+            generated_content = ""
+
+        if generated_content:
+            print_status_value(
+                "pxe_content role var",
+                generated_bool_status(generated_content, "pxe_content_manage_firewall"),
+            )
+            print_status_value(
+                "pxe_dnsmasq role var",
+                generated_bool_status(generated_content, "pxe_dnsmasq_manage_firewall"),
+            )
+            print_status_value(
+                "nfs_server role var",
+                generated_bool_status(generated_content, "nfs_server_manage_firewall"),
+            )
+            print_status_value(
+                "nfs_server exports var",
+                generated_bool_status(generated_content, "nfs_server_manage_exports"),
+            )
+            print_status_value(
+                "nfs_server services var",
+                generated_bool_status(generated_content, "nfs_server_manage_services"),
+            )
+
     print("")
 
     print_pxe_status_summary(bundle_path)
