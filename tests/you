@@ -1,3 +1,11 @@
+grep -E '^(nfs_server_manage_exports|nfs_server_manage_services|nfs_server_manage_firewall|pxe_content_manage_firewall|pxe_dnsmasq_manage_firewall):' \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+
+
+
+
+
+
 Yes — **this file looks good now for the NFS/firewall generated-vars goal.**
 
 You now have the right pieces in `server.py`:
