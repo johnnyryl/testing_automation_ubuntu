@@ -1,5 +1,28 @@
 cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
 
+grep -E '^(nfs_server_|pxe_content_manage_firewall|pxe_dnsmasq_manage_firewall)' \
+  group_vars/all/aerolitctl_server_generated.yml
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+
 aerolitctl deploy server \
   --skip-firewall \
   --skip-interface \
