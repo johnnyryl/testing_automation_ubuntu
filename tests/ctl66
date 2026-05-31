@@ -658,6 +658,75 @@ def find_nmcli_connection_for_interface(interface):
     return None
 
 
+def nmcli_empty_value(value):
+    """Return True when nmcli renders a field as empty."""
+    if value is None:
+        return True
+
+    value = str(value).strip()
+    return value in ("", "--")
+
+
+def nmcli_connection_ipv4_settings(connection):
+    """Return selected IPv4 settings for a NetworkManager connection."""
+    fields = [
+        "ipv4.method",
+        "ipv4.addresses",
+        "ipv4.gateway",
+        "ipv4.dns",
+        "ipv4.ignore-auto-routes",
+        "ipv4.ignore-auto-dns",
+        "ipv4.never-default",
+    ]
+
+    rc, stdout, stderr = run_command(
+        [
+            "nmcli",
+            "-t",
+            "-f",
+            ",".join(fields),
+            "connection",
+            "show",
+            connection,
+        ]
+    )
+
+    if rc != 0:
+        return None
+
+    settings = {}
+
+    for line in stdout.splitlines():
+        if ":" not in line:
+            continue
+
+        key, value = line.split(":", 1)
+        settings[key.strip()] = value.strip()
+
+    for field in fields:
+        settings.setdefault(field, "")
+
+    return settings
+
+
+def nmcli_connection_matches_dedicated_interface(connection, planned):
+    """Return True when the NM profile already matches AeroLIT provisioning intent."""
+    settings = nmcli_connection_ipv4_settings(connection)
+
+    if settings is None:
+        return False
+
+    return (
+        settings.get("ipv4.method") == "manual"
+        and settings.get("ipv4.addresses") == planned
+        and nmcli_empty_value(settings.get("ipv4.gateway"))
+        and nmcli_empty_value(settings.get("ipv4.dns"))
+        and settings.get("ipv4.ignore-auto-routes") == "yes"
+        and settings.get("ipv4.ignore-auto-dns") == "yes"
+        and settings.get("ipv4.never-default") == "yes"
+    )
+
+
 def deploy_interface(plan, report, dry_run=False, skip=False):
     """Apply interface IP configuration intent.
 
@@ -699,6 +768,19 @@ def deploy_interface(plan, report, dry_run=False, skip=False):
                 planned,
             )
         )
+
+    if (
+        interface_has_ip(interface, server_ip)
+        and nmcli_connection_matches_dedicated_interface(connection, planned)
+    ):
+        report.add(
+            "existing",
+            "{} already has dedicated provisioning IP {}".format(
+                interface,
+                planned,
+            ),
+        )
+        return
 
     run_logged_command(
         report,
