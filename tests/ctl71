@@ -1740,6 +1740,61 @@ def validate_generated_vars_contract(plan, data):
                 "Generated vars contract error: nfs_server_exports should be [] when NFS is disabled"
             )
 
+    expected_configure_network = bool(plan.get("configure_interface", False))
+    actual_configure_network = bool(data.get("configure_network_enabled", False))
+
+    if actual_configure_network != expected_configure_network:
+        raise ValueError(
+            "Generated vars contract error: configure_network_enabled should be {}, got {}".format(
+                expected_configure_network,
+                actual_configure_network,
+            )
+        )
+
+    if expected_configure_network:
+        expected_interface = str(plan.get("interface") or "").strip()
+        expected_ip = str(plan.get("server_ip") or "").strip()
+        expected_prefix = plan.get("prefix")
+
+        if str(data.get("configure_network_interface") or "").strip() != expected_interface:
+            raise ValueError(
+                "Generated vars contract error: configure_network_interface should be {}, got {}".format(
+                    expected_interface,
+                    data.get("configure_network_interface", "missing"),
+                )
+            )
+
+        if str(data.get("configure_network_ipv4_address") or "").strip() != expected_ip:
+            raise ValueError(
+                "Generated vars contract error: configure_network_ipv4_address should be {}, got {}".format(
+                    expected_ip,
+                    data.get("configure_network_ipv4_address", "missing"),
+                )
+            )
+
+        if data.get("configure_network_ipv4_prefix") != expected_prefix:
+            raise ValueError(
+                "Generated vars contract error: configure_network_ipv4_prefix should be {}, got {}".format(
+                    expected_prefix,
+                    data.get("configure_network_ipv4_prefix", "missing"),
+                )
+            )
+
+        if data.get("configure_network_ipv4_method") != "manual":
+            raise ValueError(
+                "Generated vars contract error: configure_network_ipv4_method should be manual"
+            )
+
+        if data.get("configure_network_gateway") != "":
+            raise ValueError(
+                "Generated vars contract error: configure_network_gateway should be blank for dedicated provisioning interface"
+            )
+
+        if data.get("configure_network_dns") != []:
+            raise ValueError(
+                "Generated vars contract error: configure_network_dns should be [] for dedicated provisioning interface"
+            )
+
     if not plan.get("pxe_enabled", False):
         return
 
@@ -2109,7 +2164,21 @@ def build_generated_vars(plan):
         "aerolit_server_prefix": plan.get("prefix"),
         "aerolit_server_gateway": plan.get("gateway"),
         "aerolit_server_dns": list(plan.get("dns_servers") or []),
-        "aerolit_configure_interface": plan.get("configure_interface", False),
+        "aerolit_configure_interface": bool(plan.get("configure_interface", False)),
+
+        "configure_network_enabled": bool(plan.get("configure_interface", False)),
+        "configure_network_interface": plan.get("interface") or "",
+        "configure_network_connection_name": "",
+        "configure_network_ipv4_address": plan.get("server_ip") or "",
+        "configure_network_ipv4_prefix": plan.get("prefix") or 24,
+        "configure_network_ipv4_method": "manual",
+        "configure_network_gateway": "",
+        "configure_network_dns": [],
+        "configure_network_ignore_auto_routes": True,
+        "configure_network_ignore_auto_dns": True,
+        "configure_network_never_default": True,
+        "configure_network_activate": True,
+
         "pxe_server_ip": plan.get("server_ip"),
         "pxe_interface": plan.get("interface"),
         "pxe_network": plan.get("network"),
