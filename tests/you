@@ -1,3 +1,144 @@
+Yes — we can fix #3 inside the role, and honestly that is cleaner.
+
+That way any playbook that calls nfs_server gets the same skip behavior, instead of relying on every playbook to remember:
+
+when: aerolit_nfs_enabled | bool
+
+Exact fix
+
+1. Add a role-level enable variable
+
+In:
+
+nfs-server/defaults/main.yml
+
+Add this near the top, probably before “Role behavior toggles”:
+
+###############################################################################
+# 00. Role execution
+###############################################################################
+# Allows callers such as aerolitctl to disable the entire role without needing
+# every playbook to wrap the role in a when condition.
+nfs_server_enabled: "{{ aerolit_nfs_enabled | default(true) | bool }}"
+
+This means either of these can disable the role:
+
+nfs_server_enabled: false
+
+or:
+
+aerolit_nfs_enabled: false
+
+So aerolitctl --skip-nfs can simply make sure one of those becomes false in the generated vars.
+
+⸻
+
+2. Update tasks/main.yml
+
+Replace your current tasks/main.yml with this:
+
+# UNCLASSIFIED
+- name: Note nfs-server role is disabled
+  ansible.builtin.debug:
+    msg: "nfs-server role disabled; no NFS packages, exports, services, or firewall changes will be managed."
+  when: not (nfs_server_enabled | bool)
+- name: Validate nfs-server role inputs
+  ansible.builtin.import_tasks: validate.yml
+  when: nfs_server_enabled | bool
+- name: Install nfs server packages
+  ansible.builtin.import_tasks: install.yml
+  when: nfs_server_enabled | bool
+- name: Configure nfs server
+  ansible.builtin.import_tasks: configure.yml
+  when: nfs_server_enabled | bool
+# UNCLASSIFIED
+
+That fixes the issue at the role level.
+
+The important part is that the condition is on all three imports, not just configure.yml.
+
+If you only skip configure.yml, the role could still install nfs-utils or firewalld. If you only skip the exports tasks, the role could still start services. This version skips the whole role.
+
+⸻
+
+What --skip-nfs should generate/pass
+
+For aerolitctl deploy server --skip-nfs, the vars passed into Ansible should include at least:
+
+aerolit_nfs_enabled: false
+nfs_server_enabled: false
+
+I would also keep these as defensive intent variables:
+
+nfs_server_manage_exports: false
+nfs_server_manage_services: false
+nfs_server_manage_firewall: false
+
+But the real gate is:
+
+nfs_server_enabled: false
+
+That makes the role stop before validation, package install, export file management, service management, and firewall management.
+
+⸻
+
+Do we still need the playbook-level when?
+
+Not required after this role-level fix.
+
+This is okay:
+
+- name: Configure NFS server
+  ansible.builtin.include_role:
+    name: aerolit.deployments.nfs_server
+
+Because the role now decides whether it should do anything.
+
+You can still add a playbook-level when later as extra defense, but I would not require it for this fix. The role-level gate is the better cleanup.
+
+⸻
+
+Test it
+
+After updating the role:
+
+ansible-playbook --syntax-check /opt/aerolit/aerolit-bundle/collections-hub/ansible/ansible_controller.yml
+
+Then test the role skip directly:
+
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+ansible-playbook \
+  -i localhost, \
+  -c local \
+  -e nfs_server_enabled=false \
+  ansible_controller.yml
+
+Expected behavior: it should show the “nfs-server role disabled” debug message and should not run the export file, exportfs -rav, service, package, or firewall tasks.
+
+Then test through aerolitctl:
+
+aerolitctl deploy server --dry-run --skip-nfs
+
+Expected summary should say NFS was skipped, and there should be no “Would run exportfs”, no “Would create /etc/exports.d/…”, and no NFS service/firewall actions.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Yes. From the photos, I can give you the exact fixes for the three NFS items.
 
 1. allow_all_clients: true rendering
