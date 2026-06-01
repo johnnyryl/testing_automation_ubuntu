@@ -1,9 +1,9 @@
 """Apply saved AeroLIT server configuration.
 
 This module is the deploy side of ``aerolitctl configure server``.
-It reads saved server intent, refreshes generated Ansible variables,
-prepares repositories, applies optional interface configuration, and runs
-the existing PXE/controller Ansible playbooks.
+It reads saved server intent, prepares repositories, refreshes generated
+Ansible variables, and runs the configure_network/PXE/controller Ansible
+playbooks.
 
 Functional Ansible roles own real service changes such as PXE content,
 dnsmasq, NFS exports, and firewall rules.
@@ -38,7 +38,6 @@ from .server import (
     DEFAULT_TARGET_MOUNT_PATH,
     current_server_config,
     generated_vars_text,
-    interface_has_ip,
     interface_ipv4_addresses,
     parse_ipv4_address,
     parse_ipv4_network,
@@ -639,185 +638,6 @@ def deploy_repository_preflight(
     return repo_vars_path
 
 
-def find_nmcli_connection_for_interface(interface):
-    """Return the active NetworkManager connection name for an interface."""
-    rc, stdout, stderr = run_command(
-        ["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show", "--active"]
-    )
-    if rc != 0:
-        return None
-
-    for line in stdout.splitlines():
-        parts = line.rsplit(":", 1)
-        if len(parts) != 2:
-            continue
-        name, device = parts
-        if device == interface:
-            return name.replace("\\:", ":")
-
-    return None
-
-
-def nmcli_empty_value(value):
-    """Return True when nmcli renders a field as empty."""
-    if value is None:
-        return True
-
-    value = str(value).strip()
-    return value in ("", "--")
-
-
-def nmcli_connection_ipv4_settings(connection):
-    """Return selected IPv4 settings for a NetworkManager connection."""
-    fields = [
-        "ipv4.method",
-        "ipv4.addresses",
-        "ipv4.gateway",
-        "ipv4.dns",
-        "ipv4.ignore-auto-routes",
-        "ipv4.ignore-auto-dns",
-        "ipv4.never-default",
-    ]
-
-    rc, stdout, stderr = run_command(
-        [
-            "nmcli",
-            "-t",
-            "-f",
-            ",".join(fields),
-            "connection",
-            "show",
-            connection,
-        ]
-    )
-
-    if rc != 0:
-        return None
-
-    settings = {}
-
-    for line in stdout.splitlines():
-        if ":" not in line:
-            continue
-
-        key, value = line.split(":", 1)
-        settings[key.strip()] = value.strip()
-
-    for field in fields:
-        settings.setdefault(field, "")
-
-    return settings
-
-
-def nmcli_connection_matches_dedicated_interface(connection, planned):
-    """Return True when the NM profile already matches AeroLIT provisioning intent."""
-    settings = nmcli_connection_ipv4_settings(connection)
-
-    if settings is None:
-        return False
-
-    return (
-        settings.get("ipv4.method") == "manual"
-        and settings.get("ipv4.addresses") == planned
-        and nmcli_empty_value(settings.get("ipv4.gateway"))
-        and nmcli_empty_value(settings.get("ipv4.dns"))
-        and settings.get("ipv4.ignore-auto-routes") == "yes"
-        and settings.get("ipv4.ignore-auto-dns") == "yes"
-        and settings.get("ipv4.never-default") == "yes"
-    )
-
-
-def deploy_interface(plan, report, dry_run=False, skip=False):
-    """Apply interface IP configuration intent.
-
-    This makes the selected provisioning interface match the saved AeroLIT
-    server IP instead of appending the AeroLIT IP on top of DHCP.
-
-    Important: this treats the selected interface as a dedicated provisioning
-    interface. It sets a static IPv4 address, disables DHCP for that connection,
-    and prevents the connection from becoming the system default route.
-    """
-    if skip:
-        report.add("skipped", "Interface configuration skipped by option")
-        return
-
-    if not plan.get("configure_interface"):
-        report.add("skipped", "Interface configuration intent is disabled")
-        return
-
-    interface = plan.get("interface")
-    server_ip = plan.get("server_ip")
-    prefix = plan.get("prefix")
-    planned = "{}/{}".format(server_ip, prefix)
-
-    if not command_exists("nmcli"):
-        raise RuntimeError(
-            "nmcli is required to configure the interface persistently. "
-            "Install NetworkManager or configure {} with {} manually.".format(
-                interface,
-                planned,
-            )
-        )
-
-    connection = find_nmcli_connection_for_interface(interface)
-    if not connection:
-        raise RuntimeError(
-            "No active NetworkManager connection was found for interface {}. "
-            "Configure {} manually or create/activate a NetworkManager connection first.".format(
-                interface,
-                planned,
-            )
-        )
-
-    if (
-        interface_has_ip(interface, server_ip)
-        and nmcli_connection_matches_dedicated_interface(connection, planned)
-    ):
-        report.add(
-            "existing",
-            "{} already has dedicated provisioning IP {}".format(
-                interface,
-                planned,
-            ),
-        )
-        return
-
-    run_logged_command(
-        report,
-        [
-            "nmcli",
-            "connection",
-            "modify",
-            connection,
-            "ipv4.method",
-            "manual",
-            "ipv4.addresses",
-            planned,
-            "ipv4.gateway",
-            "",
-            "ipv4.dns",
-            "",
-            "ipv4.ignore-auto-routes",
-            "yes",
-            "ipv4.ignore-auto-dns",
-            "yes",
-            "ipv4.never-default",
-            "yes",
-        ],
-        dry_run=dry_run,
-        root=True,
-        description="Set dedicated provisioning interface IP",
-    )
-
-    run_logged_command(
-        report,
-        ["nmcli", "connection", "up", connection],
-        dry_run=dry_run,
-        root=True,
-        description="Bring NetworkManager connection up",
-    )
-
-
 def ensure_ansible_playbook(report, dry_run=False, package="ansible-core"):
     """Ensure ansible-playbook is available."""
     if command_exists("ansible-playbook"):
@@ -907,7 +727,7 @@ def install_text_file(report, path, content, dry_run=False, mode="0644"):
             pass
 
 
-def runtime_deploy_plan(plan, skip_firewall=False, skip_nfs=False):
+def runtime_deploy_plan(plan, skip_firewall=False, skip_nfs=False, skip_interface=False):
     """Return deploy-time plan with skip flags applied for generated vars."""
     runtime = dict(plan)
     runtime["firewall"] = dict(plan.get("firewall", {}) or {})
@@ -918,6 +738,9 @@ def runtime_deploy_plan(plan, skip_firewall=False, skip_nfs=False):
 
     if skip_nfs:
         runtime["nfs"]["enabled"] = False
+
+    if skip_interface:
+        runtime["configure_interface"] = False
 
     return runtime
 
@@ -989,6 +812,41 @@ def run_server_playbook(
         cwd=str(playbooks_dir),
         env=ansible_environment(playbooks_dir),
         description="Run {}".format(playbook_name),
+    )
+
+
+def deploy_network_playbook(
+    plan,
+    report,
+    bundle_path,
+    generated_vars_path,
+    dry_run=False,
+    repo_vars_path=None,
+):
+    """Run the network configuration playbook when interface management is enabled."""
+    if not plan.get("configure_interface"):
+        report.add(
+            "skipped",
+            "Network playbook skipped because interface configuration intent is disabled",
+        )
+        return
+
+    collections_hub = collections_hub_path(bundle_path)
+    playbooks_dir = Path(collections_hub) / "ansible"
+
+    ensure_ansible_playbook(report, dry_run=dry_run)
+
+    extra_vars_files = []
+    if repo_vars_path and Path(repo_vars_path).exists():
+        extra_vars_files.append(repo_vars_path)
+
+    run_server_playbook(
+        report,
+        playbooks_dir,
+        "configure_network.yml",
+        generated_vars_path,
+        dry_run=dry_run,
+        extra_vars_files=extra_vars_files,
     )
 
 
@@ -1117,6 +975,7 @@ def run_deploy_server(
         plan,
         skip_firewall=skip_firewall,
         skip_nfs=skip_nfs,
+        skip_interface=skip_interface,
     )
 
     if skip_firewall:
@@ -1129,6 +988,12 @@ def run_deploy_server(
         report.add(
             "skipped",
             "NFS role variables disabled by deploy option",
+        )
+
+    if skip_interface:
+        report.add(
+            "skipped",
+            "Network role variables disabled by deploy option",
         )
 
     repo_vars_path = deploy_repository_preflight(
@@ -1149,7 +1014,14 @@ def run_deploy_server(
         dry_run=dry_run,
     )
 
-    deploy_interface(plan, report, dry_run=dry_run, skip=skip_interface)
+    deploy_network_playbook(
+        runtime_plan,
+        report,
+        bundle_path,
+        generated_vars_path,
+        dry_run=dry_run,
+        repo_vars_path=repo_vars_path,
+    )
 
     deploy_ansible_playbooks(
         runtime_plan,
