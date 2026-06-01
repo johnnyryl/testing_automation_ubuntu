@@ -312,18 +312,49 @@ def check_disk_space(report, path, label, warn_below_gib=20):
         )
 
 
+def http_url_is_reachable(url, timeout=2.0):
+    """Return True when a local HTTP URL responds successfully."""
+    try:
+        from urllib.request import urlopen
+
+        with urlopen(url, timeout=timeout) as response:
+            return 200 <= int(response.getcode()) < 400
+    except Exception:
+        return False
+
+
 def check_port_available(report, bind_address, port):
-    """Check if a TCP port is available for binding."""
+    """Check if a TCP port is available or already serving PXE content."""
+    try:
+        port_number = int(port)
+    except (TypeError, ValueError):
+        report.add_failure("Invalid TCP port: {}".format(port))
+        return
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((bind_address, int(port)))
-        report.add_ok("TCP port available: {}:{}".format(bind_address, port))
+        sock.bind((bind_address, port_number))
+        report.add_ok("TCP port available: {}:{}".format(bind_address, port_number))
     except socket.error as exc:
-        report.add_failure(
-            "TCP port unavailable: {}:{} ({})".format(bind_address, port, exc)
-        )
+        pxe_boot_url = "http://127.0.0.1:{}/boot.ipxe".format(port_number)
+
+        if http_url_is_reachable(pxe_boot_url):
+            report.add_ok(
+                "TCP port {} is already serving PXE content: {}".format(
+                    port_number,
+                    pxe_boot_url,
+                )
+            )
+        else:
+            report.add_failure(
+                "TCP port unavailable: {}:{} ({})".format(
+                    bind_address,
+                    port_number,
+                    exc,
+                )
+            )
     finally:
         sock.close()
 
