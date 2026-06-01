@@ -1,3 +1,128 @@
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+
+echo "=== 1. Check generated pxe-content vars ==="
+grep -E '^(aerolit_bundle_root|pxe_content_bundle_root|pxe_content_iso_root|pxe_content_server_ip|pxe_content_host_port|pxe_content_container_port|pxe_content_image_source|pxe_content_image_tar_path|pxe_content_runtime_image|pxe_content_quadlet_pull_policy|pxe_content_manage_firewall|pxe_content_firewall_zone|pxe_content_firewall_ports|pxe_content_volume_mounts|pxe_content_extra_env):' \
+  group_vars/all/aerolitctl_server_generated.yml
+
+echo
+echo "=== 2. Check for hardcoded old pxe-content IP in role defaults ==="
+grep -R "pxe_content_server_ip:.*192\.168" \
+  collections/ansible_collections/aerolit/deployments/roles/pxe_content \
+  ../collections/ansible_collections/aerolit/deployments/roles/pxe_content \
+  2>/dev/null || true
+
+echo
+echo "=== 3. Check for old direct Python firewall ownership ==="
+cd /root/aerolitctl 2>/dev/null || cd ~/aerolitctl
+grep -R "firewall-cmd\|Open firewall port\|Open firewall service\|deploy_firewall" src tools || true
+
+echo
+echo "=== 4. Check configure pxe no longer has server/dnsmasq/firewall ownership options ==="
+aerolitctl configure pxe --help | grep -E "pxe-server-ip|pxe-http-port|dnsmasq|firewall" || true
+
+echo
+echo "=== 5. Check override dirs exist ==="
+ls -ld /etc/aerolit/overrides/pxe /etc/aerolit/overrides/pxe/profiles /etc/aerolit/overrides/pxe/templates
+
+echo
+echo "=== 6. Check pxe-content tar image tag ==="
+TAR=/opt/aerolit/aerolit-bundle/files/pxe/pxe-content.tar
+rm -rf /tmp/pxe-content-tar-check
+mkdir -p /tmp/pxe-content-tar-check
+tar -xf "$TAR" -C /tmp/pxe-content-tar-check manifest.json 2>/dev/null && \
+python3 - <<'PY'
+import json
+p="/tmp/pxe-content-tar-check/manifest.json"
+with open(p) as f:
+    manifest=json.load(f)
+for item in manifest:
+    print(item.get("RepoTags"))
+PY
+
+echo
+echo "=== 7. Check local and client-facing PXE content URL ==="
+SERVER_IP=$(awk '/^pxe_content_server_ip:/ {print $2}' /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml | tr -d '"')
+PORT=$(awk '/^pxe_content_host_port:/ {print $2}' /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml | tr -d '"')
+curl -I "http://127.0.0.1:${PORT}/boot.ipxe" || true
+curl -I "http://${SERVER_IP}:${PORT}/boot.ipxe" || true
+
+
+
+
+
+
+
+
+
+
+
+
+grep -R "firewall-cmd\|Open firewall port\|Open firewall service"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ss -ltnp | grep ':18080' || true
 podman ps --format 'table {{.Names}}\t{{.Ports}}\t{{.Status}}'
 curl -I http://127.0.0.1:18080/boot.ipxe || true
