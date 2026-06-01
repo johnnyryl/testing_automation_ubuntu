@@ -8,8 +8,9 @@ Default behavior should eventually be:
 - deploy server can write/use an AeroLIT server bootstrap repo automatically
 - provisioning repo variables are generated from bundle ISOs and repos by default
 
-This module provides safe discovery, validation, show, and managed group_vars
-generation. Package install/bootstrap integration comes later.
+This module provides safe discovery, validation, show, managed group_vars
+generation, server bootstrap repo generation, and server prerequisite package
+fallback helpers.
 """
 
 from __future__ import print_function
