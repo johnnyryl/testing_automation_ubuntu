@@ -1,0 +1,711 @@
+Yes — this should become its own Ansible-owned network role/playbook.
+
+Right now, your uploaded `deploy_server.py` still has the network mutation in Python: `deploy_interface()` discovers the active NetworkManager connection, checks current IPv4 settings, then runs `nmcli connection modify ...` and `nmcli connection up ...`; `run_deploy_server()` still calls `deploy_interface(...)` before running the PXE/controller playbooks.  
+
+The clean fix is:
+
+```text
+aerolitctl configure server
+  writes saved network intent
+
+aerolitctl deploy server
+  refreshes generated Ansible vars
+  runs configure_network.yml
+  runs pxe_server.yml
+  runs ansible_controller.yml
+
+configure_network role
+  makes the actual nmcli changes
+```
+
+I would name it:
+
+```text
+playbook: configure_network.yml
+role:     configure_network
+vars:     configure_network_*
+```
+
+## 1. Create the new role
+
+Create:
+
+```text
+collections-hub/collections/ansible_collections/aerolit/deployments/roles/configure_network/
+```
+
+With:
+
+```text
+defaults/main.yml
+tasks/main.yml
+tasks/validate.yml
+tasks/configure.yml
+```
+
+### `defaults/main.yml`
+
+```yaml
+# UNCLASSIFIED
+
+configure_network_enabled: false
+
+configure_network_interface: ""
+configure_network_connection_name: ""
+
+configure_network_ipv4_address: ""
+configure_network_ipv4_prefix: ""
+
+configure_network_ipv4_method: manual
+configure_network_gateway: ""
+configure_network_dns: []
+
+configure_network_ignore_auto_routes: true
+configure_network_ignore_auto_dns: true
+configure_network_never_default: true
+
+configure_network_activate: true
+```
+
+### `tasks/main.yml`
+
+```yaml
+# UNCLASSIFIED
+
+- name: Note configure_network role is disabled
+  ansible.builtin.debug:
+    msg: "configure_network role disabled; no NetworkManager changes will be made."
+  when: not (configure_network_enabled | bool)
+
+- name: Validate configure_network role inputs
+  ansible.builtin.import_tasks: validate.yml
+  when: configure_network_enabled | bool
+
+- name: Configure NetworkManager provisioning interface
+  ansible.builtin.import_tasks: configure.yml
+  when: configure_network_enabled | bool
+
+# UNCLASSIFIED
+```
+
+### `tasks/validate.yml`
+
+```yaml
+# UNCLASSIFIED
+
+- name: Validate configure_network inputs
+  ansible.builtin.assert:
+    that:
+      - configure_network_interface | length > 0
+      - configure_network_ipv4_address | length > 0
+      - configure_network_ipv4_address is match('^([0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - configure_network_ipv4_prefix | int >= 1
+      - configure_network_ipv4_prefix | int <= 32
+    fail_msg: >-
+      configure_network requires configure_network_interface,
+      configure_network_ipv4_address, and configure_network_ipv4_prefix.
+
+- name: Check nmcli is available
+  ansible.builtin.command:
+    argv:
+      - bash
+      - -lc
+      - command -v nmcli
+  register: configure_network_nmcli_check
+  changed_when: false
+  failed_when: configure_network_nmcli_check.rc != 0
+
+# UNCLASSIFIED
+```
+
+### `tasks/configure.yml`
+
+```yaml
+# UNCLASSIFIED
+
+- name: Build planned provisioning address
+  ansible.builtin.set_fact:
+    configure_network_planned_address: "{{ configure_network_ipv4_address }}/{{ configure_network_ipv4_prefix }}"
+
+- name: List active NetworkManager connections
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - -t
+      - -f
+      - NAME,DEVICE
+      - connection
+      - show
+      - --active
+  register: configure_network_active_connections
+  changed_when: false
+
+- name: Discover NetworkManager connection for interface
+  ansible.builtin.set_fact:
+    configure_network_discovered_connection: >-
+      {{
+        (
+          configure_network_active_connections.stdout_lines
+          | select('search', ':' ~ configure_network_interface ~ '$')
+          | list
+          | first
+          | default('')
+        )
+        | regex_replace(':' ~ configure_network_interface ~ '$', '')
+        | replace('\\:', ':')
+      }}
+  when: configure_network_connection_name | length == 0
+
+- name: Select effective NetworkManager connection
+  ansible.builtin.set_fact:
+    configure_network_effective_connection: >-
+      {{
+        configure_network_connection_name
+        if (configure_network_connection_name | length > 0)
+        else configure_network_discovered_connection
+      }}
+
+- name: Validate active NetworkManager connection was found
+  ansible.builtin.assert:
+    that:
+      - configure_network_effective_connection | length > 0
+    fail_msg: >-
+      No active NetworkManager connection was found for interface
+      {{ configure_network_interface }}. Configure it manually or create/activate
+      a NetworkManager connection first.
+
+- name: Read current NetworkManager IPv4 settings
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - -t
+      - -f
+      - ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns,ipv4.ignore-auto-routes,ipv4.ignore-auto-dns,ipv4.never-default
+      - connection
+      - show
+      - "{{ configure_network_effective_connection }}"
+  register: configure_network_current_raw
+  changed_when: false
+
+- name: Build current NetworkManager settings map
+  ansible.builtin.set_fact:
+    configure_network_current_settings: "{{ configure_network_current_settings | default({}) | combine({ item.split(':', 1)[0]: item.split(':', 1)[1] | default('') }) }}"
+  loop: "{{ configure_network_current_raw.stdout_lines | default([]) }}"
+  loop_control:
+    label: "{{ item.split(':', 1)[0] | default(item) }}"
+
+- name: Decide whether NetworkManager connection needs update
+  ansible.builtin.set_fact:
+    configure_network_needs_update: >-
+      {{
+        configure_network_current_settings.get('ipv4.method', '') != configure_network_ipv4_method
+        or configure_network_current_settings.get('ipv4.addresses', '') != configure_network_planned_address
+        or configure_network_current_settings.get('ipv4.gateway', '') not in ['', '--']
+        or configure_network_current_settings.get('ipv4.dns', '') not in ['', '--']
+        or configure_network_current_settings.get('ipv4.ignore-auto-routes', '') != ('yes' if configure_network_ignore_auto_routes | bool else 'no')
+        or configure_network_current_settings.get('ipv4.ignore-auto-dns', '') != ('yes' if configure_network_ignore_auto_dns | bool else 'no')
+        or configure_network_current_settings.get('ipv4.never-default', '') != ('yes' if configure_network_never_default | bool else 'no')
+      }}
+
+- name: Configure dedicated provisioning interface
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - modify
+      - "{{ configure_network_effective_connection }}"
+      - ipv4.method
+      - "{{ configure_network_ipv4_method }}"
+      - ipv4.addresses
+      - "{{ configure_network_planned_address }}"
+      - ipv4.gateway
+      - "{{ configure_network_gateway }}"
+      - ipv4.dns
+      - "{{ configure_network_dns | join(',') }}"
+      - ipv4.ignore-auto-routes
+      - "{{ 'yes' if configure_network_ignore_auto_routes | bool else 'no' }}"
+      - ipv4.ignore-auto-dns
+      - "{{ 'yes' if configure_network_ignore_auto_dns | bool else 'no' }}"
+      - ipv4.never-default
+      - "{{ 'yes' if configure_network_never_default | bool else 'no' }}"
+  register: configure_network_modify_result
+  changed_when: true
+  when: configure_network_needs_update | bool
+
+- name: Bring NetworkManager connection up
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - up
+      - "{{ configure_network_effective_connection }}"
+  changed_when: true
+  when:
+    - configure_network_activate | bool
+    - configure_network_needs_update | bool
+
+# UNCLASSIFIED
+```
+
+That role brings over the current Python behavior: find the active NM connection, make it static/manual, set `server_ip/prefix`, clear gateway/DNS, ignore auto routes/DNS, set `never-default`, and bring the connection up.
+
+## 2. Create the playbook
+
+Create:
+
+```text
+collections-hub/ansible/configure_network.yml
+```
+
+```yaml
+---
+# UNCLASSIFIED
+
+- name: Configure AeroLIT provisioning network
+  hosts: localhost
+  gather_facts: false
+  become: true
+
+  roles:
+    - role: aerolit.deployments.configure_network
+
+# UNCLASSIFIED
+```
+
+Also make sure `configure_network.yml` is preserved by `.sync-preserve` like the other generated/managed playbooks.
+
+## 3. Add generated vars in `server.py`
+
+Wherever `generated_vars_text(plan)` builds `aerolitctl_server_generated.yml`, add this block:
+
+```yaml
+configure_network_enabled: {{ plan.get("configure_interface") | bool }}
+configure_network_interface: "{{ plan.get("interface") or "" }}"
+configure_network_connection_name: ""
+configure_network_ipv4_address: "{{ plan.get("server_ip") or "" }}"
+configure_network_ipv4_prefix: {{ plan.get("prefix") or 24 }}
+configure_network_ipv4_method: manual
+configure_network_gateway: ""
+configure_network_dns: []
+configure_network_ignore_auto_routes: true
+configure_network_ignore_auto_dns: true
+configure_network_never_default: true
+configure_network_activate: true
+```
+
+That is the translation layer. `aerolitctl` can keep using its existing `configure_interface`, `interface`, `server_ip`, and `prefix` fields. The generated vars convert those into what the role understands.
+
+## 4. Update `deploy_server.py`
+
+### Change `runtime_deploy_plan()`
+
+Update the function signature:
+
+```python
+def runtime_deploy_plan(plan, skip_firewall=False, skip_nfs=False, skip_interface=False):
+```
+
+Inside it, add:
+
+```python
+    if skip_interface:
+        runtime["configure_interface"] = False
+```
+
+So the full function becomes:
+
+```python
+def runtime_deploy_plan(plan, skip_firewall=False, skip_nfs=False, skip_interface=False):
+    """Return deploy-time plan with skip flags applied for generated vars."""
+    runtime = dict(plan)
+    runtime["firewall"] = dict(plan.get("firewall", {}) or {})
+    runtime["nfs"] = dict(plan.get("nfs", {}) or {})
+
+    if skip_firewall:
+        runtime["firewall"]["manage"] = False
+
+    if skip_nfs:
+        runtime["nfs"]["enabled"] = False
+
+    if skip_interface:
+        runtime["configure_interface"] = False
+
+    return runtime
+```
+
+### Add a network playbook runner
+
+Add this before `deploy_ansible_playbooks()`:
+
+```python
+def deploy_network_playbook(
+    plan,
+    report,
+    bundle_path,
+    generated_vars_path,
+    dry_run=False,
+    repo_vars_path=None,
+):
+    """Run the network configuration playbook when interface management is enabled."""
+    if not plan.get("configure_interface"):
+        report.add("skipped", "Network playbook skipped because interface configuration intent is disabled")
+        return
+
+    collections_hub = collections_hub_path(bundle_path)
+    playbooks_dir = Path(collections_hub) / "ansible"
+
+    ensure_ansible_playbook(report, dry_run=dry_run)
+
+    run_server_playbook(
+        report,
+        playbooks_dir,
+        "configure_network.yml",
+        generated_vars_path,
+        dry_run=dry_run,
+        extra_vars_files=[repo_vars_path] if repo_vars_path else [],
+    )
+```
+
+### Update the `runtime_plan` call
+
+Replace:
+
+```python
+    runtime_plan = runtime_deploy_plan(
+        plan,
+        skip_firewall=skip_firewall,
+        skip_nfs=skip_nfs,
+    )
+```
+
+With:
+
+```python
+    runtime_plan = runtime_deploy_plan(
+        plan,
+        skip_firewall=skip_firewall,
+        skip_nfs=skip_nfs,
+        skip_interface=skip_interface,
+    )
+```
+
+### Add a skip message
+
+After the existing `skip_nfs` block, add:
+
+```python
+    if skip_interface:
+        report.add(
+            "skipped",
+            "Network role variables disabled by deploy option",
+        )
+```
+
+### Replace the direct Python interface call
+
+Remove this:
+
+```python
+    deploy_interface(plan, report, dry_run=dry_run, skip=skip_interface)
+```
+
+Add this in its place, before `deploy_ansible_playbooks(...)`:
+
+```python
+    deploy_network_playbook(
+        runtime_plan,
+        report,
+        bundle_path,
+        generated_vars_path,
+        dry_run=dry_run,
+        repo_vars_path=repo_vars_path,
+    )
+```
+
+So the order becomes:
+
+```python
+    deploy_repository_preflight(...)
+    refresh_server_generated_vars(...)
+    deploy_network_playbook(...)
+    deploy_ansible_playbooks(...)
+```
+
+## 5. After that works, remove stale Python network mutating code
+
+Once the role/playbook is tested, remove these from `deploy_server.py`:
+
+```python
+find_nmcli_connection_for_interface()
+nmcli_empty_value()
+nmcli_connection_ipv4_settings()
+nmcli_connection_matches_dedicated_interface()
+deploy_interface()
+```
+
+Also remove the now-unused import:
+
+```python
+interface_has_ip
+```
+
+Keep:
+
+```python
+interface_ipv4_addresses
+```
+
+because `print_deploy_plan()` still uses it for display/read-only output.
+
+## 6. Test it
+
+Run these:
+
+```bash
+python3 -m py_compile src/aerolitctl/deploy_server.py src/aerolitctl/server.py
+```
+
+Then from:
+
+```bash
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+```
+
+Run:
+
+```bash
+ansible-playbook -i localhost, -c local --syntax-check configure_network.yml
+```
+
+Then:
+
+```bash
+aerolitctl deploy server --dry-run
+```
+
+You should see a dry-run action for `configure_network.yml`, not `Would run nmcli`.
+
+Then:
+
+```bash
+aerolitctl deploy server --skip-interface --dry-run
+```
+
+You should see:
+
+```text
+Network role variables disabled by deploy option
+Network playbook skipped because interface configuration intent is disabled
+```
+
+Then confirm Python no longer owns `nmcli`:
+
+```bash
+grep -RInE 'nmcli|connection modify|connection up' src/aerolitctl
+```
+
+After the cleanup, that should return nothing from `src/aerolitctl`.
+
+The end state is exactly the model you want: Python decides and writes intent; Ansible applies the network state.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+I would make **two small changes first** before creating it. The role design is good, but I would not create the exact pasted version yet. The draft you pasted is close: it has the right files and it moves the `nmcli` behavior into Ansible like we want. 
+
+The two fixes I would make first are:
+
+1. **Initialize the current settings fact before building the settings map.**
+   Without this, Ansible can reuse stale fact data in weird rerun cases.
+
+2. **Make the role safer in check mode.**
+   Not required for `aerolitctl --dry-run`, but good role behavior.
+
+## Use this updated `tasks/configure.yml`
+
+Replace the previous `tasks/configure.yml` with this version:
+
+```yaml
+# UNCLASSIFIED
+
+- name: Build planned provisioning address
+  ansible.builtin.set_fact:
+    configure_network_planned_address: "{{ configure_network_ipv4_address }}/{{ configure_network_ipv4_prefix }}"
+
+- name: List active NetworkManager connections
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - -t
+      - -f
+      - NAME,DEVICE
+      - connection
+      - show
+      - --active
+  register: configure_network_active_connections
+  changed_when: false
+  check_mode: false
+
+- name: Discover NetworkManager connection for interface
+  ansible.builtin.set_fact:
+    configure_network_discovered_connection: >-
+      {{
+        (
+          configure_network_active_connections.stdout_lines
+          | select('search', ':' ~ configure_network_interface ~ '$')
+          | list
+          | first
+          | default('')
+        )
+        | regex_replace(':' ~ configure_network_interface ~ '$', '')
+        | replace('\\:', ':')
+      }}
+  when: configure_network_connection_name | length == 0
+
+- name: Select effective NetworkManager connection
+  ansible.builtin.set_fact:
+    configure_network_effective_connection: >-
+      {{
+        configure_network_connection_name
+        if (configure_network_connection_name | length > 0)
+        else configure_network_discovered_connection
+      }}
+
+- name: Validate active NetworkManager connection was found
+  ansible.builtin.assert:
+    that:
+      - configure_network_effective_connection | length > 0
+    fail_msg: >-
+      No active NetworkManager connection was found for interface
+      {{ configure_network_interface }}. Configure it manually or create/activate
+      a NetworkManager connection first.
+
+- name: Read current NetworkManager IPv4 settings
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - -t
+      - -f
+      - ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns,ipv4.ignore-auto-routes,ipv4.ignore-auto-dns,ipv4.never-default
+      - connection
+      - show
+      - "{{ configure_network_effective_connection }}"
+  register: configure_network_current_raw
+  changed_when: false
+  check_mode: false
+
+- name: Initialize current NetworkManager settings map
+  ansible.builtin.set_fact:
+    configure_network_current_settings: {}
+
+- name: Build current NetworkManager settings map
+  ansible.builtin.set_fact:
+    configure_network_current_settings: >-
+      {{
+        configure_network_current_settings
+        | combine({
+            item.split(':', 1)[0]: item.split(':', 1)[1] | default('')
+          })
+      }}
+  loop: "{{ configure_network_current_raw.stdout_lines | default([]) }}"
+  loop_control:
+    label: "{{ item.split(':', 1)[0] | default(item) }}"
+  when: "':' in item"
+
+- name: Decide whether NetworkManager connection needs update
+  ansible.builtin.set_fact:
+    configure_network_needs_update: >-
+      {{
+        configure_network_current_settings.get('ipv4.method', '') != configure_network_ipv4_method
+        or configure_network_current_settings.get('ipv4.addresses', '') != configure_network_planned_address
+        or configure_network_current_settings.get('ipv4.gateway', '') not in ['', '--']
+        or configure_network_current_settings.get('ipv4.dns', '') not in ['', '--']
+        or configure_network_current_settings.get('ipv4.ignore-auto-routes', '') != ('yes' if configure_network_ignore_auto_routes | bool else 'no')
+        or configure_network_current_settings.get('ipv4.ignore-auto-dns', '') != ('yes' if configure_network_ignore_auto_dns | bool else 'no')
+        or configure_network_current_settings.get('ipv4.never-default', '') != ('yes' if configure_network_never_default | bool else 'no')
+      }}
+
+- name: Check-mode note for dedicated provisioning interface update
+  ansible.builtin.debug:
+    msg: >-
+      Would configure {{ configure_network_effective_connection }} on
+      {{ configure_network_interface }} as {{ configure_network_planned_address }}.
+  changed_when: true
+  when:
+    - ansible_check_mode
+    - configure_network_needs_update | bool
+
+- name: Configure dedicated provisioning interface
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - modify
+      - "{{ configure_network_effective_connection }}"
+      - ipv4.method
+      - "{{ configure_network_ipv4_method }}"
+      - ipv4.addresses
+      - "{{ configure_network_planned_address }}"
+      - ipv4.gateway
+      - "{{ configure_network_gateway }}"
+      - ipv4.dns
+      - "{{ configure_network_dns | join(',') }}"
+      - ipv4.ignore-auto-routes
+      - "{{ 'yes' if configure_network_ignore_auto_routes | bool else 'no' }}"
+      - ipv4.ignore-auto-dns
+      - "{{ 'yes' if configure_network_ignore_auto_dns | bool else 'no' }}"
+      - ipv4.never-default
+      - "{{ 'yes' if configure_network_never_default | bool else 'no' }}"
+  register: configure_network_modify_result
+  changed_when: true
+  when:
+    - configure_network_needs_update | bool
+    - not ansible_check_mode
+
+- name: Bring NetworkManager connection up
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - up
+      - "{{ configure_network_effective_connection }}"
+  changed_when: true
+  when:
+    - configure_network_activate | bool
+    - configure_network_needs_update | bool
+    - not ansible_check_mode
+
+# UNCLASSIFIED
+```
+
+Everything else from the draft is okay to create as-is:
+
+```text
+defaults/main.yml
+tasks/main.yml
+tasks/validate.yml
+```
+
+One important note: this role is intentionally for a **dedicated provisioning interface**. It will not just “add another IP” like the earliest Python version did. It will make the selected connection manual/static, clear gateway/DNS, ignore auto routes/DNS, and set `never-default`. That matches your newer `deploy_server.py` behavior and is safer for an isolated PXE/provisioning NIC.
+
+So yes, create the role — but use the updated `tasks/configure.yml` above instead of the first draft.
+
+
+
+
+
+
+
