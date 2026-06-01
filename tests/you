@@ -1,3 +1,296 @@
+Yes. From the photos, I can give you the exact fixes for the three NFS items.
+
+1. allow_all_clients: true rendering
+
+Your template photo shows the role already has the right idea. It is using export.allow_all_clients to decide whether to render *.
+
+I would still rewrite the template slightly cleaner so it is easier to read and less fragile.
+
+File:
+
+nfs-server/templates/nfs_server.exports.j2
+
+Replace the whole file with:
+
+# Managed by Ansible role: nfs_server
+{% for export in nfs_server_exports %}
+{{ export.path }} {{ '*' if (export.allow_all_clients | default(false) | bool) else export.clients }}({{ export.options | join(',') }})
+{% endfor %}
+
+That means this:
+
+clients: ""
+allow_all_clients: true
+
+renders as:
+
+/opt/aerolit/aerolit-bundle *(rw,sync,no_subtree_check)
+
+So yes, the role should receive:
+
+clients: ""
+allow_all_clients: true
+
+Not:
+
+clients: "*"
+
+The role template should be responsible for turning allow_all_clients: true into *.
+
+⸻
+
+2. Add stale exports-file cleanup to the role
+
+This fixes your duplicate export problem:
+
+/etc/exports.d/aerolit-bundle.exports
+/etc/exports.d/nfs-server.exports
+
+The role should remove old AeroLIT-managed files before running exportfs -rav.
+
+Add this to defaults
+
+File:
+
+nfs-server/defaults/main.yml
+
+Add this near the managed exports file section:
+
+nfs_server_cleanup_exports_files:
+  - /etc/exports.d/aerolit-bundle.exports
+  - /etc/exports.d/nfs-server.exports
+
+Add this to configure tasks
+
+File:
+
+nfs-server/tasks/configure.yml
+
+Add this block before the existing task named:
+
+- name: Manage exports file
+
+Add:
+
+- name: Build stale NFS exports cleanup list
+  ansible.builtin.set_fact:
+    nfs_server_stale_exports_files: >-
+      {{
+        (nfs_server_cleanup_exports_files | default([]))
+        | difference([nfs_server_exports_file])
+      }}
+  when: nfs_server_manage_exports | bool
+- name: Stat stale AeroLIT NFS exports files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ nfs_server_stale_exports_files | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  register: nfs_server_stale_exports_file_stats
+  when: nfs_server_manage_exports | bool
+- name: Read stale AeroLIT NFS exports files
+  ansible.builtin.slurp:
+    src: "{{ item.stat.path }}"
+  loop: "{{ nfs_server_stale_exports_file_stats.results | default([]) }}"
+  loop_control:
+    label: "{{ item.stat.path }}"
+  register: nfs_server_stale_exports_file_contents
+  when:
+    - nfs_server_manage_exports | bool
+    - item.stat.exists | default(false)
+    - item.stat.isreg | default(false)
+- name: Remove stale AeroLIT-managed NFS exports files
+  ansible.builtin.file:
+    path: "{{ item.source }}"
+    state: absent
+  loop: "{{ nfs_server_stale_exports_file_contents.results | default([]) }}"
+  loop_control:
+    label: "{{ item.source }}"
+  when:
+    - nfs_server_manage_exports | bool
+    - item.content is defined
+    - >-
+      ('Managed by AeroLIT deploy server' in (item.content | b64decode))
+      or
+      ('Managed by Ansible role: nfs_server' in (item.content | b64decode))
+  notify: Refresh nfs exports
+
+This is safe because it only removes files that contain one of the AeroLIT-managed markers. It will not delete a random user-managed NFS exports file.
+
+⸻
+
+3. Make --skip-nfs actually skip the NFS role
+
+Yes, the fix is to make ansible_controller.yml honor aerolit_nfs_enabled.
+
+If your playbook uses include_role, use this:
+
+- name: Configure NFS server
+  ansible.builtin.include_role:
+    name: aerolit.deployments.nfs_server
+  when: aerolit_nfs_enabled | default(true) | bool
+
+If your playbook uses a roles: section, use this instead:
+
+roles:
+  - role: aerolit.deployments.nfs_server
+    when: aerolit_nfs_enabled | default(true) | bool
+
+That gives you the behavior you want:
+
+aerolitctl deploy server --skip-nfs
+
+should still refresh generated vars, but it should cause the controller playbook to skip the NFS role entirely.
+
+⸻
+
+Do not change these
+
+From your photos, these are fine:
+
+nfs-server/handlers/main.yml
+nfs-server/tasks/install.yml
+nfs-server/tasks/main.yml
+
+The handler running:
+
+exportfs -rav
+
+is correct. The bug was not the handler itself. The bug was that duplicate managed exports files existed, so exportfs -rav correctly complained.
+
+⸻
+
+After making these changes, test this
+
+First syntax:
+
+python3 -m compileall src tools
+ansible-playbook --syntax-check /opt/aerolit/aerolit-bundle/collections-hub/ansible/ansible_controller.yml
+ansible-playbook --syntax-check /opt/aerolit/aerolit-bundle/collections-hub/ansible/pxe_server.yml
+
+Then test cleanup:
+
+cat /etc/exports.d/nfs-server.exports
+cat /etc/exports.d/aerolit-bundle.exports
+
+You should temporarily have both, then run:
+
+aerolitctl deploy server --server-bootstrap-only
+
+After the role runs, you should only have the current managed file:
+
+ls -l /etc/exports.d/
+cat /etc/exports.d/aerolit-bundle.exports
+exportfs -rav
+
+Expected result:
+
+exporting 192.168.109.0/24:/opt/aerolit/aerolit-bundle
+
+No duplicate export error.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ip -4 addr show dev ens160
 
 echo
