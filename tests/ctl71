@@ -377,7 +377,7 @@ def parse_dns_servers(value):
 def parse_clients(value, allow_all_clients=False):
     """Parse NFS allowed clients value."""
     if allow_all_clients:
-        return "*"
+        return ""
 
     if not value:
         raise ValueError(
@@ -1412,7 +1412,7 @@ def choose_nfs_settings(config, bundle_path, server_ip, network):
         print("but it is too broad for long-term use.")
 
         if yes_no_prompt("Use allow-all clients anyway?", default=False):
-            allowed_clients = "*"
+            allowed_clients = ""
             allow_all_clients = True
         else:
             allowed_clients = str(network)
@@ -1664,6 +1664,82 @@ def update_config_with_plan(config, plan):
 
 def validate_generated_vars_contract(plan, data):
     """Validate generated vars required by downstream AeroLIT roles."""
+    nfs = plan.get("nfs", {}) or {}
+    expected_nfs_enabled = bool(
+        plan.get("controller_enabled", False)
+        and nfs.get("enabled", False)
+    )
+
+    for key in ("nfs_server_manage_exports", "nfs_server_manage_services"):
+        actual_value = bool(data.get(key, False))
+        if actual_value != expected_nfs_enabled:
+            raise ValueError(
+                "Generated vars contract error: {} should be {}, got {}".format(
+                    key,
+                    expected_nfs_enabled,
+                    actual_value,
+                )
+            )
+
+    expected_nfs_firewall = nfs_server_manage_firewall_for_plan(plan)
+    actual_nfs_firewall = bool(data.get("nfs_server_manage_firewall", False))
+
+    if actual_nfs_firewall != expected_nfs_firewall:
+        raise ValueError(
+            "Generated vars contract error: nfs_server_manage_firewall should be {}, got {}".format(
+                expected_nfs_firewall,
+                actual_nfs_firewall,
+            )
+        )
+
+    if expected_nfs_enabled:
+        expected_exports_file = nfs.get("exports_file") or DEFAULT_NFS_EXPORTS_FILE
+        actual_exports_file = str(data.get("nfs_server_exports_file") or "").strip()
+
+        if actual_exports_file != expected_exports_file:
+            raise ValueError(
+                "Generated vars contract error: nfs_server_exports_file should be {}, got {}".format(
+                    expected_exports_file,
+                    actual_exports_file or "missing",
+                )
+            )
+
+        exports = data.get("nfs_server_exports", [])
+        if not isinstance(exports, list) or len(exports) != 1:
+            raise ValueError(
+                "Generated vars contract error: nfs_server_exports should contain exactly one export, got {}".format(
+                    exports,
+                )
+            )
+
+        export = exports[0]
+        allow_all_clients = bool(export.get("allow_all_clients", False))
+        clients = str(export.get("clients") or "").strip()
+
+        if str(export.get("path") or "").strip() != str(nfs.get("export_path") or "").strip():
+            raise ValueError(
+                "Generated vars contract error: nfs_server_exports[0].path should be {}, got {}".format(
+                    nfs.get("export_path"),
+                    export.get("path", "missing"),
+                )
+            )
+
+        if allow_all_clients and clients:
+            raise ValueError(
+                "Generated vars contract error: nfs_server_exports[0] cannot set both allow_all_clients=true and clients"
+            )
+
+        if not allow_all_clients and not clients:
+            raise ValueError(
+                "Generated vars contract error: nfs_server_exports[0] must set clients unless allow_all_clients=true"
+            )
+
+    else:
+        if data.get("nfs_server_exports", []) != []:
+            raise ValueError(
+                "Generated vars contract error: nfs_server_exports should be [] when NFS is disabled"
+            )
+
     if not plan.get("pxe_enabled", False):
         return
 
@@ -2111,13 +2187,15 @@ def build_generated_vars(plan):
             }
         ]
 
+        allow_all_clients = bool(nfs.get("allow_all_clients", False))
+        export_clients = "" if allow_all_clients else str(nfs.get("allowed_clients") or "")
+
         data["nfs_server_exports"] = [
             {
                 "path": export_path,
-                "clients": nfs.get("allowed_clients"),
-                "allow_all_clients": bool(nfs.get("allow_all_clients", False)),
+                "clients": export_clients,
+                "allow_all_clients": allow_all_clients,
                 "create_path": bool(nfs.get("create_export_path", False)),
-                "exports_file": nfs.get("exports_file") or DEFAULT_NFS_EXPORTS_FILE,
                 "options": [
                     "rw",
                     "sync",
