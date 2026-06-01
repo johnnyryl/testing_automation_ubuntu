@@ -1,3 +1,303 @@
+Do not undo everything. Keep most of what you just added. Based on the latest photos, you are close.
+
+What I would do now is:
+
+1. Keep nfs_server_enabled in defaults/main.yml.
+2. Keep the when: nfs_server_enabled | bool guards in tasks/main.yml.
+3. Keep the template behavior where allow_all_clients: true renders *.
+4. Replace only the stale cleanup block you added in tasks/configure.yml with a stronger version.
+
+The weak part in your current cleanup is that it only checks the hard-coded list:
+
+nfs_server_cleanup_exports_files:
+  - /etc/exports.d/aerolit-bundle.exports
+  - /etc/exports.d/nfs-server.exports
+
+That fixes your current two-file conflict, but it does not catch a user-renamed old exports file unless the filename is listed. So replace that block with a scan of /etc/exports.d plus the static list.
+
+1. Keep this in defaults/main.yml
+
+Your nfs_server_enabled part looks good:
+
+nfs_server_enabled: "{{ aerolit_nfs_enabled | default(true) | bool }}"
+
+Keep your existing role toggles:
+
+nfs_server_manage_exports: true
+nfs_server_manage_services: true
+nfs_server_manage_firewall: true
+nfs_server_backup: true
+
+Then update the cleanup section to this:
+
+nfs_server_cleanup_managed_exports: true
+nfs_server_backup_stale_exports: true
+nfs_server_stale_exports_backup_dir: /var/backups/aerolit/nfs-exports
+nfs_server_cleanup_exports_dirs:
+  - /etc/exports.d
+nfs_server_cleanup_exports_files:
+  - /etc/exports.d/aerolit-bundle.exports
+  - /etc/exports.d/nfs-server.exports
+nfs_server_managed_markers:
+  - "Managed by AeroLIT deploy server"
+  - "Managed by Ansible role: nfs_server"
+
+2. Keep this in tasks/main.yml
+
+Your latest tasks/main.yml direction is good. It should look like this:
+
+- name: Note nfs-server role is disabled
+  ansible.builtin.debug:
+    msg: "nfs-server role disabled; no NFS packages, exports, services, or firewall changes will be managed."
+  when: not (nfs_server_enabled | bool)
+- name: Validate nfs-server role inputs
+  ansible.builtin.import_tasks: validate.yml
+  when: nfs_server_enabled | bool
+- name: Install nfs server packages
+  ansible.builtin.import_tasks: install.yml
+  when: nfs_server_enabled | bool
+- name: Configure nfs server
+  ansible.builtin.import_tasks: configure.yml
+  when: nfs_server_enabled | bool
+
+That means when aerolitctl deploy server --skip-nfs passes aerolit_nfs_enabled: false, the entire role stops before it installs packages, writes exports files, starts services, or touches firewall.
+
+3. Replace your current cleanup block in tasks/configure.yml
+
+In your screenshot, delete the block starting here:
+
+- name: Build stale NFS exports cleanup list
+
+through this task:
+
+- name: Remove stale AeroLIT-managed NFS exports files
+
+Replace that whole block with this:
+
+- name: Build NFS exports cleanup directory list
+  ansible.builtin.set_fact:
+    nfs_server_effective_cleanup_exports_dirs: >-
+      {{
+        (
+          nfs_server_cleanup_exports_dirs | default([])
+        )
+        +
+        [
+          nfs_server_exports_file | dirname
+        ]
+        | unique
+      }}
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+- name: Find NFS exports files in cleanup directories
+  ansible.builtin.find:
+    paths: "{{ item }}"
+    file_type: file
+    recurse: false
+  loop: "{{ nfs_server_effective_cleanup_exports_dirs | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  register: nfs_server_cleanup_exports_dir_find
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+- name: Build NFS exports cleanup candidate list
+  ansible.builtin.set_fact:
+    nfs_server_cleanup_candidate_files: >-
+      {{
+        (
+          (nfs_server_cleanup_exports_files | default([]))
+          +
+          (
+            nfs_server_cleanup_exports_dir_find.results
+            | default([])
+            | map(attribute='files')
+            | flatten
+            | map(attribute='path')
+            | list
+          )
+        )
+        | unique
+        | difference([nfs_server_exports_file])
+      }}
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+- name: Stat stale NFS exports cleanup candidates
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ nfs_server_cleanup_candidate_files | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  register: nfs_server_stale_exports_file_stats
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+- name: Read stale NFS exports cleanup candidates
+  ansible.builtin.slurp:
+    src: "{{ item.stat.path }}"
+  loop: "{{ nfs_server_stale_exports_file_stats.results | default([]) }}"
+  loop_control:
+    label: "{{ item.stat.path }}"
+  register: nfs_server_stale_exports_file_contents
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+    - item.stat.exists | default(false)
+    - item.stat.isreg | default(false)
+- name: Build stale managed NFS exports file list
+  ansible.builtin.set_fact:
+    nfs_server_stale_managed_exports_files: >-
+      {{
+        (nfs_server_stale_managed_exports_files | default([]))
+        +
+        [item.source]
+      }}
+  loop: "{{ nfs_server_stale_exports_file_contents.results | default([]) }}"
+  loop_control:
+    label: "{{ item.source }}"
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+    - item.content is defined
+    - >-
+      (
+        item.content | b64decode | regex_search(
+          nfs_server_managed_markers | map('regex_escape') | join('|')
+        )
+      ) is not none
+- name: Ensure stale NFS exports backup directory exists
+  ansible.builtin.file:
+    path: "{{ nfs_server_stale_exports_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+    - nfs_server_backup_stale_exports | bool
+    - nfs_server_stale_managed_exports_files | default([]) | length > 0
+- name: Back up stale AeroLIT-managed NFS exports files
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ nfs_server_stale_exports_backup_dir }}/{{ item | basename }}.{{ ansible_date_time.iso8601_basic_short }}.bak"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0640"
+  loop: "{{ nfs_server_stale_managed_exports_files | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+    - nfs_server_backup_stale_exports | bool
+- name: Remove stale AeroLIT-managed NFS exports files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ nfs_server_stale_managed_exports_files | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+  notify: Refresh nfs exports
+
+Then leave your existing Manage exports file task right after it.
+
+4. Keep your template as-is, assuming it looks like this
+
+Your screenshot looks correct. The template should render * from allow_all_clients: true:
+
+# Managed by Ansible role: nfs_server
+{% for export in nfs_server_exports %}
+{{ export.path }} {{ '*' if (export.allow_all_clients | default(false) | bool) else export.clients }}({{ export.options | join(',') }})
+{% endfor %}
+
+So yes, this generated input:
+
+clients: ""
+allow_all_clients: true
+
+should render:
+
+/opt/aerolit/aerolit-bundle *(rw,sync,no_subtree_check)
+
+5. Do not change the handler right now
+
+Your handler is okay for this MR:
+
+- name: Refresh nfs exports
+  command: exportfs -rav
+  changed_when: false
+
+You can later clean it up to use ansible.builtin.command, but that is not the issue right now.
+
+Bottom line
+
+Do not start over.
+
+Keep:
+
+defaults/main.yml nfs_server_enabled
+tasks/main.yml role-level enable/disable guards
+template allow_all_clients -> *
+validate.yml
+install.yml
+handler
+
+Replace only:
+
+tasks/configure.yml stale cleanup block
+
+with the stronger scan + marker + backup block above. That gives you the clean behavior you want: Ansible owns NFS, old AeroLIT-managed export files get cleaned safely, and user-managed export files are not touched.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Yes — we can fix #3 inside the role, and honestly that is cleaner.
 
 That way any playbook that calls nfs_server gets the same skip behavior, instead of relying on every playbook to remember:
