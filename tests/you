@@ -1,3 +1,28 @@
+ip -4 addr show dev ens160
+
+echo
+echo "Current active ens160 IP:"
+ip -4 -o addr show dev ens160 | awk '{split($4,a,"/"); print a[1]}'
+
+echo
+echo "Is planned PXE IP assigned?"
+ip -4 addr show dev ens160 | grep '192.168.109.10' || echo "192.168.109.10 is not assigned yet"
+
+echo
+echo "Try current active IP instead of planned PXE IP:"
+CURRENT_IP=$(ip -4 -o addr show dev ens160 | awk '{split($4,a,"/"); print a[1]; exit}')
+curl -I "http://${CURRENT_IP}:18080/boot.ipxe" || true
+
+
+
+
+
+
+
+
+
+
+
 cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
 
 echo "=== 1. Check generated pxe-content vars ==="
