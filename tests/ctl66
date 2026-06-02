@@ -523,6 +523,54 @@ def record_repo_write_result(report, result, repo_vars_path):
         )
 
 
+def deploy_server_prerequisite_packages(
+    plan,
+    skip_pxe=False,
+    skip_nfs=False,
+    skip_controller=False,
+    skip_firewall=False,
+):
+    """Return deploy-time server prerequisite packages based on enabled components."""
+    packages = ["ansible-core"]
+
+    pxe_enabled = bool(plan.get("pxe_enabled")) and not skip_pxe
+
+    nfs = plan.get("nfs", {}) or {}
+    nfs_enabled = (
+        bool(plan.get("controller_enabled"))
+        and bool(nfs.get("enabled"))
+        and not skip_nfs
+        and not skip_controller
+    )
+
+    firewall_enabled = (
+        bool((plan.get("firewall", {}) or {}).get("manage", True))
+        and not skip_firewall
+        and (pxe_enabled or nfs_enabled)
+    )
+
+    if pxe_enabled:
+        packages.extend(["podman", "dnsmasq"])
+
+    if nfs_enabled:
+        packages.append("nfs-utils")
+
+    if firewall_enabled:
+        packages.append("firewalld")
+
+    result = []
+    seen = set()
+
+    for package in packages:
+        if package in seen:
+            continue
+
+        seen.add(package)
+        result.append(package)
+
+    return result
+
+
 def deploy_repository_preflight(
     plan,
     report,
@@ -532,6 +580,10 @@ def deploy_repository_preflight(
     skip_server_prereqs=False,
     skip_repo_vars_refresh=False,
     server_bootstrap_only=False,
+    skip_pxe=False,
+    skip_nfs=False,
+    skip_controller=False,
+    skip_firewall=False,
 ):
     """Prepare repos before applying server deployment.
 
@@ -591,16 +643,23 @@ def deploy_repository_preflight(
     if skip_server_prereqs:
         report.add("skipped", "Server prerequisite package handling skipped by option")
     else:
+        server_prereq_packages = deploy_server_prerequisite_packages(
+            plan,
+            skip_pxe=skip_pxe,
+            skip_nfs=skip_nfs,
+            skip_controller=skip_controller,
+            skip_firewall=skip_firewall,
+        )
+
         try:
             ensure_server_prerequisites_with_repo_fallback(
                 entries,
                 repo_file=None,
-                packages=None,
+                packages=server_prereq_packages,
                 dry_run=dry_run,
                 force=False,
                 no_backup=False,
                 bootstrap_only=server_bootstrap_only,
-                firewall_manage=plan.get("firewall", {}).get("manage", True),
             )
             if dry_run:
                 report.add(
@@ -1005,6 +1064,10 @@ def run_deploy_server(
         skip_server_prereqs=skip_server_prereqs,
         skip_repo_vars_refresh=skip_repo_vars_refresh,
         server_bootstrap_only=server_bootstrap_only,
+        skip_pxe=skip_pxe,
+        skip_nfs=skip_nfs,
+        skip_controller=skip_controller,
+        skip_firewall=skip_firewall,
     )
 
     refresh_server_generated_vars(
