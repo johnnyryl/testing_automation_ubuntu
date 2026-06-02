@@ -935,7 +935,8 @@ def deploy_ansible_playbooks(
         skip_controller = True
 
     if skip_pxe and skip_controller:
-        report.add("skipped", "PXE/controller Ansible playbooks skipped")
+        report.add("skipped", "PXE playbook skipped")
+        report.add("skipped", "Controller playbook skipped")
         return
 
     ensure_ansible_playbook(report, dry_run=dry_run)
