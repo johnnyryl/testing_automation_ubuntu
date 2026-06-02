@@ -1,3 +1,16 @@
+aerolitctl deploy server --dry-run --skip-firewall
+aerolitctl deploy server --dry-run --skip-nfs
+aerolitctl deploy server --dry-run --skip-pxe
+aerolitctl deploy server --dry-run --skip-controller
+aerolitctl deploy server --dry-run --skip-firewall --skip-pxe
+aerolitctl deploy server --dry-run --skip-pxe --skip-nfs
+
+
+
+
+
+
+
 Here’s where we left off.
 
 Phase	Status	Notes
