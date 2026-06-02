@@ -688,6 +688,17 @@ def test_cli_help_and_parser(args):
         ["aerolitctl", "status", "--verbose"],
         ["aerolitctl", "deploy", "server", "--dry-run", "--verbose"],
         ["aerolitctl", "deploy", "server", "--verbose", "--dry-run"],
+        [
+            "aerolitctl",
+            "deploy",
+            "server",
+            "--dry-run",
+            "--skip-firewall",
+            "--skip-interface",
+            "--skip-repo-prep",
+            "--skip-pxe",
+            "--skip-controller",
+        ],
         ["aerolitctl", "configure", "init", "--dry-run", "--non-interactive", "--verbose"],
         ["aerolitctl", "configure", "server", "--dry-run", "--mode", "pxe", "--verbose"],
         ["aerolitctl", "configure", "server", "--dry-run", "--mode", "pxe", "--show", "--verbose"],
@@ -988,24 +999,58 @@ def test_deploy_skip_flags(args):
     run_cmd(configure_server_command(args, "full"))
 
     checks = [
-        ("--skip-interface", "Interface configuration skipped by option"),
-        ("--skip-nfs", "NFS role variables disabled by deploy option"),
-        ("--skip-firewall", "Firewall role variables disabled by deploy option"),
-        ("--skip-pxe", "PXE playbook skipped"),
-        ("--skip-controller", "Controller playbook skipped"),
+        (
+            "--skip-interface",
+            [
+                "Network role variables disabled by deploy option",
+                "Network playbook skipped because interface configuration intent is disabled",
+            ],
+        ),
+        (
+            "--skip-nfs",
+            [
+                "NFS role variables disabled by deploy option",
+            ],
+        ),
+        (
+            "--skip-firewall",
+            [
+                "Firewall role variables disabled by deploy option",
+                "disabled by --skip-firewall",
+            ],
+        ),
+        (
+            "--skip-pxe",
+            [
+                "PXE playbook skipped",
+            ],
+        ),
+        (
+            "--skip-controller",
+            [
+                "Controller playbook skipped",
+            ],
+        ),
     ]
 
-    for flag, expected in checks:
+    for flag, expected_texts in checks:
         output = run_cmd(["aerolitctl", "deploy", "server", "--dry-run", flag])
-        assert_contains(output, expected, "deploy {}".format(flag))
+
+        for expected in expected_texts:
+            assert_contains(output, expected, "deploy {}".format(flag))
 
         if flag == "--skip-firewall":
-            assert_contains(
-                output,
-                "disabled by --skip-firewall",
-                "deploy --skip-firewall",
-            )
             expect_no_python_firewall_actions(output, "deploy --skip-firewall")
+            assert_regex(
+                output,
+                r"Requested packages:\s*ansible-core, podman, nfs-utils, dnsmasq$",
+                "deploy --skip-firewall requested packages",
+            )
+            assert_not_regex(
+                output,
+                r"Requested packages:.*firewalld",
+                "deploy --skip-firewall requested packages",
+            )
 
 
 def test_deploy_skip_firewall_generated_vars_toggle(args):
