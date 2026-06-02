@@ -1,3 +1,141 @@
+Here’s where we left off.
+
+Phase	Status	Notes
+Phase 1 — repo engine	Done	repos.py exists and can discover bundle repos, server bootstrap repos, provisioning repos, print summaries, and validate state.
+Phase 2 — configure repos --show/--validate	Done	Help flags worked, --show, --validate, and --refresh --dry-run behaved correctly.
+Phase 3 — generate provisioning repo vars	Done	aerolitctl_repos_generated.yml is being created/refreshed under collections-hub/ansible/group_vars/all/, with client-visible paths like /home/unix/sysadmin/....
+Phase 4 — server bootstrap repo support	Done	/etc/yum.repos.d/zz-aerolit-server-bootstrap.repo worked, and you proved missing packages like ansible-core, podman, and dnsmasq could be installed from the AeroLIT bootstrap repo.
+Phase 5 — wire repo prep into deploy server	Mostly done, but not fully polished	The repo preflight is wired into aerolitctl deploy server, dry-run works, repo vars are refreshed, server prereqs are checked, and the Ansible commands include repo vars. Real deploy testing exposed ownership/role-handoff problems that should be fixed before calling Phase 5 complete.
+Phase 6 — automated merge-readiness tests	Not started	You’ve done manual tests, but we have not converted them into proper test scripts yet.
+Current stopping point
+
+We are inside Phase 5 cleanup, not Phase 6 yet.
+
+The repo system itself is working. The problems you found are mostly from deploy server now touching real roles and exposing old role/default conflicts.
+
+The big Phase 5 cleanup items left are:
+
+NFS ownership cleanup
+
+Normal deploy should not have both the Python wrapper and ansible_controller.yml managing NFS exports.
+
+Correct default:
+
+Full deploy:
+  ansible_controller.yml owns NFS
+  wrapper NFS is skipped
+
+Wrapper NFS should only run when the controller playbook is skipped or we later create a special wrapper-only prep mode.
+
+Remove stale/conflicting NFS export behavior
+
+You hit duplicate exports because there were multiple files exporting the same path/client:
+
+/etc/exports.d/aerolit-bundle.exports
+/etc/exports.d/nfs-server.exports
+
+That confirms the design problem we were trying to avoid: two owners writing NFS state.
+
+PXE content image-source handoff
+
+The pxe-content role default was still trying to use:
+
+pxe_content_image_source: registry
+
+That caused the online registry pull attempt. For disconnected/default AeroLIT behavior, the deploy path needs to reliably pass/use the generated PXE vars that say tar/local content should be used, not registry.
+
+Real deploy must pass twice in a row
+
+Before calling Phase 5 done, I’d want this to work cleanly:
+
+aerolitctl deploy server --server-bootstrap-only
+aerolitctl deploy server --server-bootstrap-only
+
+The second run matters because it proves idempotency. It should not create duplicate exports, should not try to pull from the registry, and should not fail PXE validation.
+
+What is left after Phase 5 cleanup?
+
+Then Phase 6 is turning the manual proof commands into merge-readiness checks:
+
+python3 -m compileall src tools
+python3 -m py_compile src/aerolitctl/repos.py
+python3 -m py_compile src/aerolitctl/deploy_server.py
+python3 -m py_compile src/aerolitctl/cli.py
+
+aerolitctl configure repos --help
+aerolitctl configure repos --show
+aerolitctl configure repos --validate
+aerolitctl configure repos --refresh --dry-run
+aerolitctl deploy server --dry-run --server-bootstrap-only
+aerolitctl deploy server --dry-run --skip-repo-vars-refresh
+
+And probably add a missing-file edge case test:
+
+mv aerolitctl_repos_generated.yml aerolitctl_repos_generated.yml.test-backup
+aerolitctl deploy server --dry-run --skip-repo-vars-refresh
+
+Expected: fail clearly because repo vars refresh was skipped but the repo vars file is missing.
+
+My current verdict
+
+Phases 1–4 are done.
+
+Phase 5 is functionally wired but not clean enough to call done yet.
+
+We should finish the Phase 5 cleanup around NFS ownership and PXE image-source handoff, then run one real deploy and one repeat real deploy. After that, Phase 6 is just formalizing tests.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Yes — this should become its own Ansible-owned network role/playbook.
 
 Right now, your uploaded `deploy_server.py` still has the network mutation in Python: `deploy_interface()` discovers the active NetworkManager connection, checks current IPv4 settings, then runs `nmcli connection modify ...` and `nmcli connection up ...`; `run_deploy_server()` still calls `deploy_interface(...)` before running the PXE/controller playbooks.  
