@@ -1,3 +1,135 @@
+Yes — that older message is a good anchor, but the status has changed now because you fixed several of the Phase 5 cleanup issues while we were debugging.
+
+Here’s the updated state.
+
+Phase	Current status	Notes
+Phase 1 — repo engine	Done	repos.py exists and repo discovery/reporting is working.
+Phase 2 — configure repos --show/--validate	Done	Help/show/validate/refresh dry-run behavior was already proven.
+Phase 3 — generate provisioning repo vars	Done	aerolitctl_repos_generated.yml is generated under collections-hub/ansible/group_vars/all/.
+Phase 4 — server bootstrap repo support	Done	Bootstrap repo support works, and server prereq packages can be installed from the local repo.
+Phase 5 — wire repo prep into deploy server	Mostly done, much cleaner now	Repo preflight is wired in, generated vars are refreshed, Ansible commands include repo vars, skip flags are working better, and Python is being moved back to “write intent only.”
+Phase 6 — automated merge-readiness tests	Started, not complete	aerolitctl_merge_readiness.py now has more coverage and passed, but not every repo/deploy edge case has been formalized yet.
+
+The big update is that Phase 5 is no longer just “repo wiring.” While testing it, you uncovered real ownership bugs, and you fixed several of them.
+
+What we fixed during the detour:
+
+Area	Status
+NFS ownership direction	Fixed/design aligned: Python should not directly manage NFS state; Ansible role owns real NFS changes.
+--skip-nfs behavior	Improved: it disables NFS role variables and removes nfs-utils from prereq package intent.
+--skip-firewall behavior	Improved: it disables firewall role variables and removes firewalld from prereq package intent.
+--skip-pxe behavior	Improved: it skips PXE playbook and removes podman/dnsmasq from prereq package intent.
+--skip-controller behavior	Improved: it skips controller playbook and removes controller/NFS-related package intent correctly.
+Package matrix	Looks correct based on your dry-run screenshots.
+Network ownership	Improved: direct Python nmcli handling was moved toward a configure_network.yml / Ansible role model.
+Merge-readiness script	Passing now.
+
+So I would revise the old verdict like this:
+
+Phases 1–4 are done. Phase 5 is functionally wired and mostly cleaned up, but I would not call it complete until one real deploy and one repeat real deploy pass. Phase 6 has started because the merge-readiness script now covers more behavior, but Phase 6 is not fully complete yet.
+
+The main thing left before calling Phase 5 done is proof, not more theory.
+
+I’d run this next:
+
+python3 tools/aerolitctl_merge_readiness.py
+
+Then real deploy:
+
+aerolitctl deploy server --server-bootstrap-only
+
+Then repeat it:
+
+aerolitctl deploy server --server-bootstrap-only
+
+The repeat run is the key. It should not:
+
+create duplicate NFS exports
+try to pull pxe-content from registry
+fail PXE validation
+change files unnecessarily
+fail because stale/generated files conflict
+
+After the second real deploy, check these:
+
+exportfs -rav
+exportfs -v
+ls -al /etc/exports.d/
+cat /etc/exports.d/aerolit-bundle.exports
+
+Then PXE content:
+
+systemctl --no-pager -l status pxe-content
+podman ps -a --filter name=pxe-content
+curl -sv --max-time 10 http://127.0.0.1:18080/boot.ipxe 2>&1 | head -80
+curl -sv --max-time 10 http://192.168.109.10:18080/boot.ipxe 2>&1 | head -80
+
+Then check that it is not trying to use registry mode:
+
+systemctl cat pxe-content | grep -E 'Image=|Volume=|EnvironmentFile|ExecStart'
+grep -RnsE 'pxe_content_image_source|pxe_content_image_tar|pxe_content_image|registry' \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all \
+  /etc/pxe-content \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/pxe_server.yml
+
+Expected direction:
+
+pxe_content_image_source should be tar
+pxe-content should use local/tar-loaded image behavior
+no real deploy should try to pull registry.gitlab... unless the user explicitly configured registry mode
+
+So the next clean milestone is:
+
+Finish Phase 5 by proving real deploy idempotency.
+
+After that, Phase 6 should formalize tests for:
+
+configure repos --help
+configure repos --show
+configure repos --validate
+configure repos --refresh --dry-run
+deploy server --dry-run package matrix
+deploy server --dry-run skip flags
+missing repo-vars file with --skip-repo-vars-refresh
+generated vars contain correct repo paths
+generated vars contain correct NFS/network/PXE intent
+
+My recommendation: do not start new feature work yet. Run the real deploy twice and confirm NFS/PXE/network behavior. If that passes, Phase 5 is effectively done and you can move to Phase 6.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 aerolitctl deploy server --dry-run --skip-firewall
 aerolitctl deploy server --dry-run --skip-nfs
 aerolitctl deploy server --dry-run --skip-pxe
