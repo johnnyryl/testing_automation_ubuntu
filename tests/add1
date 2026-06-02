@@ -1111,3 +1111,209 @@ So yes, create the role — but use the updated `tasks/configure.yml` above inst
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yes — this output is useful. You found the real failure now.
+
+This is not a Python/aerolitctl failure anymore. The failure is inside the nfs_server role cleanup logic.
+
+What failed
+
+This task failed:
+
+TASK [aerolit.deployments.nfs_server : Read stale NFS exports cleanup candidates]
+
+The exact error is:
+
+Failed to template loop_control.label: 'dict object' has no attribute 'path'
+
+The role is probably using something like:
+
+label: "{{ item.stat.path }}"
+
+But for a missing file like this:
+
+/etc/exports.d/nfs-server.exports
+
+Ansible’s stat result does not always include item.stat.path. It does include the original loop item as:
+
+item.item
+
+So the cleanup logic is mostly right, but the task is referencing the wrong field.
+
+Also, your duplicate export is real. You currently have:
+
+/etc/exports.d/aerolit-bundle.exports
+/etc/exports.d/aerolit-bundle.exports.202722.2026-06-02@01:14:48~
+
+That timestamped backup file is still inside /etc/exports.d, so exportfs can still read it as an active export file. That is why the role must not create backups inside /etc/exports.d.
+
+Do not undo everything. Make these targeted fixes.
+
+⸻
+
+Fix 1 — Fix the broken cleanup task label/source
+
+File:
+
+nfs-server/tasks/configure.yml
+
+Find this task:
+
+- name: Read stale NFS exports cleanup candidates
+
+Replace the whole task with this:
+
+- name: Read stale NFS exports cleanup candidates
+  ansible.builtin.slurp:
+    src: "{{ item.item }}"
+  loop: "{{ nfs_server_cleanup_candidate_file_stats.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default('unknown') }}"
+  register: nfs_server_cleanup_candidate_file_contents
+  when:
+    - nfs_server_manage_exports | bool
+    - item.stat.exists | default(false)
+    - item.stat.isreg | default(false)
+
+The important changes are:
+
+src: "{{ item.item }}"
+label: "{{ item.item | default('unknown') }}"
+
+Do not use:
+
+item.stat.path
+
+That is what caused the failure.
+
+⸻
+
+Fix 2 — Stop Ansible from creating backup files inside /etc/exports.d
+
+In the same file:
+
+nfs-server/tasks/configure.yml
+
+Find:
+
+- name: Manage exports file
+  ansible.builtin.template:
+
+Inside that task, change this:
+
+backup: "{{ nfs_server_backup | bool }}"
+
+to this:
+
+backup: false
+
+So it should look like this:
+
+- name: Manage exports file
+  ansible.builtin.template:
+    src: nfs_server.exports.j2
+    dest: "{{ nfs_server_exports_file }}"
+    owner: "{{ nfs_server_exports_owner }}"
+    group: "{{ nfs_server_exports_group }}"
+    mode: "{{ nfs_server_exports_mode }}"
+    backup: false
+  when: nfs_server_manage_exports | bool
+  notify: Refresh nfs exports
+
+Reason: /etc/exports.d is not a safe place for backup copies. Files there are treated like active export definitions.
+
+You can still keep your separate stale-backup variables:
+
+nfs_server_backup_stale_exports: true
+nfs_server_stale_exports_backup_dir: /var/backups/aerolit/nfs-exports
+
+But the template module itself should not make backup files in /etc/exports.d.
+
+⸻
+
+Fix 3 — Remove the current stale backup file once
+
+After making the code changes, clean the current machine once so the repeat test starts from a sane state:
+
+mkdir -p /var/backups/aerolit/nfs-exports
+cp -a /etc/exports.d/aerolit-bundle.exports.202722.2026-06-02@01:14:48~ \
+  /var/backups/aerolit/nfs-exports/ 2>/dev/null || true
+rm -f /etc/exports.d/aerolit-bundle.exports.202722.2026-06-02@01:14:48~
+exportfs -rav
+
+Then verify only the real managed export remains:
+
+ls -la /etc/exports.d
+grep -RnsH '/opt/aerolit/aerolit-bundle' /etc/exports /etc/exports.d || true
+
+Good output should only show:
+
+/etc/exports.d/aerolit-bundle.exports
+
+It should not show another timestamped aerolit-bundle.exports.* file.
+
+⸻
+
+Then rerun the isolated failing playbook
+
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+export ANSIBLE_CONFIG="$PWD/ansible.cfg"
+ansible-playbook \
+  -i localhost, \
+  -c local \
+  -e @/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml \
+  -e @/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/ansible_controller.yml \
+  -vv \
+  2>&1 | tee /tmp/ansible-controller-repeat-fixed.log
+
+Then:
+
+grep -nE 'ERROR!|fatal:|FAILED!|duplicated export|exportfs|nfs|exports|traceback' \
+  /tmp/ansible-controller-repeat-fixed.log
+
+If that passes, rerun the real idempotency test:
+
+aerolitctl deploy server --server-bootstrap-only --verbose \
+  2>&1 | tee /tmp/aerolitctl-server-bootstrap-repeat-fixed.log
+
+Bottom line
+
+You found two things:
+
+1. Actual duplicate export source: the timestamped backup file inside /etc/exports.d.
+2. Actual Ansible failure: cleanup task uses item.stat.path, but missing stat results do not have that key.
+
+Fix those two and this should move past the current ansible_controller.yml failure.
