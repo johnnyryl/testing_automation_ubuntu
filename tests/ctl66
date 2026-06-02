@@ -558,6 +558,7 @@ def deploy_server_prerequisite_packages(
     firewall_enabled = (
         bool((plan.get("firewall", {}) or {}).get("manage", True))
         and not skip_firewall
+        and (pxe_enabled or nfs_enabled)
     )
 
     if pxe_enabled:
