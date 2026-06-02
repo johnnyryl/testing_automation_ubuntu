@@ -530,8 +530,20 @@ def deploy_server_prerequisite_packages(
     skip_controller=False,
     skip_firewall=False,
 ):
-    """Return deploy-time server prerequisite packages based on enabled components."""
-    packages = ["ansible-core"]
+    """Return deploy-time server prerequisite packages based on enabled components.
+
+    Keep the output/install order stable so dry-run output, real install behavior,
+    and regression tests all agree.
+    """
+    package_order = [
+        "ansible-core",
+        "podman",
+        "nfs-utils",
+        "dnsmasq",
+        "firewalld",
+    ]
+
+    requested = set(["ansible-core"])
 
     pxe_enabled = bool(plan.get("pxe_enabled")) and not skip_pxe
 
@@ -546,29 +558,22 @@ def deploy_server_prerequisite_packages(
     firewall_enabled = (
         bool((plan.get("firewall", {}) or {}).get("manage", True))
         and not skip_firewall
-        and (pxe_enabled or nfs_enabled)
     )
 
     if pxe_enabled:
-        packages.extend(["podman", "dnsmasq"])
+        requested.update(["podman", "dnsmasq"])
 
     if nfs_enabled:
-        packages.append("nfs-utils")
+        requested.add("nfs-utils")
 
     if firewall_enabled:
-        packages.append("firewalld")
+        requested.add("firewalld")
 
-    result = []
-    seen = set()
-
-    for package in packages:
-        if package in seen:
-            continue
-
-        seen.add(package)
-        result.append(package)
-
-    return result
+    return [
+        package
+        for package in package_order
+        if package in requested
+    ]
 
 
 def deploy_repository_preflight(
