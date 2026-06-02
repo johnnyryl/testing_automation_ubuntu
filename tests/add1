@@ -1317,3 +1317,279 @@ You found two things:
 2. Actual Ansible failure: cleanup task uses item.stat.path, but missing stat results do not have that key.
 
 Fix those two and this should move past the current ansible_controller.yml failure.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yes — we’re on the same page. Do not undo everything. Your defaults and template are mostly in the right shape now. The specific thing still broken is in tasks/configure.yml: the cleanup code reads stat results using item.stat.path, but Ansible’s stat result does not always have that key. It should use item.item.
+
+Make these exact changes.
+
+1. Keep defaults/main.yml as-is
+
+Your defaults screenshot looks good. Keep this section:
+
+nfs_server_cleanup_managed_exports: true
+nfs_server_backup_stale_exports: true
+nfs_server_stale_exports_backup_dir: /var/backups/aerolit/nfs-exports
+nfs_server_cleanup_exports_dirs:
+  - /etc/exports.d
+nfs_server_cleanup_exports_files:
+  - /etc/exports.d/aerolit-bundle.exports
+  - /etc/exports.d/nfs-server.exports
+nfs_server_managed_markers:
+  - "Managed by AeroLIT deploy server"
+  - "Managed by Ansible role: nfs_server"
+
+That is good because it handles both known old names and scans /etc/exports.d for renamed/stale managed files.
+
+2. Replace the cleanup section in tasks/configure.yml
+
+File:
+
+nfs-server/tasks/configure.yml
+
+Find this section, starting at:
+
+- name: Build NFS exports cleanup directory list
+
+Delete everything from that task down to just before:
+
+- name: Manage exports file
+
+Replace that whole cleanup section with this:
+
+- name: Build NFS exports cleanup directory list
+  ansible.builtin.set_fact:
+    nfs_server_effective_cleanup_exports_dirs: >-
+      {{
+        (
+          (nfs_server_cleanup_exports_dirs | default([]))
+          + [nfs_server_exports_file | dirname]
+        )
+        | unique
+        | list
+      }}
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+- name: Find NFS exports files in cleanup directories
+  ansible.builtin.find:
+    paths: "{{ item }}"
+    file_type: file
+    recurse: false
+  loop: "{{ nfs_server_effective_cleanup_exports_dirs | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  register: nfs_server_cleanup_exports_dir_find
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+- name: Build NFS exports cleanup candidate list
+  ansible.builtin.set_fact:
+    nfs_server_cleanup_candidate_files: >-
+      {{
+        (
+          (nfs_server_cleanup_exports_files | default([]))
+          +
+          (
+            nfs_server_cleanup_exports_dir_find.results | default([])
+            | map(attribute='files')
+            | flatten
+            | map(attribute='path')
+            | list
+          )
+        )
+        | unique
+        | difference([nfs_server_exports_file])
+        | list
+      }}
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+- name: Stat stale NFS exports cleanup candidates
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ nfs_server_cleanup_candidate_files | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  register: nfs_server_cleanup_candidate_file_stats
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+- name: Read stale NFS exports cleanup candidates
+  ansible.builtin.slurp:
+    src: "{{ item.item }}"
+  loop: "{{ nfs_server_cleanup_candidate_file_stats.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default('unknown') }}"
+  register: nfs_server_cleanup_candidate_file_contents
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+    - item.stat.exists | default(false)
+    - item.stat.isreg | default(false)
+- name: Build stale managed NFS exports file list
+  ansible.builtin.set_fact:
+    nfs_server_stale_managed_exports_files: >-
+      {{
+        (nfs_server_stale_managed_exports_files | default([]))
+        + [item.source]
+      }}
+  loop: "{{ nfs_server_cleanup_candidate_file_contents.results | default([]) }}"
+  loop_control:
+    label: "{{ item.source | default('unknown') }}"
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+    - item.content is defined
+    - >-
+      (
+        item.content | b64decode | regex_search(
+          nfs_server_managed_markers | map('regex_escape') | join('|')
+        )
+      ) is not none
+- name: Ensure stale NFS exports backup directory exists
+  ansible.builtin.file:
+    path: "{{ nfs_server_stale_exports_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+    - nfs_server_backup_stale_exports | bool
+    - (nfs_server_stale_managed_exports_files | default([]) | length) > 0
+- name: Back up stale AeroLIT-managed NFS exports files
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ nfs_server_stale_exports_backup_dir }}/{{ item | basename }}.{{ ansible_date_time.iso8601_basic_short }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0640"
+  loop: "{{ nfs_server_stale_managed_exports_files | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+    - nfs_server_backup_stale_exports | bool
+- name: Remove stale AeroLIT-managed NFS exports files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ nfs_server_stale_managed_exports_files | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - nfs_server_manage_exports | bool
+    - nfs_server_cleanup_managed_exports | bool
+  notify: Refresh nfs exports
+
+The key fix is this part:
+
+src: "{{ item.item }}"
+label: "{{ item.item | default('unknown') }}"
+
+That replaces the broken item.stat.path reference.
+
+3. Keep Manage exports file like this
+
+Right after that cleanup block, your Manage exports file task should be:
+
+- name: Manage exports file
+  ansible.builtin.template:
+    src: nfs_server.exports.j2
+    dest: "{{ nfs_server_exports_file }}"
+    owner: "{{ nfs_server_exports_owner }}"
+    group: "{{ nfs_server_exports_group }}"
+    mode: "{{ nfs_server_exports_mode }}"
+    backup: false
+  when: nfs_server_manage_exports | bool
+  notify: Refresh nfs exports
+
+The important part is:
+
+backup: false
+
+Do not let the template task create backup files inside /etc/exports.d, because those backup files can still be read by exportfs and cause duplicate exports.
+
+4. Keep the template as-is
+
+Your templates/nfs_server.exports.j2 is good:
+
+# Managed by Ansible role: nfs_server
+{% for export in nfs_server_exports %}
+{{ export.path }} {{ '*' if (export.allow_all_clients | default(false) | bool) else export.clients }}({{ export.options | join(',') }})
+{% endfor %}
+
+Yes, this means:
+
+clients: ""
+allow_all_clients: true
+
+renders as:
+
+/opt/aerolit/aerolit-bundle *(rw,sync,no_subtree_check)
+
+That part is correct.
+
+5. Test without manually deleting the stale file first
+
+Since the role is supposed to clean it up, run the isolated playbook first:
+
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+export ANSIBLE_CONFIG="$PWD/ansible.cfg"
+ansible-playbook \
+  -i localhost, \
+  -c local \
+  -e @/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml \
+  -e @/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/ansible_controller.yml \
+  -vv \
+  2>&1 | tee /tmp/ansible-controller-repeat-fixed.log
+
+Then check:
+
+grep -nE 'ERROR!|fatal:|FAILED!|duplicated export|exportfs|traceback' /tmp/ansible-controller-repeat-fixed.log
+ls -la /etc/exports.d
+grep -RnsH '/opt/aerolit/aerolit-bundle' /etc/exports /etc/exports.d || true
+exportfs -rav
+
+Expected good state:
+
+/etc/exports.d/aerolit-bundle.exports
+
+Only one active export file should reference /opt/aerolit/aerolit-bundle.
+
+Then run:
+
+aerolitctl deploy server --server-bootstrap-only --verbose
+aerolitctl deploy server --server-bootstrap-only --verbose
+
+The second run is the real proof. It should not fail on duplicate exports and should not create another stale /etc/exports.d/*.exports.* backup file.
