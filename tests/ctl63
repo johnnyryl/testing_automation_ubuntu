@@ -995,36 +995,55 @@ def test_deploy_mode_matrix(args):
     assert_firewall_action_expectations(args, full_output, "full")
 
 
-def assert_requested_packages(output, expected_packages, label):
-    """Assert deploy repo preflight requested exactly the expected package list."""
-
-    assert_regex(
+def requested_packages_from_output(output, label):
+    """Return the requested package list from deploy repo preflight output."""
+    match = re.search(
+        r"^Requested packages:\s*(.*?)\s*$",
         output,
-        r"Requested packages:\s*{}$".format(
-            re.escape(", ".join(expected_packages))
-        ),
-        "{} requested packages".format(label),
+        re.MULTILINE,
     )
 
-    known_packages = [
-        "ansible-core",
-        "podman",
-        "nfs-utils",
-        "dnsmasq",
-        "firewalld",
+    if not match:
+        raise TestFailure(
+            "Missing requested packages line in {} output".format(label)
+        )
+
+    package_text = match.group(1).strip()
+
+    if package_text.lower() == "none":
+        return []
+
+    return [
+        item.strip()
+        for item in package_text.split(",")
+        if item.strip()
     ]
 
-    unexpected_packages = [
-        package
-        for package in known_packages
-        if package not in expected_packages
-    ]
 
-    for package in unexpected_packages:
-        assert_not_regex(
-            output,
-            r"Requested packages:.*\b{}\b".format(re.escape(package)),
-            "{} requested packages should not include {}".format(label, package),
+def assert_requested_packages(output, expected_packages, label):
+    """Assert deploy repo preflight requested exactly the expected packages."""
+    actual_packages = requested_packages_from_output(output, label)
+
+    actual_set = set(actual_packages)
+    expected_set = set(expected_packages)
+
+    if actual_set != expected_set:
+        raise TestFailure(
+            "{} requested packages mismatch.\n"
+            "Expected exactly: {}\n"
+            "Got exactly:      {}".format(
+                label,
+                ", ".join(expected_packages),
+                ", ".join(actual_packages),
+            )
+        )
+
+    if len(actual_packages) != len(actual_set):
+        raise TestFailure(
+            "{} requested packages contained duplicates: {}".format(
+                label,
+                ", ".join(actual_packages),
+            )
         )
 
 
