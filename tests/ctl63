@@ -695,6 +695,7 @@ def test_cli_help_and_parser(args):
             "--dry-run",
             "--skip-firewall",
             "--skip-interface",
+            "--skip-nfs",
             "--skip-repo-prep",
             "--skip-pxe",
             "--skip-controller",
@@ -994,63 +995,158 @@ def test_deploy_mode_matrix(args):
     assert_firewall_action_expectations(args, full_output, "full")
 
 
+def assert_requested_packages(output, expected_packages, label):
+    """Assert deploy repo preflight requested exactly the expected package list."""
+
+    assert_regex(
+        output,
+        r"Requested packages:\s*{}$".format(
+            re.escape(", ".join(expected_packages))
+        ),
+        "{} requested packages".format(label),
+    )
+
+    known_packages = [
+        "ansible-core",
+        "podman",
+        "nfs-utils",
+        "dnsmasq",
+        "firewalld",
+    ]
+
+    unexpected_packages = [
+        package
+        for package in known_packages
+        if package not in expected_packages
+    ]
+
+    for package in unexpected_packages:
+        assert_not_regex(
+            output,
+            r"Requested packages:.*\b{}\b".format(re.escape(package)),
+            "{} requested packages should not include {}".format(label, package),
+        )
+
+
 def test_deploy_skip_flags(args):
     """Confirm deploy skip flags override the saved full-mode plan."""
     run_cmd(configure_server_command(args, "full"))
 
     checks = [
         (
-            "--skip-interface",
+            [],
+            [
+                "Would run Run pxe_server.yml",
+                "Would run Run ansible_controller.yml",
+            ],
+            ["ansible-core", "podman", "nfs-utils", "dnsmasq", "firewalld"],
+            "deploy full baseline",
+        ),
+        (
+            ["--skip-interface"],
             [
                 "Network role variables disabled by deploy option",
                 "Network playbook skipped because interface configuration intent is disabled",
             ],
+            ["ansible-core", "podman", "nfs-utils", "dnsmasq", "firewalld"],
+            "deploy --skip-interface",
         ),
         (
-            "--skip-nfs",
-            [
-                "NFS role variables disabled by deploy option",
-            ],
-        ),
-        (
-            "--skip-firewall",
+            ["--skip-firewall"],
             [
                 "Firewall role variables disabled by deploy option",
                 "disabled by --skip-firewall",
             ],
+            ["ansible-core", "podman", "nfs-utils", "dnsmasq"],
+            "deploy --skip-firewall",
         ),
         (
-            "--skip-pxe",
+            ["--skip-nfs"],
+            [
+                "NFS role variables disabled by deploy option",
+            ],
+            ["ansible-core", "podman", "dnsmasq", "firewalld"],
+            "deploy --skip-nfs",
+        ),
+        (
+            ["--skip-pxe"],
             [
                 "PXE playbook skipped",
             ],
+            ["ansible-core", "nfs-utils", "firewalld"],
+            "deploy --skip-pxe",
         ),
         (
-            "--skip-controller",
+            ["--skip-controller"],
             [
                 "Controller playbook skipped",
             ],
+            ["ansible-core", "podman", "dnsmasq", "firewalld"],
+            "deploy --skip-controller",
+        ),
+        (
+            ["--skip-firewall", "--skip-pxe"],
+            [
+                "Firewall role variables disabled by deploy option",
+                "disabled by --skip-firewall",
+                "PXE playbook skipped",
+            ],
+            ["ansible-core", "nfs-utils"],
+            "deploy --skip-firewall --skip-pxe",
+        ),
+        (
+            ["--skip-firewall", "--skip-nfs"],
+            [
+                "Firewall role variables disabled by deploy option",
+                "disabled by --skip-firewall",
+                "NFS role variables disabled by deploy option",
+            ],
+            ["ansible-core", "podman", "dnsmasq"],
+            "deploy --skip-firewall --skip-nfs",
+        ),
+        (
+            ["--skip-pxe", "--skip-nfs"],
+            [
+                "PXE playbook skipped",
+                "NFS role variables disabled by deploy option",
+            ],
+            ["ansible-core"],
+            "deploy --skip-pxe --skip-nfs",
+        ),
+        (
+            ["--skip-pxe", "--skip-controller"],
+            [
+                "PXE playbook skipped",
+                "Controller playbook skipped",
+            ],
+            ["ansible-core"],
+            "deploy --skip-pxe --skip-controller",
+        ),
+        (
+            ["--skip-pxe", "--skip-nfs", "--skip-firewall"],
+            [
+                "PXE playbook skipped",
+                "NFS role variables disabled by deploy option",
+                "Firewall role variables disabled by deploy option",
+                "disabled by --skip-firewall",
+            ],
+            ["ansible-core"],
+            "deploy --skip-pxe --skip-nfs --skip-firewall",
         ),
     ]
 
-    for flag, expected_texts in checks:
-        output = run_cmd(["aerolitctl", "deploy", "server", "--dry-run", flag])
+    for flags, expected_texts, expected_packages, label in checks:
+        output = run_cmd(
+            ["aerolitctl", "deploy", "server", "--dry-run"] + flags
+        )
 
         for expected in expected_texts:
-            assert_contains(output, expected, "deploy {}".format(flag))
+            assert_contains(output, expected, label)
 
-        if flag == "--skip-firewall":
-            expect_no_python_firewall_actions(output, "deploy --skip-firewall")
-            assert_regex(
-                output,
-                r"Requested packages:\s*ansible-core, podman, nfs-utils, dnsmasq$",
-                "deploy --skip-firewall requested packages",
-            )
-            assert_not_regex(
-                output,
-                r"Requested packages:.*firewalld",
-                "deploy --skip-firewall requested packages",
-            )
+        assert_requested_packages(output, expected_packages, label)
+
+        if "--skip-firewall" in flags:
+            expect_no_python_firewall_actions(output, label)
 
 
 def test_deploy_skip_firewall_generated_vars_toggle(args):
