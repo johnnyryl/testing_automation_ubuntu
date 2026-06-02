@@ -1,3 +1,122 @@
+You’re at the right point now: the repo/preflight part passed, PXE appears to have gotten past its earlier issue, and the failure is now isolated to ansible_controller.yml.
+
+The important line is this:
+
+ERROR: Command failed rc=2: Run ansible_controller.yml: ansible-playbook ...
+
+So troubleshoot this as an Ansible controller/NFS playbook failure, not as a repo-engine failure.
+
+Also, --server-bootstrap-only does not mean “only install bootstrap packages and stop.” In your output it still runs:
+
+configure_network.yml
+pxe_server.yml
+ansible_controller.yml
+
+So the failure is happening during the real server deploy flow.
+
+Step 1 — Rerun with verbose and save the full log
+
+Run this first:
+
+cd /root/aerolitctl
+aerolitctl deploy server --server-bootstrap-only --verbose \
+  2>&1 | tee /tmp/aerolitctl-server-bootstrap-repeat.log
+
+Then immediately run:
+
+grep -nE 'ERROR!|fatal:|FAILED!|failed=|unreachable=|duplicated export|exportfs|nfs|ansible_controller' \
+  /tmp/aerolitctl-server-bootstrap-repeat.log
+tail -n 180 /tmp/aerolitctl-server-bootstrap-repeat.log
+
+That should show the real task that failed. Right now the CLI summary only shows that ansible_controller.yml failed, but not the actual Ansible task failure.
+
+Step 2 — Run only the failing playbook manually
+
+This is the cleaner isolation test. It avoids rerunning the whole aerolitctl deploy server flow.
+
+cd /opt/aerolit/aerolit-bundle/collections-hub/ansible
+export ANSIBLE_CONFIG="$PWD/ansible.cfg"
+ansible-playbook \
+  -i localhost, \
+  -c local \
+  -e @/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml \
+  -e @/opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/ansible_controller.yml \
+  -vv \
+  2>&1 | tee /tmp/ansible-controller-repeat.log
+
+Then:
+
+grep -nE 'ERROR!|fatal:|FAILED!|duplicated export|exportfs|nfs|exports|traceback' \
+  /tmp/ansible-controller-repeat.log
+tail -n 180 /tmp/ansible-controller-repeat.log
+
+This should tell us exactly whether it is still the NFS duplicate export problem, a role variable problem, or something else inside ansible_controller.yml.
+
+Step 3 — Check whether duplicate NFS exports came back
+
+Because this is the area we were just cleaning up, check it directly:
+
+ls -la /etc/exports.d
+grep -RnsH '/opt/aerolit/aerolit-bundle' /etc/exports /etc/exports.d || true
+exportfs -rav
+
+Expected good state should be basically one active managed export for the bundle path, probably:
+
+/etc/exports.d/aerolit-bundle.exports
+
+Bad state would look like multiple files exporting the same path/client, for example:
+
+/etc/exports.d/aerolit-bundle.exports
+/etc/exports.d/nfs-server.exports
+
+If exportfs -rav says duplicated export entries again, then the stale cleanup logic in the NFS role still is not fully doing its job.
+
+Step 4 — Confirm the generated NFS vars being passed
+
+Run:
+
+grep -nE 'aerolit_nfs_enabled|nfs_server_enabled|nfs_server_manage|nfs_server_exports_file|nfs_server_cleanup|nfs_server_exports:|path:|clients:|allow_all_clients' \
+  /opt/aerolit/aerolit-bundle/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+
+You want to confirm the generated vars point to the intended file:
+
+nfs_server_exports_file: /etc/exports.d/aerolit-bundle.exports
+
+and not the old/default one:
+
+/etc/exports.d/nfs-server.exports
+
+What I think is most likely
+
+Based on the screenshots, the first real deploy completed, then the second run failed at ansible_controller.yml. Since the failure is on the repeat run, the most likely causes are:
+
+1. NFS idempotency/stale export cleanup still has a gap, especially if /etc/exports.d/nfs-server.exports still exists.
+2. ansible_controller.yml is passing NFS vars differently than the manual role test expected.
+3. The generated vars are correct, but the role defaults are still winning somewhere because of variable precedence or a missing variable mapping.
+
+Don’t change code yet. First get /tmp/ansible-controller-repeat.log. That log should tell us the exact failing task.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+######################################################
+
+
+
 Yes — that older message is a good anchor, but the status has changed now because you fixed several of the Phase 5 cleanup issues while we were debugging.
 
 Here’s the updated state.
