@@ -60,6 +60,7 @@ CURRENT_COMMAND_NUMBER = 0
 
 RUN_LOG_PATH = None
 LAST_COMMAND_LOG_PATH = None
+LAST_PROGRESS_WIDTH = 0
 
 
 def append_text(path, content):
@@ -71,6 +72,12 @@ def append_text(path, content):
         handle.write(content)
 
 
+def append_run_log(content):
+    """Append text to the full run log when it is available."""
+    if RUN_LOG_PATH is not None:
+        append_text(RUN_LOG_PATH, content)
+
+
 def set_run_log_path(log_dir):
     """Set the full run log path and reset the file."""
     global RUN_LOG_PATH
@@ -80,7 +87,7 @@ def set_run_log_path(log_dir):
 
 
 def print_test_header(test_number, total_tests, name):
-    """Print and track the current top-level test header."""
+    """Track and log the current top-level test header."""
     global CURRENT_TEST_NUMBER
     global CURRENT_TEST_TOTAL
     global CURRENT_TEST_NAME
@@ -91,10 +98,10 @@ def print_test_header(test_number, total_tests, name):
     CURRENT_TEST_NAME = name
     CURRENT_COMMAND_NUMBER = 0
 
-    print("")
-    print("#" * 80)
-    print("# TEST {} of {}: {}".format(test_number, total_tests, name))
-    print("#" * 80)
+    append_run_log("\n")
+    append_run_log("#" * 80 + "\n")
+    append_run_log("# TEST {} of {}: {}\n".format(test_number, total_tests, name))
+    append_run_log("#" * 80 + "\n")
 
 
 def current_test_label():
@@ -140,29 +147,22 @@ def command_log_path_for_current_command():
 
 
 def print_command_header(command):
-    """Print and track the current command header."""
+    """Track and log the current command without printing to the terminal."""
     global CURRENT_COMMAND_NUMBER
     global LAST_COMMAND_LOG_PATH
 
     CURRENT_COMMAND_NUMBER += 1
     LAST_COMMAND_LOG_PATH = command_log_path_for_current_command()
 
-    print("")
-
-    if CURRENT_TEST_NUMBER is None:
-        print("[COMMAND {}]".format(CURRENT_COMMAND_NUMBER))
-    else:
-        print(
-            "[TEST {} / COMMAND {}]".format(
-                CURRENT_TEST_NUMBER,
-                CURRENT_COMMAND_NUMBER,
-            )
-        )
-
-    print("$ {}".format(render_cmd(command)))
+    append_run_log("\n")
+    append_run_log("[TEST {} / COMMAND {}]\n".format(
+        CURRENT_TEST_NUMBER,
+        CURRENT_COMMAND_NUMBER,
+    ))
+    append_run_log("$ {}\n".format(render_cmd(command)))
 
     if LAST_COMMAND_LOG_PATH is not None:
-        print("Command log: {}".format(LAST_COMMAND_LOG_PATH))
+        append_run_log("Command log: {}\n".format(LAST_COMMAND_LOG_PATH))
 
     return LAST_COMMAND_LOG_PATH
 
@@ -221,14 +221,28 @@ def progress_bar(completed, total, width=30):
 
 
 def print_progress(completed, total):
-    """Print test-level progress."""
-    print(
-        "Progress: {} ({} of {} tests passed)".format(
-            progress_bar(completed, total),
-            completed,
-            total,
-        )
+    """Print test-level progress on one updating terminal line."""
+    global LAST_PROGRESS_WIDTH
+
+    message = "Progress: {} ({} of {} tests passed)".format(
+        progress_bar(completed, total),
+        completed,
+        total,
     )
+
+    LAST_PROGRESS_WIDTH = max(LAST_PROGRESS_WIDTH, len(message))
+    sys.stdout.write("\r" + message.ljust(LAST_PROGRESS_WIDTH))
+    sys.stdout.flush()
+
+
+def finish_progress_line():
+    """Finish the live progress line before printing normal output."""
+    global LAST_PROGRESS_WIDTH
+
+    if LAST_PROGRESS_WIDTH:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        LAST_PROGRESS_WIDTH = 0
 
 
 def timestamp():
@@ -301,11 +315,16 @@ def run_cmd(command, cwd=None, expected_rc=0, log_path=None, env=None):
     )
 
     if expected_rc is None:
-        print("Return code: {}".format(process.returncode))
+        append_run_log("Return code: {}\n".format(process.returncode))
     elif process.returncode == expected_rc:
-        print("Return code: {} expected".format(process.returncode))
+        append_run_log("Return code: {} expected\n".format(process.returncode))
     else:
-        print("Return code: {} expected {}".format(process.returncode, expected_rc))
+        append_run_log(
+            "Return code: {} expected {}\n".format(
+                process.returncode,
+                expected_rc,
+            )
+        )
 
     if expected_rc is not None and process.returncode != expected_rc:
         raise TestFailure(
@@ -849,8 +868,8 @@ def test_environment_preflight(args):
                     "not live firewall state."
                 )
 
-    print("aerolitctl path : {}".format(aerolitctl_path))
-    print("source wrapper  : {}".format(args.aerolitctl_wrapper))
+    append_run_log("aerolitctl path : {}\n".format(aerolitctl_path))
+    append_run_log("source wrapper  : {}\n".format(args.aerolitctl_wrapper))
 
 
 def test_basic_repo_sanity(args):
@@ -2620,6 +2639,8 @@ def main():
     print("PXE overrides      : {}".format(args.pxe_overrides_dir))
     print("PXE profiles       : {}".format(args.pxe_profile_overrides_dir))
     print("Log dir            : {}".format(args.log_dir))
+    print("Full run log       : {}".format(RUN_LOG_PATH))
+    print("Command logs       : {}".format(Path(args.log_dir) / "commands"))
     print("Local CLI wrapper  : {}".format(args.aerolitctl_wrapper))
     print("Keep state         : {}".format(args.keep_state))
     print("Skip write tests   : {}".format(args.skip_write_tests))
@@ -2685,6 +2706,8 @@ def main():
     total_tests = len(tests)
 
     try:
+        print_progress(0, total_tests)
+
         for test_number, item in enumerate(tests, 1):
             name, test_func = item
 
@@ -2693,15 +2716,17 @@ def main():
             test_func()
             passed.append(name)
 
-            print("")
-            print(
-                "PASS TEST {} of {}: {}".format(
+            append_run_log(
+                "PASS TEST {} of {}: {}\n".format(
                     test_number,
                     total_tests,
                     name,
                 )
             )
+
             print_progress(test_number, total_tests)
+
+        finish_progress_line()
 
         print("")
         print("=" * 80)
@@ -2725,6 +2750,7 @@ def main():
         return 0
 
     finally:
+        finish_progress_line()
         cleanup_python_artifacts(args.repo_root)
 
         if state_snapshot is not None and not args.keep_state:
@@ -2748,6 +2774,8 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except TestFailure as exc:
+        finish_progress_line()
+
         print("")
         print("=" * 80)
         print("FAIL in {}".format(current_test_label()))
