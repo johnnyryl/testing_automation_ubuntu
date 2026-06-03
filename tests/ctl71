@@ -520,6 +520,35 @@ def max_dhcp_clients(network, server_ip=None, gateway=None):
     return max((end - start + 1) for start, end in ranges)
 
 
+def dhcp_range_size(start, end):
+    """Return inclusive DHCP range size."""
+    try:
+        start_ip = parse_ipv4_address(start, "DHCP start")
+        end_ip = parse_ipv4_address(end, "DHCP end")
+    except ValueError:
+        return 0
+
+    if int(start_ip) > int(end_ip):
+        return 0
+
+    return int(end_ip) - int(start_ip) + 1
+
+
+def dhcp_end_from_start(start, requested_clients):
+    """Return inclusive DHCP range end from a start IP and requested client count."""
+    start_ip = parse_ipv4_address(start, "DHCP start")
+
+    try:
+        count = int(requested_clients or 1)
+    except (TypeError, ValueError):
+        count = 1
+
+    if count < 1:
+        count = 1
+
+    return str(ipaddress.IPv4Address(int(start_ip) + count - 1))
+
+
 def suggested_dhcp_range(network, server_ip=None, gateway=None, requested_clients=100):
     """Suggest DHCP range inside a network without expanding huge networks."""
     ranges = available_dhcp_ranges(network, server_ip=server_ip, gateway=gateway)
@@ -1181,15 +1210,31 @@ def choose_dhcp_range(
 
     if current_start and current_end:
         try:
-            validate_dhcp_range(
+            current_start_value, current_end_value = validate_dhcp_range(
                 current_start,
                 current_end,
                 network,
                 server_ip=server_ip,
                 gateway=gateway,
             )
-            default_start = current_start
-            default_end = current_end
+
+            current_size = dhcp_range_size(current_start_value, current_end_value)
+
+            if current_size == client_count:
+                default_start = current_start_value
+                default_end = current_end_value
+            else:
+                print("")
+                print(
+                    "NOTE: the previously configured DHCP range {} - {} has {} "
+                    "client address(es), but this run requested {}.".format(
+                        current_start_value,
+                        current_end_value,
+                        current_size,
+                        client_count,
+                    )
+                )
+                print("Using a new suggested DHCP range for this requested pool size.")
         except ValueError:
             print("")
             print(
@@ -1215,7 +1260,16 @@ def choose_dhcp_range(
 
     while True:
         start = text_prompt("DHCP range start", default=default_start)
-        end = text_prompt("DHCP range end", default=default_end)
+
+        try:
+            parse_ipv4_address(start, "DHCP start")
+            end_default = dhcp_end_from_start(start, client_count)
+        except ValueError as exc:
+            print(str(exc))
+            print("Re-enter the DHCP range.")
+            continue
+
+        end = text_prompt("DHCP range end", default=end_default)
 
         try:
             return validate_dhcp_range(
