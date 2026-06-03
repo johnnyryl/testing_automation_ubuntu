@@ -829,6 +829,68 @@ def test_standardized_source_wording(args):
             )
 
 
+def test_server_dhcp_range_math(args):
+    """Confirm guided DHCP pool math matches the requested client count."""
+    src_path = str(Path(args.repo_root) / "src")
+    if src_path not in sys.path:
+        sys.path.insert(0, src_path)
+
+    from aerolitctl.server import (
+        dhcp_end_from_start,
+        dhcp_range_size,
+        parse_ipv4_address,
+        parse_ipv4_network,
+        suggested_dhcp_range,
+        validate_dhcp_range,
+    )
+
+    network = parse_ipv4_network("192.168.109.0/24", "test network")
+    server_ip = parse_ipv4_address("192.168.109.69", "test server IP")
+
+    start, end = suggested_dhcp_range(
+        network,
+        server_ip=server_ip,
+        gateway=None,
+        requested_clients=69,
+    )
+
+    if start != "192.168.109.100" or end != "192.168.109.168":
+        raise TestFailure(
+            "Expected 69-client suggested DHCP range 192.168.109.100 - "
+            "192.168.109.168, got {} - {}".format(start, end)
+        )
+
+    if dhcp_range_size(start, end) != 69:
+        raise TestFailure(
+            "Expected suggested DHCP range size 69, got {}".format(
+                dhcp_range_size(start, end)
+            )
+        )
+
+    shifted_end = dhcp_end_from_start("192.168.109.169", 69)
+
+    if shifted_end != "192.168.109.237":
+        raise TestFailure(
+            "Expected shifted 69-client DHCP end 192.168.109.237, got {}".format(
+                shifted_end
+            )
+        )
+
+    validate_dhcp_range(
+        "192.168.109.169",
+        shifted_end,
+        network,
+        server_ip=server_ip,
+        gateway=None,
+    )
+
+    old_size = dhcp_range_size("192.168.109.100", "192.168.109.149")
+    if old_size != 50:
+        raise TestFailure(
+            "Expected old .100-.149 range size 50, got {}".format(old_size)
+        )
+
+
 def test_configure_show_modes(args, hash_paths):
     """Confirm configure server --show is mode-aware and read-only."""
     before = sha256_paths(hash_paths)
@@ -2396,6 +2458,7 @@ def main():
         ("basic repo/code sanity", lambda: test_basic_repo_sanity(args)),
         ("CLI help and parser", lambda: test_cli_help_and_parser(args)),
         ("standardized source wording", lambda: test_standardized_source_wording(args)),
+        ("server DHCP range math", lambda: test_server_dhcp_range_math(args)),
         ("configure server --show mode behavior", lambda: test_configure_show_modes(args, hash_paths)),
         ("configure server dry-run mode behavior", lambda: test_configure_dry_run_modes(args, hash_paths)),
         ("configure repos help/parser", lambda: test_configure_repos_help_and_parser(args)),
