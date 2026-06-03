@@ -58,6 +58,26 @@ CURRENT_TEST_TOTAL = None
 CURRENT_TEST_NAME = None
 CURRENT_COMMAND_NUMBER = 0
 
+RUN_LOG_PATH = None
+LAST_COMMAND_LOG_PATH = None
+
+
+def append_text(path, content):
+    """Append text to path, creating parent directories if needed."""
+    path = Path(path)
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True)
+    with open(str(path), "a", encoding="utf-8") as handle:
+        handle.write(content)
+
+
+def set_run_log_path(log_dir):
+    """Set the full run log path and reset the file."""
+    global RUN_LOG_PATH
+
+    RUN_LOG_PATH = Path(log_dir) / "merge-readiness-full.log"
+    write_text(RUN_LOG_PATH, "")
+
 
 def print_test_header(test_number, total_tests, name):
     """Print and track the current top-level test header."""
@@ -75,27 +95,6 @@ def print_test_header(test_number, total_tests, name):
     print("#" * 80)
     print("# TEST {} of {}: {}".format(test_number, total_tests, name))
     print("#" * 80)
-
-
-def print_command_header(command):
-    """Print and track the current command header."""
-    global CURRENT_COMMAND_NUMBER
-
-    CURRENT_COMMAND_NUMBER += 1
-
-    print("")
-
-    if CURRENT_TEST_NUMBER is None:
-        print("[COMMAND {}]".format(CURRENT_COMMAND_NUMBER))
-    else:
-        print(
-            "[TEST {} / COMMAND {}]".format(
-                CURRENT_TEST_NUMBER,
-                CURRENT_COMMAND_NUMBER,
-            )
-        )
-
-    print("$ {}".format(render_cmd(command)))
 
 
 def current_test_label():
@@ -121,6 +120,114 @@ def current_command_label():
     return "TEST {} / COMMAND {}".format(
         CURRENT_TEST_NUMBER,
         CURRENT_COMMAND_NUMBER,
+    )
+
+
+def command_log_path_for_current_command():
+    """Return the standard per-command log path."""
+    if RUN_LOG_PATH is None:
+        return None
+
+    commands_dir = RUN_LOG_PATH.parent / "commands"
+
+    test_number = CURRENT_TEST_NUMBER or 0
+    command_number = CURRENT_COMMAND_NUMBER or 0
+
+    return commands_dir / "test-{:02d}-command-{:03d}.log".format(
+        test_number,
+        command_number,
+    )
+
+
+def print_command_header(command):
+    """Print and track the current command header."""
+    global CURRENT_COMMAND_NUMBER
+    global LAST_COMMAND_LOG_PATH
+
+    CURRENT_COMMAND_NUMBER += 1
+    LAST_COMMAND_LOG_PATH = command_log_path_for_current_command()
+
+    print("")
+
+    if CURRENT_TEST_NUMBER is None:
+        print("[COMMAND {}]".format(CURRENT_COMMAND_NUMBER))
+    else:
+        print(
+            "[TEST {} / COMMAND {}]".format(
+                CURRENT_TEST_NUMBER,
+                CURRENT_COMMAND_NUMBER,
+            )
+        )
+
+    print("$ {}".format(render_cmd(command)))
+
+    if LAST_COMMAND_LOG_PATH is not None:
+        print("Command log: {}".format(LAST_COMMAND_LOG_PATH))
+
+    return LAST_COMMAND_LOG_PATH
+
+
+def render_command_log(command, cwd, rc, stdout, stderr):
+    """Render one command log entry."""
+    content = []
+    content.append("=" * 80)
+    content.append(current_test_label())
+    content.append(current_command_label())
+    content.append("Command: {}".format(render_cmd(command)))
+    content.append("CWD: {}".format(cwd or os.getcwd()))
+    content.append("Return code: {}".format(rc))
+    content.append("")
+    content.append("[stdout]")
+    content.append(stdout or "")
+    content.append("")
+    content.append("[stderr]")
+    content.append(stderr or "")
+    content.append("")
+    return "\n".join(content)
+
+
+def write_command_logs(command_log_path, extra_log_path, command, cwd, rc, stdout, stderr):
+    """Write per-command, full-run, and optional named command logs."""
+    detailed_content = render_command_log(command, cwd, rc, stdout, stderr)
+
+    combined = stdout or ""
+    if stderr:
+        combined += "\n[stderr]\n{}".format(stderr)
+
+    if command_log_path is not None:
+        write_text(command_log_path, detailed_content)
+
+    if RUN_LOG_PATH is not None:
+        append_text(RUN_LOG_PATH, detailed_content + "\n")
+
+    if extra_log_path:
+        write_text(extra_log_path, combined)
+
+
+def progress_bar(completed, total, width=30):
+    """Return a simple text progress bar."""
+    if total <= 0:
+        percent = 100
+        filled = width
+    else:
+        percent = int(round((completed * 100.0) / total))
+        filled = int(round((completed * width * 1.0) / total))
+
+    return "[{}{}] {}%".format(
+        "#" * filled,
+        "-" * (width - filled),
+        percent,
+    )
+
+
+def print_progress(completed, total):
+    """Print test-level progress."""
+    print(
+        "Progress: {} ({} of {} tests passed)".format(
+            progress_bar(completed, total),
+            completed,
+            total,
+        )
     )
 
 
@@ -163,8 +270,8 @@ def write_text(path, content):
 
 
 def run_cmd(command, cwd=None, expected_rc=0, log_path=None, env=None):
-    """Run a command, print output, optionally save output, and return output."""
-    print_command_header(command)
+    """Run a command, save output to logs, and return combined output."""
+    command_log_path = print_command_header(command)
 
     process = subprocess.Popen(
         command,
@@ -176,22 +283,29 @@ def run_cmd(command, cwd=None, expected_rc=0, log_path=None, env=None):
     )
     stdout, stderr = process.communicate()
 
-    combined = stdout or ""
+    stdout = stdout or ""
+    stderr = stderr or ""
+
+    combined = stdout
     if stderr:
         combined += "\n[stderr]\n{}".format(stderr)
 
-    if stdout:
-        sys.stdout.write(stdout)
-        if not stdout.endswith("\n"):
-            print("")
+    write_command_logs(
+        command_log_path,
+        log_path,
+        command,
+        cwd,
+        process.returncode,
+        stdout,
+        stderr,
+    )
 
-    if stderr:
-        sys.stderr.write(stderr)
-        if not stderr.endswith("\n"):
-            print("", file=sys.stderr)
-
-    if log_path:
-        write_text(log_path, combined)
+    if expected_rc is None:
+        print("Return code: {}".format(process.returncode))
+    elif process.returncode == expected_rc:
+        print("Return code: {} expected".format(process.returncode))
+    else:
+        print("Return code: {} expected {}".format(process.returncode, expected_rc))
 
     if expected_rc is not None and process.returncode != expected_rc:
         raise TestFailure(
@@ -2455,6 +2569,7 @@ def main():
     args.require_firewalld = not args.no_require_firewalld
 
     Path(args.log_dir).mkdir(parents=True, exist_ok=True)
+    set_run_log_path(args.log_dir)
 
     args.aerolitctl_wrapper = create_local_aerolitctl_wrapper(
         args.repo_root,
@@ -2586,6 +2701,7 @@ def main():
                     name,
                 )
             )
+            print_progress(test_number, total_tests)
 
         print("")
         print("=" * 80)
@@ -2598,6 +2714,12 @@ def main():
         print("")
         print("Logs saved under:")
         print("  {}".format(args.log_dir))
+        print("")
+        print("Full run log:")
+        print("  {}".format(RUN_LOG_PATH))
+        print("")
+        print("Command logs:")
+        print("  {}".format(Path(args.log_dir) / "commands"))
         print("")
 
         return 0
@@ -2631,6 +2753,17 @@ if __name__ == "__main__":
         print("FAIL in {}".format(current_test_label()))
         print("Last command context: {}".format(current_command_label()))
         print("FAIL: {}".format(exc))
+
+        if RUN_LOG_PATH is not None:
+            print("")
+            print("Full run log:")
+            print("  {}".format(RUN_LOG_PATH))
+
+        if LAST_COMMAND_LOG_PATH is not None:
+            print("")
+            print("Last command log:")
+            print("  {}".format(LAST_COMMAND_LOG_PATH))
+
         print("=" * 80)
         print("")
         sys.exit(1)
