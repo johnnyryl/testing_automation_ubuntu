@@ -12,16 +12,18 @@ This is a broad manual smoke/regression test for the work around:
 - show vs dry-run safety behavior
 - configure init dry-run behavior
 - bundle manifest creation/validation/idempotency behavior
+- configure repos discovery/validation/generated-vars behavior
 - configure ansible managed inventory/group_vars behavior
 - configure pxe managed profile/generated-vars behavior
 
 It intentionally runs real `aerolitctl configure server`,
-`aerolitctl configure ansible`, `aerolitctl configure pxe`, and
-`aerolitctl configure init` commands because those are the only
-way to confirm saved config, generated vars, managed Ansible
-files, and bundle manifest behavior. By default it restores the
-original config, state, generated vars, manifest, sync files,
-CI file, managed Ansible files, and managed PXE files before exiting.
+`aerolitctl configure repos`, `aerolitctl configure ansible`,
+`aerolitctl configure pxe`, and `aerolitctl configure init`
+commands because those are the only way to confirm saved config,
+generated vars, managed Ansible files, and bundle manifest
+behavior. By default it restores the original config, state,
+generated vars, manifest, sync files, CI file, managed Ansible
+files, and managed PXE files before exiting.
 
 Recommended location:
   tools/aerolitctl_merge_readiness.py
@@ -183,6 +185,20 @@ def assert_not_contains(text, unexpected, label=None):
                 unexpected,
             )
         )
+
+
+def assert_contains_any(text, expected_values, label=None):
+    """Assert text contains at least one expected string."""
+    for expected in expected_values:
+        if expected in text:
+            return
+
+    raise TestFailure(
+        "Missing any expected text{}: {}".format(
+            " in {}".format(label) if label else "",
+            ", ".join(expected_values),
+        )
+    )
 
 
 def assert_regex(text, pattern, label=None):
@@ -490,6 +506,13 @@ def managed_pxe_state_paths(args):
     return paths
 
 
+def managed_repo_state_paths(args):
+    """Return aerolitctl-managed repo files that should be snapshotted."""
+    return [
+        Path(args.repos_generated_vars_path),
+    ]
+
+
 def assert_bundle_manifest_content(args):
     """Assert the bundle manifest exists and contains expected v1 fields."""
     manifest = bundle_manifest_path(args)
@@ -721,6 +744,10 @@ def test_cli_help_and_parser(args):
             "--validation-failure-policy",
             "warn",
         ],
+        ["aerolitctl", "configure", "repos", "--help"],
+        ["aerolitctl", "configure", "repos", "--show"],
+        ["aerolitctl", "configure", "repos", "--validate"],
+        ["aerolitctl", "configure", "repos", "--refresh", "--dry-run"],
     ]
 
     help_output = run_cmd(["aerolitctl", "configure", "server", "--help"])
@@ -752,6 +779,12 @@ def test_cli_help_and_parser(args):
     assert_not_contains(pxe_help, "--enable-dnsmasq-firewall", "configure pxe help")
     assert_not_contains(pxe_help, "--disable-dnsmasq-firewall", "configure pxe help")
     assert_not_contains(pxe_help, "--dnsmasq-firewall-zone", "configure pxe help")
+
+    repos_help = run_cmd(["aerolitctl", "configure", "repos", "--help"])
+    assert_contains(repos_help, "--show", "configure repos help")
+    assert_contains(repos_help, "--validate", "configure repos help")
+    assert_contains(repos_help, "--refresh", "configure repos help")
+    assert_contains(repos_help, "--dry-run", "configure repos help")
 
     for command in commands:
         run_cmd(command)
@@ -1285,6 +1318,144 @@ def test_configure_dry_run_read_only(args, hash_paths):
 
     after = sha256_paths(hash_paths)
     assert_hashes_same(before, after, "configure-server-dry-run-read-only")
+
+
+def test_configure_repos_help_and_parser(args):
+    """Confirm configure repos parser/help paths work."""
+    help_output = run_cmd(["aerolitctl", "configure", "repos", "--help"])
+
+    assert_contains(help_output, "--show", "configure repos help")
+    assert_contains(help_output, "--validate", "configure repos help")
+    assert_contains(help_output, "--refresh", "configure repos help")
+    assert_contains(help_output, "--dry-run", "configure repos help")
+
+
+def test_configure_repos_dry_run_read_only(args, hash_paths):
+    """Confirm configure repos show/validate/refresh dry-run are read-only."""
+    before = sha256_paths(hash_paths)
+
+    show_output = run_cmd(["aerolitctl", "configure", "repos", "--show"])
+    assert_regex(show_output, r"(?i)repo", "configure repos --show")
+
+    validate_output = run_cmd(["aerolitctl", "configure", "repos", "--validate"])
+    assert_regex(validate_output, r"(?i)(repo|validation|summary)", "configure repos --validate")
+
+    refresh_dry_run_output = run_cmd(
+        ["aerolitctl", "configure", "repos", "--refresh", "--dry-run"]
+    )
+    assert_regex(
+        refresh_dry_run_output,
+        r"(?i)(dry[- ]run|no files were changed|would)",
+        "configure repos --refresh --dry-run",
+    )
+
+    after = sha256_paths(hash_paths)
+    assert_hashes_same(before, after, "configure-repos-dry-run-read-only")
+
+
+def test_real_configure_repos_refresh(args):
+    """Run real configure repos refresh and verify generated repo vars."""
+    generated_path = Path(args.repos_generated_vars_path)
+
+    output = run_cmd(["aerolitctl", "configure", "repos", "--refresh"])
+
+    assert_regex(output, r"(?i)repo", "configure repos --refresh")
+    assert_path_exists(generated_path, "generated repo vars")
+
+    generated_text = read_text(generated_path)
+
+    assert_regex(
+        generated_text,
+        r"(?i)(repo|repositories|aerolit)",
+        "generated repo vars content",
+    )
+    assert_regex(
+        generated_text,
+        r"(?m)^.+:",
+        "generated repo vars YAML-like content",
+    )
+
+
+def test_deploy_repo_vars_handoff(args):
+    """Confirm deploy server dry-run consumes generated repo vars."""
+    run_cmd(configure_server_command(args, "full"))
+
+    output = run_cmd(
+        ["aerolitctl", "deploy", "server", "--dry-run"],
+        log_path=Path(args.log_dir) / "deploy-repo-vars-handoff.log",
+    )
+
+    assert_contains(
+        output,
+        "AeroLIT deploy repository preflight",
+        "deploy repository preflight",
+    )
+    assert_contains(
+        output,
+        "Repo vars file",
+        "deploy repository preflight",
+    )
+    assert_contains(
+        output,
+        args.repos_generated_vars_path,
+        "deploy repository preflight repo vars path",
+    )
+    assert_contains(
+        output,
+        "Requested packages:",
+        "deploy repository preflight requested packages",
+    )
+    assert_contains(
+        output,
+        "-e @{}".format(args.repos_generated_vars_path),
+        "deploy ansible repo vars handoff",
+    )
+
+
+def test_deploy_missing_repo_vars_guard(args):
+    """Confirm deploy fails clearly when repo vars refresh is skipped and vars are missing."""
+    repo_vars_path = Path(args.repos_generated_vars_path)
+    backup_path = Path(args.log_dir) / "aerolitctl_repos_generated.yml.test-backup"
+
+    if repo_vars_path.exists():
+        shutil.copy2(str(repo_vars_path), str(backup_path))
+
+    try:
+        if repo_vars_path.exists():
+            repo_vars_path.unlink()
+
+        output = run_cmd(
+            [
+                "aerolitctl",
+                "deploy",
+                "server",
+                "--dry-run",
+                "--skip-repo-vars-refresh",
+            ],
+            expected_rc=1,
+            log_path=Path(args.log_dir) / "deploy-missing-repo-vars.log",
+        )
+
+        assert_contains_any(
+            output,
+            [
+                "aerolitctl_repos_generated.yml",
+                "repo vars",
+                "repository vars",
+            ],
+            "missing repo vars failure",
+        )
+        assert_contains(
+            output,
+            "--skip-repo-vars-refresh",
+            "missing repo vars failure",
+        )
+
+    finally:
+        if backup_path.exists():
+            if not repo_vars_path.parent.exists():
+                repo_vars_path.parent.mkdir(parents=True)
+            shutil.copy2(str(backup_path), str(repo_vars_path))
 
 
 def test_configure_ansible_dry_run_read_only(args, hash_paths):
@@ -2137,6 +2308,14 @@ def main():
         / "all"
         / "aerolitctl_pxe_generated.yml"
     )
+    args.repos_generated_vars_path = str(
+        Path(args.bundle_path)
+        / "collections-hub"
+        / "ansible"
+        / "group_vars"
+        / "all"
+        / "aerolitctl_repos_generated.yml"
+    )
     args.pxe_overrides_dir = "/etc/aerolit/overrides/pxe"
     args.pxe_profile_overrides_dir = "/etc/aerolit/overrides/pxe/profiles"
     args.pxe_template_overrides_dir = "/etc/aerolit/overrides/pxe/templates"
@@ -2168,6 +2347,7 @@ def main():
         Path(args.bundle_path) / "collections-hub" / ".sync-preserve",
         Path(args.bundle_path) / "collections-hub" / ".gitlab-ci.yml",
         Path(args.generated_vars_path),
+        *managed_repo_state_paths(args),
         *managed_ansible_state_paths(args),
         *managed_pxe_state_paths(args),
     ]
@@ -2186,6 +2366,7 @@ def main():
     print("Bundle manifest    : {}".format(bundle_manifest_path(args)))
     print("Generated vars     : {}".format(args.generated_vars_path))
     print("Ansible inventory  : {}".format(args.ansible_inventory_path))
+    print("Repo gen vars      : {}".format(args.repos_generated_vars_path))
     print("Ansible gen vars   : {}".format(args.ansible_generated_vars_path))
     print("Ansible test vars  : {}".format(args.ansible_test_group_vars_path))
     print("PXE gen vars       : {}".format(args.pxe_generated_vars_path))
@@ -2217,6 +2398,8 @@ def main():
         ("standardized source wording", lambda: test_standardized_source_wording(args)),
         ("configure server --show mode behavior", lambda: test_configure_show_modes(args, hash_paths)),
         ("configure server dry-run mode behavior", lambda: test_configure_dry_run_modes(args, hash_paths)),
+        ("configure repos help/parser", lambda: test_configure_repos_help_and_parser(args)),
+        ("configure repos dry-run read-only", lambda: test_configure_repos_dry_run_read_only(args, hash_paths)),
         ("configure ansible dry-run read-only", lambda: test_configure_ansible_dry_run_read_only(args, hash_paths)),
         ("configure ansible sensitive var guard", lambda: test_configure_ansible_sensitive_var_guard(args)),
         ("configure pxe option guard", lambda: test_configure_pxe_option_guard(args)),
@@ -2226,6 +2409,9 @@ def main():
     if not args.skip_write_tests:
         tests.extend(
             [
+                ("real configure repos refresh/generated vars", lambda: test_real_configure_repos_refresh(args)),
+                ("deploy repo vars handoff", lambda: test_deploy_repo_vars_handoff(args)),
+                ("deploy missing repo vars guard", lambda: test_deploy_missing_repo_vars_guard(args)),
                 ("real configure ansible managed writes", lambda: test_real_configure_ansible_writes(args)),
                 ("real configure server mode writes", lambda: test_real_configure_modes(args)),
                 ("real configure pxe managed writes/status/doctor", lambda: test_real_configure_pxe_writes(args)),
