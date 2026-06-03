@@ -53,6 +53,77 @@ class TestFailure(Exception):
     """Raised when a merge-readiness check fails."""
 
 
+CURRENT_TEST_NUMBER = None
+CURRENT_TEST_TOTAL = None
+CURRENT_TEST_NAME = None
+CURRENT_COMMAND_NUMBER = 0
+
+
+def print_test_header(test_number, total_tests, name):
+    """Print and track the current top-level test header."""
+    global CURRENT_TEST_NUMBER
+    global CURRENT_TEST_TOTAL
+    global CURRENT_TEST_NAME
+    global CURRENT_COMMAND_NUMBER
+
+    CURRENT_TEST_NUMBER = test_number
+    CURRENT_TEST_TOTAL = total_tests
+    CURRENT_TEST_NAME = name
+    CURRENT_COMMAND_NUMBER = 0
+
+    print("")
+    print("#" * 80)
+    print("# TEST {} of {}: {}".format(test_number, total_tests, name))
+    print("#" * 80)
+
+
+def print_command_header(command):
+    """Print and track the current command header."""
+    global CURRENT_COMMAND_NUMBER
+
+    CURRENT_COMMAND_NUMBER += 1
+
+    print("")
+
+    if CURRENT_TEST_NUMBER is None:
+        print("[COMMAND {}]".format(CURRENT_COMMAND_NUMBER))
+    else:
+        print(
+            "[TEST {} / COMMAND {}]".format(
+                CURRENT_TEST_NUMBER,
+                CURRENT_COMMAND_NUMBER,
+            )
+        )
+
+    print("$ {}".format(render_cmd(command)))
+
+
+def current_test_label():
+    """Return a readable label for the current test."""
+    if CURRENT_TEST_NUMBER is None:
+        return "no active test"
+
+    return "TEST {} of {}: {}".format(
+        CURRENT_TEST_NUMBER,
+        CURRENT_TEST_TOTAL,
+        CURRENT_TEST_NAME,
+    )
+
+
+def current_command_label():
+    """Return a readable label for the most recent command."""
+    if CURRENT_COMMAND_NUMBER == 0:
+        return "no command has run in this test yet"
+
+    if CURRENT_TEST_NUMBER is None:
+        return "COMMAND {}".format(CURRENT_COMMAND_NUMBER)
+
+    return "TEST {} / COMMAND {}".format(
+        CURRENT_TEST_NUMBER,
+        CURRENT_COMMAND_NUMBER,
+    )
+
+
 def timestamp():
     """Return a filesystem-safe timestamp."""
     return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -93,8 +164,7 @@ def write_text(path, content):
 
 def run_cmd(command, cwd=None, expected_rc=0, log_path=None, env=None):
     """Run a command, print output, optionally save output, and return output."""
-    print("")
-    print("$ {}".format(render_cmd(command)))
+    print_command_header(command)
 
     process = subprocess.Popen(
         command,
@@ -2497,17 +2567,25 @@ def main():
     )
 
     passed = []
+    total_tests = len(tests)
 
     try:
-        for name, test_func in tests:
-            print("")
-            print("=" * 80)
-            print("TEST: {}".format(name))
-            print("=" * 80)
+        for test_number, item in enumerate(tests, 1):
+            name, test_func = item
+
+            print_test_header(test_number, total_tests, name)
+
             test_func()
             passed.append(name)
+
             print("")
-            print("PASS: {}".format(name))
+            print(
+                "PASS TEST {} of {}: {}".format(
+                    test_number,
+                    total_tests,
+                    name,
+                )
+            )
 
         print("")
         print("=" * 80)
@@ -2550,6 +2628,8 @@ if __name__ == "__main__":
     except TestFailure as exc:
         print("")
         print("=" * 80)
+        print("FAIL in {}".format(current_test_label()))
+        print("Last command context: {}".format(current_command_label()))
         print("FAIL: {}".format(exc))
         print("=" * 80)
         print("")
