@@ -216,6 +216,14 @@ def add_configure_repos_parser(configure_subparsers):
         ),
     )
     repos_parser.add_argument(
+        "--guided",
+        action="store_true",
+        help=(
+            "Walk through repository source selection interactively. "
+            "Supports bundle-only, bundle-plus-custom, and custom-only repo layouts."
+        ),
+    )
+    repos_parser.add_argument(
         "--show",
         action="store_true",
         help="Show discovered/planned repository configuration.",
