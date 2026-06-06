@@ -15,6 +15,7 @@ This is a broad manual smoke/regression test for the work around:
 - configure repos discovery/validation/generated-vars behavior
 - configure ansible managed inventory/group_vars behavior
 - configure pxe managed profile/generated-vars behavior
+- configure all orchestration behavior
 
 It intentionally runs real `aerolitctl configure server`,
 `aerolitctl configure repos`, `aerolitctl configure ansible`,
@@ -951,9 +952,27 @@ def test_cli_help_and_parser(args):
         ["aerolitctl", "configure", "repos", "--show"],
         ["aerolitctl", "configure", "repos", "--validate"],
         ["aerolitctl", "configure", "repos", "--refresh", "--dry-run"],
+        ["aerolitctl", "configure", "all", "--help"],
+        ["aerolitctl", "configure", "all", "--show"],
+        ["aerolitctl", "configure", "all", "--dry-run", "--skip-server"],
+        ["aerolitctl", "configure", "all", "--validate", "--skip-server"],
+        ["aerolitctl", "configure", "all", "--non-interactive", "--skip-server", "--dry-run"],
     ]
 
     help_output = run_cmd(["aerolitctl", "configure", "server", "--help"])
+
+    configure_all_help = run_cmd(["aerolitctl", "configure", "all", "--help"])
+    assert_contains(configure_all_help, "--guided", "configure all help")
+    assert_contains(configure_all_help, "--dry-run", "configure all help")
+    assert_contains(configure_all_help, "--show", "configure all help")
+    assert_contains(configure_all_help, "--validate", "configure all help")
+    assert_contains(configure_all_help, "--non-interactive", "configure all help")
+    assert_contains(configure_all_help, "--skip-init", "configure all help")
+    assert_contains(configure_all_help, "--skip-server", "configure all help")
+    assert_contains(configure_all_help, "--skip-repos", "configure all help")
+    assert_contains(configure_all_help, "--skip-ansible", "configure all help")
+    assert_contains(configure_all_help, "--skip-pxe", "configure all help")
+
     assert_not_contains(help_output, "NFS/controller", "configure server help")
     assert_contains(help_output, "Ansible Controller / NFS", "configure server help")
     ansible_help = run_cmd(["aerolitctl", "configure", "ansible", "--help"])
@@ -1093,6 +1112,68 @@ def test_server_dhcp_range_math(args):
         raise TestFailure(
             "Expected old .100-.149 range size 50, got {}".format(old_size)
         )
+
+
+def test_configure_all_read_only(args, hash_paths):
+    """Confirm configure all show/validate/dry-run paths are read-only."""
+    before = sha256_paths(hash_paths)
+
+    show_output = run_cmd(["aerolitctl", "configure", "all", "--show"])
+    assert_contains(show_output, "AeroLIT configure all plan", "configure all --show")
+    assert_contains(
+        show_output,
+        "Show complete. No files were changed.",
+        "configure all --show",
+    )
+
+    validate_output = run_cmd(
+        ["aerolitctl", "configure", "all", "--validate", "--skip-server"]
+    )
+    assert_contains(validate_output, "AeroLIT configure all", "configure all --validate")
+    assert_contains(
+        validate_output,
+        "Validation complete. No files were changed by configure all.",
+        "configure all --validate",
+    )
+
+    dry_run_output = run_cmd(
+        ["aerolitctl", "configure", "all", "--dry-run", "--skip-server"]
+    )
+    assert_contains(dry_run_output, "AeroLIT configure all", "configure all --dry-run")
+    assert_contains(
+        dry_run_output,
+        "Dry run complete. No files were changed by configure all.",
+        "configure all --dry-run",
+    )
+
+    guarded_output = run_cmd(
+        [
+            "bash",
+            "-lc",
+            "aerolitctl configure all --guided </dev/null",
+        ],
+        expected_rc=1,
+        log_path=Path(args.log_dir) / "configure-all-guided-noninteractive.log",
+    )
+    assert_contains(
+        guarded_output,
+        "configure all --guided requires an interactive terminal",
+        "configure all guided non-interactive guard",
+    )
+
+    conflict_output = run_cmd(
+        ["aerolitctl", "configure", "all", "--show", "--dry-run"],
+        expected_rc=1,
+        log_path=Path(args.log_dir) / "configure-all-conflict.log",
+    )
+    assert_contains(
+        conflict_output,
+        "Use either --show or --dry-run, not both.",
+        "configure all mode conflict",
+    )
+
+    after = sha256_paths(hash_paths)
+    assert_hashes_same(before, after, "configure-all-read-only")
 
 
 def test_configure_show_modes(args, hash_paths):
@@ -2686,6 +2767,7 @@ def main():
         ("CLI help and parser", lambda: test_cli_help_and_parser(args)),
         ("standardized source wording", lambda: test_standardized_source_wording(args)),
         ("server DHCP range math", lambda: test_server_dhcp_range_math(args)),
+        ("configure all read-only behavior", lambda: test_configure_all_read_only(args, hash_paths)),
         ("configure server --show mode behavior", lambda: test_configure_show_modes(args, hash_paths)),
         ("configure server dry-run mode behavior", lambda: test_configure_dry_run_modes(args, hash_paths)),
         ("configure repos help/parser", lambda: test_configure_repos_help_and_parser(args)),
