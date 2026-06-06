@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
@@ -1865,9 +1866,515 @@ def print_repos_summary(bundle_path, path_for_ansible, entries):
             print("  - {}: {}".format(repo["id"], repo["server_baseurl"]))
 
 
+class GuidedRepoArgs(object):
+    """Simple args container for guided configure repos choices."""
+
+
+def repos_text_prompt(prompt, default=None, allow_empty=False, blank_label="skip"):
+    """Prompt for text with readable default behavior."""
+    if default is not None and str(default) != "":
+        rendered = "{} [default: {}; Enter=default]: ".format(prompt, default)
+    elif allow_empty:
+        rendered = "{} [Enter={}]: ".format(prompt, blank_label)
+    else:
+        rendered = "{}: ".format(prompt)
+
+    while True:
+        value = input(rendered).strip()
+
+        if value:
+            return value
+
+        if default is not None:
+            return default
+
+        if allow_empty:
+            return ""
+
+        print("This value is required. Enter a value or press Ctrl+C to cancel.")
+
+
+def repos_yes_no_prompt(prompt, default=False):
+    """Ask a yes/no guided question."""
+    default_text = "Y" if default else "N"
+    choices = "Y/n" if default else "y/N"
+
+    while True:
+        value = input(
+            "{} [{}; Enter={}]: ".format(prompt, choices, default_text)
+        ).strip().lower()
+
+        if not value:
+            return default
+
+        if value in ("y", "yes"):
+            return True
+
+        if value in ("n", "no"):
+            return False
+
+        print("Please answer yes or no. Valid responses are: y, yes, n, no.")
+
+
+def repos_choose_option(text, options, default_index=0):
+    """Choose one guided option from a numbered list."""
+    if not options:
+        raise RepoConfigError("repos_choose_option requires at least one option")
+
+    default_index = max(0, min(default_index, len(options) - 1))
+
+    print("")
+    print(text)
+    print("")
+
+    for idx, option in enumerate(options, start=1):
+        marker = "*" if idx - 1 == default_index else " "
+        print("{} {}) {}".format(marker, idx, option))
+
+    while True:
+        value = input(
+            "Choose 1-{} [default: {}; Enter=default]: ".format(
+                len(options),
+                default_index + 1,
+            )
+        ).strip()
+
+        if value == "":
+            return default_index
+
+        if value.isdigit():
+            parsed = int(value)
+            if 1 <= parsed <= len(options):
+                return parsed - 1
+
+        print(
+            "Invalid selection: {}. Choose a number from 1 through {}.".format(
+                value,
+                len(options),
+            )
+        )
+
+
+def print_repos_guided_intro():
+    """Print configure repos guided-mode intro."""
+    print("")
+    print("AeroLIT configure repos helper")
+    print("")
+    print("This helper discovers or accepts repository sources and can generate")
+    print("the Ansible repo variables used by deploy/provisioning.")
+    print("")
+    print("It writes generated repo vars only unless you choose to also write")
+    print("the server bootstrap .repo file.")
+    print("")
+    print("It does not install packages by default. Package installation is")
+    print("normally handled later by:")
+    print("")
+    print("  aerolitctl deploy server")
+
+
+def choose_repo_source_mode():
+    """Choose bundle-only, bundle-plus-custom, or custom-only repo mode."""
+    print("")
+    print("#" * 80)
+    print("# Step 1. Repository source mode")
+    print("#" * 80)
+    print("")
+    print("How should AeroLIT choose repositories?")
+    print("")
+    print("1) Use repositories discovered in the AeroLIT bundle")
+    print("   Best for normal disconnected AeroLIT bundles.")
+    print("   AeroLIT scans extracted_isos/ and repos/.")
+    print("")
+    print("2) Use bundle repositories plus my own extra repositories")
+    print("   Best when the bundle has BaseOS/AppStream but you also have internal")
+    print("   tools, security content, EPEL-like repos, or application repos.")
+    print("")
+    print("3) Use only my own repositories")
+    print("   Best when your organization already provides approved repo mirrors")
+    print("   and you do not want AeroLIT to use repos discovered from the bundle.")
+
+    choice = repos_choose_option(
+        "Repository source mode:",
+        [
+            "Bundle repositories only",
+            "Bundle repositories plus custom repositories",
+            "Custom repositories only",
+        ],
+        default_index=0,
+    )
+
+    if choice == 0:
+        return "bundle"
+
+    if choice == 1:
+        return "bundle_custom"
+
+    return "custom"
+
+
+def choose_repos_bundle_path(source_mode, current_bundle_path):
+    """Prompt for bundle/output path."""
+    print("")
+    print("#" * 80)
+    print("# Step 2. Bundle/output path")
+    print("#" * 80)
+    print("")
+
+    if source_mode in ("bundle", "bundle_custom"):
+        print("AeroLIT will use this bundle path to scan for repositories and")
+        print("to write generated repo variables.")
+    else:
+        print("AeroLIT will not scan the bundle for repositories, but it still")
+        print("needs the bundle path so it knows where to write generated repo variables:")
+        print("")
+        print("  collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml")
+
+    print("")
+    print("Configured bundle path:")
+    print("  {}".format(current_bundle_path))
+
+    if repos_yes_no_prompt("Use this bundle path?", default=True):
+        return current_bundle_path
+
+    value = repos_text_prompt(
+        "Bundle path",
+        default=str(current_bundle_path),
+    )
+
+    return absolute_path(value)
+
+
+def choose_repos_client_path(source_mode, default_path):
+    """Prompt for client-visible bundle path."""
+    print("")
+    print("#" * 80)
+    print("# Step 3. Client-visible bundle path")
+    print("#" * 80)
+    print("")
+
+    print("Generated provisioning repo URLs may need the path that provisioned")
+    print("clients see, not just the path the server uses.")
+    print("")
+    print("With the normal AeroLIT NFS layout, the server may store the bundle at:")
+    print("  /opt/aerolit/aerolit-bundle")
+    print("")
+    print("Provisioned clients usually see the same content at:")
+    print("  {}".format(DEFAULT_PATH_FOR_ANSIBLE))
+    print("")
+
+    if source_mode == "custom":
+        print("For custom-only HTTP/HTTPS repos, this value may not matter.")
+        print("For custom local paths inside the bundle, it lets AeroLIT rewrite")
+        print("server-local paths into client-visible file:// repo URLs.")
+        print("")
+
+    value = repos_text_prompt(
+        "Client-visible bundle path",
+        default=default_path,
+    )
+
+    return normalize_client_path(value)
+
+
+def guided_add_server_bootstrap_sources(args):
+    """Prompt for optional explicit server BaseOS/AppStream sources."""
+    print("")
+    print("#" * 80)
+    print("# Step 5. Server bootstrap repositories")
+    print("#" * 80)
+    print("")
+    print("Server bootstrap repos are used by the AeroLIT server itself if it")
+    print("needs local packages such as:")
+    print("  - ansible-core")
+    print("  - podman")
+    print("  - nfs-utils")
+    print("  - dnsmasq")
+    print("  - firewalld, when firewall management is enabled")
+    print("")
+    print("These are not necessarily the same repo URLs that provisioned clients use.")
+
+    if not repos_yes_no_prompt(
+        "Provide explicit server bootstrap BaseOS/AppStream repos?",
+        default=False,
+    ):
+        return
+
+    args.server_baseos_source = repos_text_prompt(
+        "Server BaseOS source",
+        default=getattr(args, "server_baseos_source", None),
+        allow_empty=True,
+        blank_label="skip",
+    ) or None
+
+    args.server_appstream_source = repos_text_prompt(
+        "Server AppStream source",
+        default=getattr(args, "server_appstream_source", None),
+        allow_empty=True,
+        blank_label="skip",
+    ) or None
+
+
+def guided_add_provisioning_repos(args, source_mode):
+    """Prompt for explicit provisioning/client repos."""
+    print("")
+    print("#" * 80)
+    print("# Step 6. Provisioning/client repositories")
+    print("#" * 80)
+    print("")
+    print("Provisioning repos are written into:")
+    print("  collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml")
+    print("")
+    print("Provisioned clients use these repo URLs during installation or")
+    print("post-install automation.")
+    print("")
+
+    if source_mode == "custom":
+        print("Because you selected custom-only mode, add at least one provisioning")
+        print("repo unless you only plan to write a server bootstrap repo.")
+        default_add = True
+    else:
+        print("Most users can skip this unless they have extra repos such as:")
+        print("  - internal tools")
+        print("  - security packages")
+        print("  - EPEL-like repos")
+        print("  - application dependencies")
+        default_add = False
+
+    provision_repos = list(getattr(args, "provision_repo", None) or [])
+    provision_extra_repos = list(getattr(args, "provision_extra_repo", None) or [])
+
+    while repos_yes_no_prompt("Add an explicit provisioning repo?", default=default_add):
+        os_index = repos_choose_option(
+            "Which OS should use this repo?",
+            SUPPORTED_RHEL_KEYS,
+            default_index=SUPPORTED_RHEL_KEYS.index("rhel9"),
+        )
+        os_key = SUPPORTED_RHEL_KEYS[os_index]
+
+        print("")
+        print("Repo ID")
+        print("")
+        print("Use a short lowercase name. Examples:")
+        print("  custom-tools")
+        print("  security-content")
+        print("  internal-rpms")
+        repo_id = sanitize_repo_id(repos_text_prompt("Repo ID"))
+
+        print("")
+        print("Repo path or URL")
+        print("")
+        print("Examples:")
+        print("  /opt/aerolit/aerolit-bundle/repos/{}/custom-tools".format(os_key))
+        print("  file:///home/unix/sysadmin/repos/{}/custom-tools".format(os_key))
+        print("  https://repo.example.com/{}/custom-tools".format(os_key))
+        print("")
+        print("NOTE: for local paths outside the AeroLIT bundle, provisioned clients")
+        print("must be able to reach that same path, or you should use HTTP/HTTPS.")
+        source = repos_text_prompt("Repo path or URL")
+
+        spec = "{}:{}={}".format(os_key, repo_id, source)
+        provision_repos.append(spec)
+
+        print("")
+        print("Added provisioning repo override:")
+        print("  {}".format(spec))
+
+        default_add = False
+
+    args.provision_repo = provision_repos
+    args.provision_extra_repo = provision_extra_repos
+
+
+def choose_guided_save_action(entries):
+    """Prompt for what guided mode should write."""
+    print("")
+    print("#" * 80)
+    print("# Step 9. Save repository configuration")
+    print("#" * 80)
+    print("")
+
+    server_pair = server_bootstrap_pair(entries)
+    bootstrap_available = bool(server_pair.get("baseos") and server_pair.get("appstream"))
+
+    print("Choose what to write:")
+    print("")
+    print("1) Generate provisioning repo vars only")
+    print("   Writes:")
+    print("     collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml")
+    print("   Recommended for most users.")
+    print("")
+    print("2) Generate provisioning repo vars and write server bootstrap repo")
+    print("   Also writes:")
+    print("     {}".format(DEFAULT_SERVER_BOOTSTRAP_REPO_FILE))
+    print("   Use this if this server needs local bundle repos for packages.")
+    if not bootstrap_available:
+        print("   NOTE: this option requires a BaseOS/AppStream pair, which is incomplete.")
+    print("")
+    print("3) Dry-run only")
+    print("   Show what would be written, but do not change files.")
+    print("")
+    print("4) Show only")
+    print("   Print discovery results and exit without writing files.")
+
+    while True:
+        choice = repos_choose_option(
+            "Save action:",
+            [
+                "Generate provisioning repo vars only",
+                "Generate provisioning repo vars and write server bootstrap repo",
+                "Dry-run only",
+                "Show only",
+            ],
+            default_index=0,
+        )
+
+        if choice == 1 and not bootstrap_available:
+            print("")
+            print("Cannot choose server bootstrap repo writing yet because BaseOS/AppStream")
+            print("for the current server OS are incomplete.")
+            print("Provide explicit server bootstrap sources or choose another action.")
+            continue
+
+        return choice
+
+
+def build_guided_repos_args(args):
+    """Return an args object populated from guided configure repos prompts."""
+    if not sys.stdin.isatty():
+        raise RepoConfigError(
+            "configure repos --guided requires an interactive terminal. "
+            "Use --show, --validate, --refresh, or --refresh --dry-run for non-interactive use."
+        )
+
+    guided_args = GuidedRepoArgs()
+    guided_args.__dict__.update(vars(args))
+    guided_args.guided = False
+
+    original_show = bool(getattr(args, "show", False))
+    original_dry_run = bool(getattr(args, "dry_run", False))
+
+    print_repos_guided_intro()
+
+    source_mode = choose_repo_source_mode()
+    guided_args.no_auto_discovery = source_mode == "custom"
+
+    current_bundle_path = getattr(args, "bundle_path", None)
+    if current_bundle_path:
+        current_bundle_path = absolute_path(current_bundle_path)
+    else:
+        current_bundle_path = configured_bundle_path()
+
+    bundle_path = choose_repos_bundle_path(source_mode, current_bundle_path)
+    guided_args.bundle_path = str(bundle_path)
+
+    current_client_path = (
+        getattr(args, "path_for_ansible", None)
+        or DEFAULT_PATH_FOR_ANSIBLE
+    )
+    guided_args.path_for_ansible = choose_repos_client_path(
+        source_mode,
+        current_client_path,
+    )
+
+    print("")
+    print("#" * 80)
+    print("# Step 4. Bundle discovery")
+    print("#" * 80)
+    print("")
+
+    if source_mode == "custom":
+        print("Custom-only mode selected. Bundle repository discovery is disabled.")
+    else:
+        print("AeroLIT will scan the bundle for repositories under locations like:")
+        print("  - extracted_isos/")
+        print("  - repos/")
+        print("")
+        print("A valid yum/dnf repository has:")
+        print("  repodata/repomd.xml")
+
+    guided_add_server_bootstrap_sources(guided_args)
+
+    if source_mode in ("bundle_custom", "custom"):
+        guided_add_provisioning_repos(guided_args, source_mode)
+    else:
+        guided_args.provision_repo = list(getattr(args, "provision_repo", None) or [])
+        guided_args.provision_extra_repo = list(
+            getattr(args, "provision_extra_repo", None) or []
+        )
+
+    entries = build_repo_plan(
+        bundle_path,
+        path_for_ansible=guided_args.path_for_ansible,
+        args=guided_args,
+    )
+
+    print("")
+    print("#" * 80)
+    print("# Step 7. Final repository plan")
+    print("#" * 80)
+    print("")
+    print_repos_summary(bundle_path, guided_args.path_for_ansible, entries)
+
+    print("")
+    print("#" * 80)
+    print("# Step 8. Validate final repository plan")
+    print("#" * 80)
+
+    if repos_yes_no_prompt("Validate before saving?", default=True):
+        print("")
+        report = validate_repos_state(
+            bundle_path,
+            guided_args.path_for_ansible,
+            entries,
+            requested_os_keys=collect_requested_os_keys(guided_args),
+        )
+        report.print_report()
+
+        if report.errors:
+            if not repos_yes_no_prompt(
+                "Validation found failures. Continue anyway?",
+                default=False,
+            ):
+                raise RepoConfigError("Guided configure repos cancelled.")
+
+    if original_show:
+        print("")
+        print("Original --show option was provided; guided mode will show the final plan only.")
+        save_choice = 3
+    else:
+        save_choice = choose_guided_save_action(entries)
+
+    guided_args.show = False
+    guided_args.validate = False
+    guided_args.refresh = False
+    guided_args.write_server_bootstrap = False
+    guided_args.ensure_server_prereqs = False
+    guided_args.dry_run = False
+
+    if save_choice == 0:
+        guided_args.refresh = True
+    elif save_choice == 1:
+        guided_args.refresh = True
+        guided_args.write_server_bootstrap = True
+    elif save_choice == 2:
+        guided_args.refresh = True
+        guided_args.dry_run = True
+    else:
+        guided_args.show = True
+
+    if original_dry_run and not guided_args.show:
+        guided_args.dry_run = True
+
+    return guided_args
+
+
 def run_configure_repos(args):
     """Run aerolitctl configure repos."""
     try:
+        if getattr(args, "guided", False):
+            guided_args = build_guided_repos_args(args)
+            return run_configure_repos(guided_args)
+
         bundle_path = getattr(args, "bundle_path", None)
         if bundle_path:
             bundle_path = absolute_path(bundle_path)
