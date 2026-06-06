@@ -17,7 +17,7 @@ from .pxe import run_configure_pxe
 from .repos import run_configure_repos
 from .configure_all import run_configure_all
 from .provision import run_provision
-from .answers import run_answers_export, run_answers_import, run_answers_show
+from .settings import run_settings_export, run_settings_import, run_settings_show
 from .backup import run_backup_config
 from .logs import run_logs
 from .command_log import (
@@ -145,19 +145,19 @@ def cmd_backup_config(args):
     return run_backup_config(args)
 
 
-def cmd_answers_show(args):
-    """Show saved AeroLIT answers."""
-    return run_answers_show(args)
+def cmd_settings_show(args):
+    """Show saved AeroLIT settings."""
+    return run_settings_show(args)
 
 
-def cmd_answers_export(args):
-    """Export saved AeroLIT answers."""
-    return run_answers_export(args)
+def cmd_settings_export(args):
+    """Export saved AeroLIT settings."""
+    return run_settings_export(args)
 
 
-def cmd_answers_import(args):
-    """Import saved AeroLIT answers."""
-    return run_answers_import(args)
+def cmd_settings_import(args):
+    """Import saved AeroLIT settings."""
+    return run_settings_import(args)
 
 
 def cmd_provision(args):
@@ -1120,18 +1120,18 @@ def add_backup_parser(subparsers):
     return backup_parser
 
 
-def add_answers_parser(subparsers):
-    """Add aerolitctl answers parser."""
-    answers_parser = subparsers.add_parser(
-        "answers",
-        help="Show, export, or import saved AeroLIT answers.",
+def add_settings_parser(subparsers):
+    """Add aerolitctl settings parser."""
+    settings_parser = subparsers.add_parser(
+        "settings",
+        help="Show, export, or import saved AeroLIT settings.",
     )
 
-    answers_subparsers = answers_parser.add_subparsers(dest="answers_command")
+    settings_subparsers = settings_parser.add_subparsers(dest="settings_command")
 
-    show_parser = answers_subparsers.add_parser(
+    show_parser = settings_subparsers.add_parser(
         "show",
-        help="Show saved AeroLIT answers.",
+        help="Show saved AeroLIT settings.",
     )
     show_parser.add_argument(
         "--no-redact",
@@ -1139,11 +1139,11 @@ def add_answers_parser(subparsers):
         help="Show sensitive-looking values instead of redacting them.",
     )
     add_command_verbose(show_parser)
-    show_parser.set_defaults(func=cmd_answers_show)
+    show_parser.set_defaults(func=cmd_settings_show)
 
-    export_parser = answers_subparsers.add_parser(
+    export_parser = settings_subparsers.add_parser(
         "export",
-        help="Export saved AeroLIT answers.",
+        help="Export saved AeroLIT settings.",
     )
     export_parser.add_argument(
         "--output",
@@ -1162,15 +1162,15 @@ def add_answers_parser(subparsers):
         help="Redact sensitive-looking values in the exported file.",
     )
     add_command_verbose(export_parser)
-    export_parser.set_defaults(func=cmd_answers_export)
+    export_parser.set_defaults(func=cmd_settings_export)
 
-    import_parser = answers_subparsers.add_parser(
+    import_parser = settings_subparsers.add_parser(
         "import",
-        help="Import saved AeroLIT answers from a YAML file.",
+        help="Import saved AeroLIT settings from a YAML file.",
     )
     import_parser.add_argument(
         "file",
-        help="Answers YAML file to import.",
+        help="Settings YAML file to import.",
     )
     import_parser.add_argument(
         "--dry-run",
@@ -1180,7 +1180,7 @@ def add_answers_parser(subparsers):
     import_parser.add_argument(
         "--merge",
         action="store_true",
-        help="Deep-merge imported answers into the current config instead of replacing it.",
+        help="Deep-merge imported settings into the current config instead of replacing it.",
     )
     import_parser.add_argument(
         "--no-backup",
@@ -1193,9 +1193,9 @@ def add_answers_parser(subparsers):
         help="Show sensitive-looking values in the dry-run import diff.",
     )
     add_command_verbose(import_parser)
-    import_parser.set_defaults(func=cmd_answers_import)
+    import_parser.set_defaults(func=cmd_settings_import)
 
-    return answers_parser
+    return settings_parser
 
 
 def add_deploy_parser(subparsers):
@@ -1321,7 +1321,7 @@ def build_parser():
 
     add_logs_parser(subparsers)
     add_backup_parser(subparsers)
-    add_answers_parser(subparsers)
+    add_settings_parser(subparsers)
 
     configure_parser = subparsers.add_parser(
         "configure",
