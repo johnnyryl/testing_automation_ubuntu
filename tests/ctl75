@@ -1,0 +1,457 @@
+"""AeroLIT configuration backup helpers."""
+
+from __future__ import print_function
+
+import io
+import json
+import os
+import tarfile
+import time
+from datetime import datetime
+from pathlib import Path
+
+from .config import get_bundle_path, load_config
+from .paths import (
+    BACKUP_DIR,
+    CONFIG_FILE,
+    OVERRIDES_DIR,
+    RENDERED_DIR,
+    STATE_FILE,
+    aerolitctl_inventory_file,
+    ansible_group_vars_all_dir,
+    ansible_group_vars_dir,
+    gitlab_ci_file,
+    sync_preserve_file,
+)
+
+
+BACKUP_MANIFEST_NAME = "aerolit-backup-manifest.json"
+
+
+def utc_stamp():
+    """Return a filesystem-safe UTC timestamp."""
+    return datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+
+
+def utc_iso():
+    """Return an ISO UTC timestamp."""
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def default_config_backup_dir():
+    """Return the default config backup directory."""
+    return BACKUP_DIR / "config"
+
+
+def _path_sort_key(path):
+    """Return deterministic sort key for paths."""
+    return str(Path(path))
+
+
+def _add_skipped(skipped, path, reason):
+    """Record a skipped path."""
+    skipped.append(
+        {
+            "path": str(Path(path)),
+            "reason": reason,
+        }
+    )
+
+
+def _add_file(planned, missing, skipped, path):
+    """Add one file to the backup plan."""
+    if not path:
+        return
+
+    path = Path(path)
+
+    try:
+        if not path.exists():
+            missing.add(path)
+            return
+
+        if path.is_symlink():
+            _add_skipped(skipped, path, "symlink")
+            return
+
+        if not path.is_file():
+            _add_skipped(skipped, path, "not a regular file")
+            return
+
+        planned.add(path)
+    except OSError as exc:
+        _add_skipped(skipped, path, "could not inspect path: {}".format(exc))
+
+
+def _add_directory_files(planned, missing, skipped, warnings, path):
+    """Add files from one directory to the backup plan."""
+    if not path:
+        return
+
+    path = Path(path)
+
+    try:
+        if not path.exists():
+            missing.add(path)
+            return
+
+        if path.is_symlink():
+            _add_skipped(skipped, path, "symlink directory")
+            return
+
+        if not path.is_dir():
+            _add_skipped(skipped, path, "not a directory")
+            return
+    except OSError as exc:
+        _add_skipped(skipped, path, "could not inspect directory: {}".format(exc))
+        return
+
+    def onerror(error):
+        warnings.append("Could not scan directory {}: {}".format(path, error))
+
+    for root, dirnames, filenames in os.walk(
+        str(path),
+        topdown=True,
+        followlinks=False,
+        onerror=onerror,
+    ):
+        root_path = Path(root)
+
+        kept_dirnames = []
+        for dirname in dirnames:
+            child_dir = root_path / dirname
+            if child_dir.is_symlink():
+                _add_skipped(skipped, child_dir, "symlink directory")
+            else:
+                kept_dirnames.append(dirname)
+
+        dirnames[:] = kept_dirnames
+
+        for filename in filenames:
+            _add_file(planned, missing, skipped, root_path / filename)
+
+
+def _safe_relative_to(path, root):
+    """Return path relative to root, or None when not under root."""
+    try:
+        return Path(path).resolve(strict=False).relative_to(
+            Path(root).resolve(strict=False)
+        )
+    except ValueError:
+        return None
+
+
+def _safe_archive_name(name):
+    """Return a safe relative archive member name."""
+    parts = []
+
+    for part in Path(name).parts:
+        if part in ("", "/", "."):
+            continue
+
+        if part == "..":
+            parts.append("_parent_")
+            continue
+
+        parts.append(part)
+
+    if not parts:
+        return "unknown"
+
+    return str(Path(*parts))
+
+
+def archive_name_for(path, bundle_path=None):
+    """Return archive path for a source path."""
+    path = Path(path)
+
+    if bundle_path:
+        relative_to_bundle = _safe_relative_to(path, bundle_path)
+        if relative_to_bundle is not None:
+            return _safe_archive_name(Path("bundle") / relative_to_bundle)
+
+    if path.is_absolute():
+        return _safe_archive_name(str(path).lstrip("/"))
+
+    return _safe_archive_name(path)
+
+
+def load_config_if_available():
+    """Load config if available, returning config and warning text."""
+    try:
+        return load_config(), None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def build_config_backup_plan(
+    include_state=True,
+    include_rendered=False,
+    include_bundle_generated=True,
+):
+    """Build a config backup plan.
+
+    The plan backs up AeroLIT-owned config/state inputs, not the full bundle,
+    repos, ISOs, RPM payloads, or extracted ISO content.
+    """
+    planned = set()
+    missing = set()
+    skipped = []
+    warnings = []
+
+    _add_file(planned, missing, skipped, CONFIG_FILE)
+    _add_directory_files(planned, missing, skipped, warnings, OVERRIDES_DIR)
+
+    if include_state:
+        _add_file(planned, missing, skipped, STATE_FILE)
+
+    if include_rendered:
+        _add_directory_files(planned, missing, skipped, warnings, RENDERED_DIR)
+
+    config, warning = load_config_if_available()
+    bundle_path = None
+
+    if warning:
+        warnings.append(
+            "Could not load {} while building bundle-derived backup list: {}".format(
+                CONFIG_FILE,
+                warning,
+            )
+        )
+
+    if config:
+        raw_bundle_path = get_bundle_path(config)
+        if raw_bundle_path:
+            bundle_path = Path(raw_bundle_path)
+
+    if include_bundle_generated and bundle_path:
+        _add_file(planned, missing, skipped, sync_preserve_file(bundle_path))
+        _add_file(planned, missing, skipped, gitlab_ci_file(bundle_path))
+        _add_file(planned, missing, skipped, aerolitctl_inventory_file(bundle_path))
+
+        group_vars_all = ansible_group_vars_all_dir(bundle_path)
+        if group_vars_all.exists() and group_vars_all.is_dir():
+            for path in group_vars_all.glob("aerolitctl_*_generated.yml"):
+                _add_file(planned, missing, skipped, path)
+        else:
+            missing.add(group_vars_all)
+
+        group_vars = ansible_group_vars_dir(bundle_path)
+        if group_vars.exists() and group_vars.is_dir():
+            for path in group_vars.rglob("aerolitctl.yml"):
+                _add_file(planned, missing, skipped, path)
+        else:
+            missing.add(group_vars)
+
+    files = sorted(planned, key=_path_sort_key)
+    missing_paths = sorted(missing - planned, key=_path_sort_key)
+
+    return {
+        "files": files,
+        "missing": missing_paths,
+        "skipped": skipped,
+        "warnings": warnings,
+        "bundle_path": bundle_path,
+        "include_state": include_state,
+        "include_rendered": include_rendered,
+        "include_bundle_generated": include_bundle_generated,
+    }
+
+
+def unique_archive_path(output_dir):
+    """Return a backup archive path that will not overwrite an existing file."""
+    output_dir = Path(output_dir)
+    stem = "aerolit-config-{}".format(utc_stamp())
+
+    candidate = output_dir / "{}.tar.gz".format(stem)
+    if not candidate.exists():
+        return candidate
+
+    for index in range(1, 100):
+        candidate = output_dir / "{}-{:02d}.tar.gz".format(stem, index)
+        if not candidate.exists():
+            return candidate
+
+    return output_dir / "{}-{}.tar.gz".format(stem, int(time.time()))
+
+
+def build_manifest(plan, archive_path=None, add_errors=None):
+    """Build backup manifest data."""
+    bundle_path = plan.get("bundle_path")
+    files = []
+
+    for path in plan["files"]:
+        files.append(
+            {
+                "source": str(path),
+                "archive_name": archive_name_for(path, bundle_path=bundle_path),
+                "size_bytes": path.stat().st_size if path.exists() else None,
+            }
+        )
+
+    return {
+        "kind": "AeroLITConfigBackup",
+        "created_utc": utc_iso(),
+        "archive": str(archive_path) if archive_path else None,
+        "bundle_path": str(bundle_path) if bundle_path else None,
+        "include_state": plan.get("include_state"),
+        "include_rendered": plan.get("include_rendered"),
+        "include_bundle_generated": plan.get("include_bundle_generated"),
+        "files": files,
+        "missing": [str(path) for path in plan["missing"]],
+        "skipped": list(plan["skipped"]),
+        "warnings": list(plan["warnings"]),
+        "errors": list(add_errors or []),
+    }
+
+
+def add_manifest_to_archive(tar, manifest):
+    """Add JSON manifest to a tar archive."""
+    raw = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
+    info = tarfile.TarInfo(BACKUP_MANIFEST_NAME)
+    info.size = len(raw)
+    info.mtime = int(time.time())
+    tar.addfile(info, io.BytesIO(raw))
+
+
+def create_config_backup_archive(
+    output_dir=None,
+    dry_run=False,
+    include_state=True,
+    include_rendered=False,
+    include_bundle_generated=True,
+):
+    """Create a timestamped AeroLIT config backup archive."""
+    if output_dir is None:
+        output_dir = default_config_backup_dir()
+    else:
+        output_dir = Path(output_dir)
+
+    plan = build_config_backup_plan(
+        include_state=include_state,
+        include_rendered=include_rendered,
+        include_bundle_generated=include_bundle_generated,
+    )
+
+    archive_path = unique_archive_path(output_dir)
+
+    if dry_run or not plan["files"]:
+        return {
+            "archive": archive_path,
+            "plan": plan,
+            "manifest": build_manifest(plan, archive_path=archive_path),
+            "changed": False,
+            "dry_run": dry_run,
+            "errors": [],
+        }
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    add_errors = []
+
+    with tarfile.open(str(archive_path), "w:gz") as tar:
+        bundle_path = plan.get("bundle_path")
+
+        for path in plan["files"]:
+            arcname = archive_name_for(path, bundle_path=bundle_path)
+
+            try:
+                tar.add(str(path), arcname=arcname, recursive=False)
+            except Exception as exc:
+                add_errors.append("{}: {}".format(path, exc))
+
+        manifest = build_manifest(
+            plan,
+            archive_path=archive_path,
+            add_errors=add_errors,
+        )
+        add_manifest_to_archive(tar, manifest)
+
+    return {
+        "archive": archive_path,
+        "plan": plan,
+        "manifest": manifest,
+        "changed": True,
+        "dry_run": False,
+        "errors": add_errors,
+    }
+
+
+def print_backup_plan(result, list_files=False):
+    """Print backup plan or result."""
+    plan = result["plan"]
+
+    if result.get("dry_run"):
+        print("AeroLIT config backup dry run")
+        print("")
+        print("Archive that would be created:")
+    elif result.get("changed"):
+        print("AeroLIT config backup created")
+        print("")
+        print("Archive:")
+    else:
+        print("AeroLIT config backup")
+        print("")
+        print("Archive was not created:")
+
+    print("  {}".format(result["archive"]))
+    print("")
+    print("Included files: {}".format(len(plan["files"])))
+    print("Missing paths: {}".format(len(plan["missing"])))
+    print("Skipped paths: {}".format(len(plan["skipped"])))
+
+    if plan["warnings"]:
+        print("")
+        print("Warnings:")
+        for warning in plan["warnings"]:
+            print("  - {}".format(warning))
+
+    if result.get("errors"):
+        print("")
+        print("Errors while adding files:")
+        for error in result["errors"]:
+            print("  - {}".format(error))
+
+    if list_files:
+        print("")
+        print("Files:")
+        for path in plan["files"]:
+            print("  {}".format(path))
+
+        if plan["missing"]:
+            print("")
+            print("Missing:")
+            for path in plan["missing"]:
+                print("  {}".format(path))
+
+        if plan["skipped"]:
+            print("")
+            print("Skipped:")
+            for item in plan["skipped"]:
+                print("  {} ({})".format(item["path"], item["reason"]))
+
+
+def run_backup_config(args):
+    """Run aerolitctl backup config."""
+    result = create_config_backup_archive(
+        output_dir=args.output_dir,
+        dry_run=args.dry_run,
+        include_state=not args.no_state,
+        include_rendered=args.include_rendered,
+        include_bundle_generated=not args.no_bundle_generated,
+    )
+
+    print_backup_plan(
+        result,
+        list_files=args.list_files or args.dry_run or getattr(args, "verbose", False),
+    )
+
+    if result.get("errors"):
+        return 1
+
+    if not result["plan"]["files"]:
+        print("")
+        print("No backupable AeroLIT config files were found.")
+        return 1
+
+    return 0
