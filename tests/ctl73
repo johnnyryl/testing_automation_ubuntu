@@ -1,0 +1,184 @@
+"""Run AeroLIT Ansible playbooks from the active bundle Ansible directory."""
+
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+from .config import get_bundle_path, load_config
+
+
+DEFAULT_BUNDLE_PATH = Path("/opt/aerolit/aerolit-bundle")
+DEFAULT_INVENTORY = "inventory"
+
+
+def _has_inventory_arg(args):
+    """Return True when ansible-playbook inventory was provided by the user."""
+    for arg in args:
+        if arg in ("-i", "--inventory", "--inventory-file"):
+            return True
+        if arg.startswith("--inventory="):
+            return True
+        if arg.startswith("--inventory-file="):
+            return True
+        if arg.startswith("-i") and arg != "-i":
+            return True
+
+    return False
+
+
+def _format_command(command):
+    """Return a shell-style command string for display."""
+    return " ".join(shlex.quote(str(part)) for part in command)
+
+
+def _resolve_bundle_path():
+    """Resolve the active AeroLIT bundle path from config or defaults."""
+    config = load_config()
+    configured_path = get_bundle_path(config)
+
+    if configured_path:
+        return Path(configured_path).expanduser()
+
+    return DEFAULT_BUNDLE_PATH
+
+
+def _resolve_ansible_dir(bundle_path):
+    """Return the active bundle Ansible directory."""
+    return bundle_path / "collections-hub" / "ansible"
+
+
+def _install_ansible_core():
+    """Attempt to install ansible-core using dnf."""
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        print("ERROR: ansible-core installation requires root privileges.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Run one of these:", file=sys.stderr)
+        print("  sudo dnf install -y ansible-core", file=sys.stderr)
+        print("  sudo aerolitctl provision --install-ansible-core <playbook.yml>", file=sys.stderr)
+        return 1
+
+    dnf = shutil.which("dnf")
+    if not dnf:
+        print("ERROR: dnf was not found, so ansible-core cannot be installed automatically.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Install ansible-core manually, then retry:", file=sys.stderr)
+        print("  aerolitctl provision <playbook.yml>", file=sys.stderr)
+        return 127
+
+    print("ansible-playbook was not found.")
+    print("Attempting to install ansible-core with dnf...")
+    print("")
+
+    result = subprocess.run(
+        [dnf, "-y", "install", "ansible-core"],
+    )
+
+    if result.returncode != 0:
+        print("", file=sys.stderr)
+        print("ERROR: ansible-core installation failed.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Check that this system has access to a repo containing ansible-core.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("If this is an offline AeroLIT server, prepare repos/prerequisites first:", file=sys.stderr)
+        print("  sudo aerolitctl configure repos --ensure-server-prereqs", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("For custom repo locations, run:", file=sys.stderr)
+        print("  sudo aerolitctl configure repos --guided --ensure-server-prereqs", file=sys.stderr)
+
+    return result.returncode
+
+
+def run_provision(args):
+    """Run ansible-playbook from the active AeroLIT Ansible directory."""
+    playbook = args.playbook
+    passthrough_args = list(args.ansible_args or [])
+
+    bundle_path = _resolve_bundle_path()
+    ansible_dir = _resolve_ansible_dir(bundle_path)
+
+    if not ansible_dir.is_dir():
+        print("ERROR: AeroLIT Ansible directory not found:", file=sys.stderr)
+        print("  {}".format(ansible_dir), file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Check the active bundle path:", file=sys.stderr)
+        print("  aerolitctl path show", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Or set the correct bundle path:", file=sys.stderr)
+        print("  aerolitctl path set /path/to/aerolit-bundle", file=sys.stderr)
+        return 2
+
+    ansible_playbook = shutil.which("ansible-playbook")
+    if not ansible_playbook:
+        if getattr(args, "install_ansible_core", False):
+            install_result = _install_ansible_core()
+            if install_result != 0:
+                return install_result
+
+            ansible_playbook = shutil.which("ansible-playbook")
+            if not ansible_playbook:
+                print("ERROR: ansible-core install completed, but ansible-playbook is still missing.", file=sys.stderr)
+                return 127
+        else:
+            print("ERROR: ansible-playbook was not found in PATH.", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("ansible-playbook is provided by the ansible-core package.", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("If this system already has working package repositories, install it manually:", file=sys.stderr)
+            print("  sudo dnf install -y ansible-core", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("Or allow aerolitctl to try before running the playbook:", file=sys.stderr)
+            print("  sudo aerolitctl provision --install-ansible-core <playbook.yml>", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("If this is an offline AeroLIT server, or you are not using the default bundle repos,", file=sys.stderr)
+            print("prepare the AeroLIT repo/prerequisite plan first:", file=sys.stderr)
+            print("  sudo aerolitctl configure repos --ensure-server-prereqs", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("For custom repo locations, run:", file=sys.stderr)
+            print("  sudo aerolitctl configure repos --guided --ensure-server-prereqs", file=sys.stderr)
+            return 127
+
+    command = [ansible_playbook]
+
+    if not _has_inventory_arg(passthrough_args):
+        inventory_path = ansible_dir / DEFAULT_INVENTORY
+        if not inventory_path.exists():
+            print("ERROR: Default AeroLIT inventory was not found:", file=sys.stderr)
+            print("  {}".format(inventory_path), file=sys.stderr)
+            print("", file=sys.stderr)
+            print("Provide an inventory manually, for example:", file=sys.stderr)
+            print("  aerolitctl provision <playbook.yml> -i /path/to/inventory", file=sys.stderr)
+            return 2
+
+        command.extend(["-i", DEFAULT_INVENTORY])
+
+    command.append(playbook)
+    command.extend(passthrough_args)
+
+    env = os.environ.copy()
+
+    ansible_cfg = ansible_dir / "ansible.cfg"
+    if ansible_cfg.exists():
+        env["ANSIBLE_CONFIG"] = str(ansible_cfg)
+
+    if getattr(args, "verbose", False):
+        print("AeroLIT bundle path:")
+        print("  {}".format(bundle_path))
+        print("AeroLIT Ansible directory:")
+        print("  {}".format(ansible_dir))
+        if ansible_cfg.exists():
+            print("ANSIBLE_CONFIG:")
+            print("  {}".format(ansible_cfg))
+        print("Command:")
+        print("  {}".format(_format_command(command)))
+        print("")
+
+    result = subprocess.run(
+        command,
+        cwd=str(ansible_dir),
+        env=env,
+    )
+
+    return result.returncode
