@@ -1,3 +1,263 @@
+Yes — this should be done with **both a directory and a spec file**, but **not inside `src/aerolitctl/`**.
+
+`src/aerolitctl/` is for Python code. RPM packaging should live beside it in a packaging area. Your current CLI already expects the command to be launched through the normal `aerolitctl` entry point and now imports the provision feature from `.provision`, so the RPM’s job is to install the Python package, install the command, and place the default config file. 
+
+I would add this structure to the GitLab project:
+
+```text
+aerolitctl/
+├── src/
+│   └── aerolitctl/
+│       ├── cli.py
+│       ├── provision.py
+│       └── ...
+├── packaging/
+│   ├── etc/
+│   │   └── aerolit/
+│   │       ├── aerolitctl.yml
+│   │       └── aerolitctl.yml.example
+│   └── rpm/
+│       └── aerolitctl.spec
+└── pyproject.toml
+```
+
+## 1. Add the default config file
+
+Create this file:
+
+```text
+packaging/etc/aerolit/aerolitctl.yml
+```
+
+Put this in it:
+
+```yaml
+# AeroLIT CLI configuration.
+# Prefer using `aerolitctl path set <path>` instead of editing this file directly.
+
+bundle_path: /opt/aerolit/aerolit-bundle
+log_dir: /var/log/aerolit
+state_dir: /var/lib/aerolit
+```
+
+Then create:
+
+```text
+packaging/etc/aerolit/aerolitctl.yml.example
+```
+
+Use the same contents for now.
+
+## 2. Make sure `pyproject.toml` installs the command
+
+In your `pyproject.toml`, you need something like this:
+
+```toml
+[project.scripts]
+aerolitctl = "aerolitctl.cli:main"
+```
+
+That is what makes the installed RPM provide:
+
+```text
+/usr/bin/aerolitctl
+```
+
+So the RPM spec usually does **not** manually copy `src/aerolitctl/cli.py` to `/usr/bin/aerolitctl`. It installs the Python package, and the Python packaging entry point creates the command.
+
+## 3. Add the RPM spec file
+
+Create:
+
+```text
+packaging/rpm/aerolitctl.spec
+```
+
+Start with this:
+
+```spec
+Name:           aerolitctl
+Version:        0.1.0
+Release:        1%{?dist}
+Summary:        Command and control interface for AeroLIT bundles
+
+License:        Proprietary
+URL:            https://gitlab.example.com/lit/aerolitctl
+Source0:        %{name}-%{version}.tar.gz
+
+BuildArch:      noarch
+
+BuildRequires:  python3-devel
+BuildRequires:  python3-setuptools
+BuildRequires:  python3-wheel
+
+Requires:       python3
+Requires:       python3-PyYAML
+
+%description
+aerolitctl is the command and control interface for AeroLIT bundles.
+
+%prep
+%autosetup
+
+%build
+%py3_build
+
+%install
+%py3_install
+
+install -d -m 0755 %{buildroot}%{_sysconfdir}/aerolit
+install -d -m 0755 %{buildroot}%{_localstatedir}/log/aerolit
+install -d -m 0755 %{buildroot}%{_localstatedir}/lib/aerolit
+
+install -m 0644 packaging/etc/aerolit/aerolitctl.yml \
+  %{buildroot}%{_sysconfdir}/aerolit/aerolitctl.yml
+
+install -m 0644 packaging/etc/aerolit/aerolitctl.yml.example \
+  %{buildroot}%{_sysconfdir}/aerolit/aerolitctl.yml.example
+
+%files
+%license LICENSE
+%doc README.md
+
+%{_bindir}/aerolitctl
+%{python3_sitelib}/aerolitctl*
+
+%dir %{_sysconfdir}/aerolit
+%config(noreplace) %{_sysconfdir}/aerolit/aerolitctl.yml
+%{_sysconfdir}/aerolit/aerolitctl.yml.example
+
+%dir %{_localstatedir}/log/aerolit
+%dir %{_localstatedir}/lib/aerolit
+
+%changelog
+* Sat Jun 06 2026 David Oxenreiter <davidoxenreiter@gmail.com> - 0.1.0-1
+- Initial aerolitctl RPM packaging
+```
+
+## Important note about `ansible-core`
+
+For now, I would **not** add this:
+
+```spec
+Requires: ansible-core
+```
+
+Reason: in disconnected/offline environments, that could make `dnf install aerolitctl.rpm` fail before AeroLIT has a chance to configure repos.
+
+Your `aerolitctl provision` command already handles missing `ansible-playbook` with a helpful message and has this optional path:
+
+```bash
+sudo aerolitctl provision --install-ansible-core provision-workstation.yml
+```
+
+So the RPM should install the CLI and config safely. The CLI can handle Ansible availability afterward.
+
+## So the short answer
+
+Yes, add these:
+
+```text
+packaging/etc/aerolit/aerolitctl.yml
+packaging/etc/aerolit/aerolitctl.yml.example
+packaging/rpm/aerolitctl.spec
+```
+
+And verify this exists in `pyproject.toml`:
+
+```toml
+[project.scripts]
+aerolitctl = "aerolitctl.cli:main"
+```
+
+That is the clean place to do it. `src/aerolitctl/` stays Python code; `packaging/` holds RPM/default config/install layout.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 You’re at the right point now: the repo/preflight part passed, PXE appears to have gotten past its earlier issue, and the failure is now isolated to ansible_controller.yml.
 
 The important line is this:
