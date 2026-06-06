@@ -3470,6 +3470,9 @@ def main():
         print("Command logs:")
         print("  {}".format(Path(args.log_dir) / "commands"))
         print("")
+        print("AeroLIT cmd logs:")
+        print("  {}".format(Path(args.log_dir) / "aerolitctl-command-logs-all"))
+        print("")
 
         return 0
 
