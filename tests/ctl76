@@ -1,0 +1,295 @@
+"""Saved answer import/export/show helpers for aerolitctl."""
+
+from __future__ import print_function
+
+import copy
+import difflib
+import sys
+from pathlib import Path
+
+from .backup import create_config_backup_archive
+from .compat import yaml_load
+from .config import dump_yaml, load_config, save_config
+from .paths import CONFIG_FILE
+
+
+SENSITIVE_KEYWORDS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "credential",
+    "credentials",
+    "private_key",
+    "ssh_key",
+    "api_key",
+    "auth_token",
+    "bearer",
+)
+
+
+KNOWN_TOP_LEVEL_KEYS = (
+    "version",
+    "aerolitctl",
+    "paths",
+    "server",
+    "repos",
+    "pxe",
+    "ansible",
+    "sync",
+    "ci",
+)
+
+
+def key_is_sensitive(key):
+    """Return True if a key name looks sensitive."""
+    lowered = str(key).lower()
+    return any(keyword in lowered for keyword in SENSITIVE_KEYWORDS)
+
+
+def redact_answers(data):
+    """Return a redacted deep copy of answers/config data."""
+    if isinstance(data, dict):
+        redacted = {}
+
+        for key, value in data.items():
+            if key_is_sensitive(key):
+                redacted[key] = "REDACTED"
+            else:
+                redacted[key] = redact_answers(value)
+
+        return redacted
+
+    if isinstance(data, list):
+        return [redact_answers(item) for item in data]
+
+    return data
+
+
+def contains_redacted_marker(data):
+    """Return True if imported data contains redacted placeholder values."""
+    if isinstance(data, dict):
+        return any(contains_redacted_marker(value) for value in data.values())
+
+    if isinstance(data, list):
+        return any(contains_redacted_marker(item) for item in data)
+
+    return data == "REDACTED"
+
+
+def load_answers_file(path):
+    """Load answers from a YAML file."""
+    path = Path(path)
+
+    if not path.exists():
+        raise FileNotFoundError("Answers file not found: {}".format(path))
+
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml_load(handle) or {}
+
+    if not isinstance(data, dict):
+        raise ValueError("Answers file must be a YAML mapping: {}".format(path))
+
+    return data
+
+
+def validate_import_data(data, replace=True):
+    """Validate imported answer/config data."""
+    errors = []
+
+    if not data:
+        errors.append("Answers file is empty.")
+        return errors
+
+    if not any(key in data for key in KNOWN_TOP_LEVEL_KEYS):
+        errors.append(
+            "Answers file does not look like an AeroLIT answers/config file."
+        )
+
+    if replace and "paths" not in data:
+        errors.append(
+            "Replacement imports must include a top-level 'paths' section. "
+            "Use --merge for partial answer files."
+        )
+
+    return errors
+
+
+def deep_merge(base, override):
+    """Deep merge two dictionaries."""
+    result = copy.deepcopy(base)
+
+    for key, value in override.items():
+        if (
+            key in result
+            and isinstance(result[key], dict)
+            and isinstance(value, dict)
+        ):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+
+    return result
+
+
+def unified_config_diff(old_data, new_data, fromfile, tofile):
+    """Return unified diff between two YAML mappings."""
+    old_text = dump_yaml(old_data).splitlines(True)
+    new_text = dump_yaml(new_data).splitlines(True)
+
+    return "".join(
+        difflib.unified_diff(
+            old_text,
+            new_text,
+            fromfile=fromfile,
+            tofile=tofile,
+        )
+    )
+
+
+def load_current_config_or_empty():
+    """Load current config, or return an empty mapping when missing."""
+    try:
+        return load_config()
+    except FileNotFoundError:
+        return {}
+
+
+def run_answers_show(args):
+    """Run aerolitctl answers show."""
+    config = load_config()
+
+    if not args.no_redact:
+        config = redact_answers(config)
+
+    print(dump_yaml(config), end="")
+    return 0
+
+
+def run_answers_export(args):
+    """Run aerolitctl answers export."""
+    config = load_config()
+
+    if args.redact:
+        config = redact_answers(config)
+
+    text = dump_yaml(config)
+
+    if not args.output or args.output == "-":
+        print(text, end="")
+        return 0
+
+    output = Path(args.output)
+
+    if output.exists() and not args.force:
+        print(
+            "ERROR: Output file already exists. Use --force to overwrite: {}".format(
+                output
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(text, encoding="utf-8")
+
+    if args.redact:
+        print("Exported redacted AeroLIT answers:")
+    else:
+        print("Exported AeroLIT answers:")
+
+    print("  {}".format(output))
+    return 0
+
+
+def run_answers_import(args):
+    """Run aerolitctl answers import."""
+    imported = load_answers_file(args.file)
+
+    validation_errors = validate_import_data(imported, replace=not args.merge)
+
+    if contains_redacted_marker(imported):
+        validation_errors.append(
+            "Answers file contains REDACTED placeholder values. "
+            "Export without --redact before importing."
+        )
+
+    if validation_errors:
+        print("ERROR: Cannot import answers file:", file=sys.stderr)
+        for error in validation_errors:
+            print("  - {}".format(error), file=sys.stderr)
+        return 1
+
+    current = load_current_config_or_empty()
+
+    if args.merge:
+        final_config = deep_merge(current, imported)
+    else:
+        final_config = imported
+
+    if current == final_config:
+        print("AeroLIT answers import")
+        print("")
+        print("No changes made. Imported answers match the current config.")
+        return 0
+
+    if getattr(args, "no_redact_diff", False):
+        diff_old = current
+        diff_new = final_config
+    else:
+        diff_old = redact_answers(current)
+        diff_new = redact_answers(final_config)
+
+    diff = unified_config_diff(
+        diff_old,
+        diff_new,
+        fromfile=str(CONFIG_FILE) + " current",
+        tofile=str(args.file) + " imported",
+    )
+
+    if args.dry_run:
+        print("AeroLIT answers import dry run")
+        print("")
+        if diff:
+            print(diff, end="")
+        elif not getattr(args, "no_redact_diff", False):
+            print(
+                "Changes would be made, but they are hidden because the diff is redacted."
+            )
+            print("Use --no-redact-diff to show sensitive-looking values.")
+        else:
+            print("No visible changes would be made.")
+        return 0
+
+    backup_archive = None
+    backup_created = False
+
+    if not args.no_backup:
+        backup_result = create_config_backup_archive()
+        backup_created = backup_result.get("changed", False)
+        backup_archive = backup_result["archive"] if backup_created else None
+
+        if backup_result.get("errors"):
+            print("ERROR: Could not create full config backup.", file=sys.stderr)
+            for error in backup_result["errors"]:
+                print("  - {}".format(error), file=sys.stderr)
+            return 1
+
+    save_config(final_config, path=CONFIG_FILE, backup=False)
+
+    print("Imported AeroLIT answers:")
+    print("  {}".format(args.file))
+    print("")
+    print("Updated config:")
+    print("  {}".format(CONFIG_FILE))
+
+    if backup_archive:
+        print("")
+        print("Config backup:")
+        print("  {}".format(backup_archive))
+    elif not args.no_backup:
+        print("")
+        print("Config backup:")
+        print("  No existing AeroLIT config files were found to back up.")
+
+    return 0
