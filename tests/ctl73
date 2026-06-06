@@ -50,6 +50,176 @@ def _resolve_ansible_dir(bundle_path):
     return bundle_path / "collections-hub" / "ansible"
 
 
+def _find_playbooks(ansible_dir):
+    """Return top-level Ansible playbooks from the active Ansible directory."""
+    playbooks = []
+
+    if not ansible_dir.is_dir():
+        return playbooks
+
+    for pattern in ("*.yml", "*.yaml"):
+        for path in ansible_dir.glob(pattern):
+            if path.is_file() and not path.name.startswith("."):
+                playbooks.append(path)
+
+    return sorted(playbooks, key=lambda item: item.name)
+
+
+def _print_check_line(ok, label, value=None, warning=False):
+    """Print one provision check result line."""
+    if ok:
+        prefix = "[OK]"
+    elif warning:
+        prefix = "[WARN]"
+    else:
+        prefix = "[FAIL]"
+
+    if value:
+        print("{} {}: {}".format(prefix, label, value))
+    else:
+        print("{} {}".format(prefix, label))
+
+
+def _reject_helper_invocation(command_name, args, passthrough_args):
+    """Reject unsupported options/args for provision helper commands."""
+    if getattr(args, "install_ansible_core", False):
+        print(
+            "ERROR: aerolitctl provision {} does not use --install-ansible-core.".format(
+                command_name
+            ),
+            file=sys.stderr,
+        )
+        print("", file=sys.stderr)
+        print("Run help with:", file=sys.stderr)
+        print("  aerolitctl provision --help", file=sys.stderr)
+        return True
+
+    if passthrough_args:
+        print(
+            "ERROR: aerolitctl provision {} does not accept ansible-playbook arguments.".format(
+                command_name
+            ),
+            file=sys.stderr,
+        )
+        print("", file=sys.stderr)
+        print("Run help with:", file=sys.stderr)
+        print("  aerolitctl provision --help", file=sys.stderr)
+        return True
+
+    return False
+
+
+def run_provision_list(args):
+    """List available playbooks in the active AeroLIT Ansible directory."""
+    passthrough_args = list(args.ansible_args or [])
+    if _reject_helper_invocation("list", args, passthrough_args):
+        return 2
+
+    bundle_path = _resolve_bundle_path()
+    ansible_dir = _resolve_ansible_dir(bundle_path)
+
+    if not ansible_dir.is_dir():
+        print("ERROR: AeroLIT Ansible directory not found:", file=sys.stderr)
+        print("  {}".format(ansible_dir), file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Check the active bundle path:", file=sys.stderr)
+        print("  aerolitctl path show", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Or set the correct bundle path:", file=sys.stderr)
+        print("  aerolitctl path set /path/to/aerolit-bundle", file=sys.stderr)
+        return 2
+
+    playbooks = _find_playbooks(ansible_dir)
+
+    print("AeroLIT provision playbooks")
+    print("")
+    print("Bundle path:")
+    print("  {}".format(bundle_path))
+    print("")
+    print("Ansible directory:")
+    print("  {}".format(ansible_dir))
+    print("")
+
+    if not playbooks:
+        print("No top-level .yml or .yaml playbooks were found.")
+        return 1
+
+    print("Available playbooks:")
+    for playbook in playbooks:
+        print("  {}".format(playbook.name))
+
+    return 0
+
+
+def run_provision_check(args):
+    """Check whether aerolitctl provision is ready to run playbooks."""
+    passthrough_args = list(args.ansible_args or [])
+    if _reject_helper_invocation("check", args, passthrough_args):
+        return 2
+
+    bundle_path = _resolve_bundle_path()
+    ansible_dir = _resolve_ansible_dir(bundle_path)
+    inventory_path = ansible_dir / DEFAULT_INVENTORY
+    ansible_cfg = ansible_dir / "ansible.cfg"
+    ansible_playbook = shutil.which("ansible-playbook")
+    playbooks = _find_playbooks(ansible_dir)
+
+    failures = 0
+
+    print("AeroLIT provision check")
+    print("")
+
+    bundle_exists = bundle_path.exists()
+    _print_check_line(bundle_exists, "Bundle path", bundle_path)
+    if not bundle_exists:
+        failures += 1
+
+    ansible_dir_exists = ansible_dir.is_dir()
+    _print_check_line(ansible_dir_exists, "Ansible directory", ansible_dir)
+    if not ansible_dir_exists:
+        failures += 1
+
+    inventory_exists = inventory_path.exists()
+    _print_check_line(inventory_exists, "Default inventory", inventory_path)
+    if not inventory_exists:
+        failures += 1
+
+    ansible_playbook_exists = bool(ansible_playbook)
+    _print_check_line(
+        ansible_playbook_exists,
+        "ansible-playbook",
+        ansible_playbook or "not found in PATH",
+    )
+    if not ansible_playbook_exists:
+        failures += 1
+
+    if ansible_cfg.exists():
+        _print_check_line(True, "ansible.cfg", ansible_cfg)
+    else:
+        _print_check_line(
+            False,
+            "ansible.cfg",
+            "{} not found; continuing without setting ANSIBLE_CONFIG".format(ansible_cfg),
+            warning=True,
+        )
+
+    if playbooks:
+        _print_check_line(True, "Playbooks visible", "{} found".format(len(playbooks)))
+        for playbook in playbooks:
+            print("  - {}".format(playbook.name))
+    else:
+        _print_check_line(False, "Playbooks visible", "no top-level .yml or .yaml files found")
+        failures += 1
+
+    print("")
+    if failures:
+        print("Provision check failed with {} blocking finding(s).".format(failures))
+        return 1
+
+    print("Provision check passed.")
+    return 0
+
+
 def _install_ansible_core():
     """Attempt to install ansible-core using dnf."""
     if hasattr(os, "geteuid") and os.geteuid() != 0:
@@ -95,6 +265,12 @@ def run_provision(args):
     """Run ansible-playbook from the active AeroLIT Ansible directory."""
     playbook = args.playbook
     passthrough_args = list(args.ansible_args or [])
+
+    if playbook == "list":
+        return run_provision_list(args)
+
+    if playbook == "check":
+        return run_provision_check(args)
 
     bundle_path = _resolve_bundle_path()
     ansible_dir = _resolve_ansible_dir(bundle_path)
