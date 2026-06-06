@@ -15,6 +15,7 @@ from .status import run_status
 from .ansible import run_configure_ansible
 from .pxe import run_configure_pxe
 from .repos import run_configure_repos
+from .configure_all import run_configure_all
 
 
 def cmd_version(args):
@@ -51,6 +52,11 @@ def cmd_configure_pxe(args):
 def cmd_configure_repos(args):
     """Run configure repos."""
     return run_configure_repos(args)
+
+
+def cmd_configure_all(args):
+    """Run configure all."""
+    return run_configure_all(args)
 
 
 def cmd_path_show(args):
@@ -193,6 +199,117 @@ def add_command_verbose(parser):
         default=argparse.SUPPRESS,
         help="Show more detailed output.",
     )
+
+
+def add_configure_all_parser(configure_subparsers):
+    """Add aerolitctl configure all parser."""
+    all_parser = configure_subparsers.add_parser(
+        "all",
+        help="Coordinate all AeroLIT configure workflows.",
+    )
+
+    all_parser.add_argument(
+        "--guided",
+        action="store_true",
+        help=(
+            "Walk through selected configure sections interactively. "
+            "This is the default when no show/validate/dry-run/non-interactive mode is selected."
+        ),
+    )
+    all_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview selected configure sections without writing files.",
+    )
+    all_parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Show the configure all plan without running any sections.",
+    )
+    all_parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Run read-only validation/show paths for selected sections.",
+    )
+    all_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help=(
+            "Run safe non-interactive configure sections. "
+            "The server section must be skipped unless using --dry-run or --validate."
+        ),
+    )
+    all_parser.add_argument(
+        "--bundle",
+        default=None,
+        help="Bundle path to pass to configure sections. Defaults to configured bundle path.",
+    )
+    all_parser.add_argument(
+        "--mode",
+        choices=("full", "pxe", "controller"),
+        default=None,
+        help="Server mode to use for configure server dry-run/validation.",
+    )
+    all_parser.add_argument(
+        "--path-for-ansible",
+        default=None,
+        help=(
+            "Client-visible bundle path used for repo generated vars. "
+            "Defaults to /home/unix/sysadmin."
+        ),
+    )
+    all_parser.add_argument(
+        "--write-server-bootstrap",
+        action="store_true",
+        help="Also allow configure repos to write the AeroLIT server bootstrap repo.",
+    )
+
+    all_parser.add_argument(
+        "--skip-init",
+        action="store_true",
+        help="Skip configure init.",
+    )
+    all_parser.add_argument(
+        "--skip-server",
+        action="store_true",
+        help="Skip configure server.",
+    )
+    all_parser.add_argument(
+        "--skip-repos",
+        action="store_true",
+        help="Skip configure repos.",
+    )
+    all_parser.add_argument(
+        "--skip-ansible",
+        action="store_true",
+        help="Skip configure ansible.",
+    )
+    all_parser.add_argument(
+        "--skip-pxe",
+        action="store_true",
+        help="Skip configure pxe.",
+    )
+
+    all_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Pass force behavior to configure sections that support it.",
+    )
+    all_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not create timestamped backups before changing managed files.",
+    )
+    all_parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Continue running later configure sections if one section fails.",
+    )
+
+    add_command_verbose(all_parser)
+    all_parser.set_defaults(func=cmd_configure_all)
+
+    return all_parser
 
 
 def add_configure_repos_parser(configure_subparsers):
@@ -1186,6 +1303,7 @@ def build_parser():
 
     add_command_verbose(ansible_parser)
 
+    add_configure_all_parser(configure_subparsers)
     add_configure_repos_parser(configure_subparsers)
     add_configure_pxe_parser(configure_subparsers)
     add_configure_server_parser(configure_subparsers)
