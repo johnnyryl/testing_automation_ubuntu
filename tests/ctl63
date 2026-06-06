@@ -984,6 +984,7 @@ def test_cli_help_and_parser(args):
     assert_not_contains(pxe_help, "--dnsmasq-firewall-zone", "configure pxe help")
 
     repos_help = run_cmd(["aerolitctl", "configure", "repos", "--help"])
+    assert_contains(repos_help, "--guided", "configure repos help")
     assert_contains(repos_help, "--show", "configure repos help")
     assert_contains(repos_help, "--validate", "configure repos help")
     assert_contains(repos_help, "--refresh", "configure repos help")
@@ -1589,10 +1590,30 @@ def test_configure_repos_help_and_parser(args):
     """Confirm configure repos parser/help paths work."""
     help_output = run_cmd(["aerolitctl", "configure", "repos", "--help"])
 
+    assert_contains(help_output, "--guided", "configure repos help")
     assert_contains(help_output, "--show", "configure repos help")
     assert_contains(help_output, "--validate", "configure repos help")
     assert_contains(help_output, "--refresh", "configure repos help")
     assert_contains(help_output, "--dry-run", "configure repos help")
+
+
+def test_configure_repos_guided_noninteractive_guard(args):
+    """Confirm configure repos --guided fails clearly without an interactive terminal."""
+    output = run_cmd(
+        [
+            "bash",
+            "-lc",
+            "aerolitctl configure repos --guided </dev/null",
+        ],
+        expected_rc=1,
+        log_path=Path(args.log_dir) / "configure-repos-guided-noninteractive.log",
+    )
+
+    assert_contains(
+        output,
+        "configure repos --guided requires an interactive terminal",
+        "configure repos guided non-interactive guard",
+    )
 
 
 def test_configure_repos_dry_run_read_only(args, hash_paths):
@@ -2668,6 +2689,7 @@ def main():
         ("configure server --show mode behavior", lambda: test_configure_show_modes(args, hash_paths)),
         ("configure server dry-run mode behavior", lambda: test_configure_dry_run_modes(args, hash_paths)),
         ("configure repos help/parser", lambda: test_configure_repos_help_and_parser(args)),
+        ("configure repos guided non-interactive guard", lambda: test_configure_repos_guided_noninteractive_guard(args)),
         ("configure repos dry-run read-only", lambda: test_configure_repos_dry_run_read_only(args, hash_paths)),
         ("configure ansible dry-run read-only", lambda: test_configure_ansible_dry_run_read_only(args, hash_paths)),
         ("configure ansible sensitive var guard", lambda: test_configure_ansible_sensitive_var_guard(args)),
