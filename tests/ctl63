@@ -287,6 +287,21 @@ def write_text(path, content):
         handle.write(content)
 
 
+def command_env(env=None):
+    """Return subprocess env with AeroLIT command logs isolated to this test run."""
+    if env is None:
+        command_environment = os.environ.copy()
+    else:
+        command_environment = env.copy()
+
+    if "AEROLITCTL_LOG_DIR" not in command_environment and RUN_LOG_PATH is not None:
+        command_environment["AEROLITCTL_LOG_DIR"] = str(
+            RUN_LOG_PATH.parent / "aerolitctl-command-logs-all"
+        )
+
+    return command_environment
+
+
 def run_cmd(command, cwd=None, expected_rc=0, log_path=None, env=None):
     """Run a command, save output to logs, and return combined output."""
     command_log_path = print_command_header(command)
@@ -294,7 +309,7 @@ def run_cmd(command, cwd=None, expected_rc=0, log_path=None, env=None):
     process = subprocess.Popen(
         command,
         cwd=cwd,
-        env=env,
+        env=command_env(env),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         universal_newlines=True,
@@ -1162,6 +1177,125 @@ def test_logs_command_behavior(args):
         expected_rc=1,
     )
     assert_contains(bad_tail_output, "--tail must be zero or greater", "logs bad tail")
+
+
+def test_command_logging_behavior(args):
+    """Validate aerolitctl creates command logs for normal commands."""
+    command_log_root = Path(args.log_dir) / "aerolitctl-command-logs"
+
+    if command_log_root.exists():
+        shutil.rmtree(str(command_log_root))
+
+    command_log_root.mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+    env["AEROLITCTL_LOG_DIR"] = str(command_log_root)
+
+    before_logs = sorted(command_log_root.glob("aerolitctl-*.log"))
+    if before_logs:
+        raise TestFailure(
+            "Command log test directory was not empty before test: {}".format(
+                ", ".join(str(path) for path in before_logs)
+            )
+        )
+
+    version_output = run_cmd(
+        ["aerolitctl", "version", "--verbose"],
+        env=env,
+    )
+    assert_contains(version_output, "aerolitctl", "command logging version output")
+    assert_contains(version_output, "Command log:", "command logging verbose output")
+    assert_contains(version_output, str(command_log_root), "command logging verbose output")
+
+    logs = sorted(command_log_root.glob("aerolitctl-*.log"))
+    if len(logs) != 1:
+        raise TestFailure(
+            "Expected exactly one aerolitctl command log, found {}: {}".format(
+                len(logs),
+                ", ".join(str(path) for path in logs),
+            )
+        )
+
+    command_log = logs[0]
+    assert_contains(command_log.name, "-version.log", "command log filename")
+
+    mode = command_log.stat().st_mode & 0o777
+    if mode != 0o600:
+        raise TestFailure(
+            "Command log file permissions should be 0600, got {:04o}: {}".format(
+                mode,
+                command_log,
+            )
+        )
+
+    log_dir_mode = command_log_root.stat().st_mode & 0o777
+    if log_dir_mode != 0o750:
+        raise TestFailure(
+            "Command log directory permissions should be 0750, got {:04o}: {}".format(
+                log_dir_mode,
+                command_log_root,
+            )
+        )
+
+    log_content = read_text(command_log)
+    assert_contains(log_content, "AeroLIT command log", "command log content")
+    assert_contains(log_content, "Started UTC", "command log content")
+    assert_contains(log_content, "Command           : aerolitctl version --verbose", "command log content")
+    assert_contains(log_content, "Command slug      : version", "command log content")
+    assert_contains(log_content, "aerolitctl version", "command log content")
+    assert_contains(log_content, "[output]", "command log content")
+    assert_contains(log_content, "aerolitctl", "command log captured output")
+    assert_contains(log_content, "[summary]", "command log content")
+    assert_contains(log_content, "Return code       : 0", "command log content")
+
+    dir_output = run_cmd(
+        ["aerolitctl", "logs", "--dir"],
+        env=env,
+    )
+    assert_contains(dir_output, str(command_log_root), "logs env default dir")
+
+    list_output = run_cmd(
+        ["aerolitctl", "logs", "--list"],
+        env=env,
+    )
+    assert_contains(list_output, "AeroLIT logs", "logs env list")
+    assert_contains(list_output, str(command_log), "logs env list")
+
+    tail_output = run_cmd(
+        ["aerolitctl", "logs", "--tail", "50"],
+        env=env,
+    )
+    assert_contains(tail_output, "AeroLIT log:", "logs env tail")
+    assert_contains(tail_output, str(command_log), "logs env tail")
+    assert_contains(tail_output, "Return code       : 0", "logs env tail")
+
+    logs_after_viewing = sorted(command_log_root.glob("aerolitctl-*.log"))
+    if logs_after_viewing != logs:
+        raise TestFailure(
+            "aerolitctl logs should not create a command log of itself. Before: {} After: {}".format(
+                ", ".join(str(path) for path in logs),
+                ", ".join(str(path) for path in logs_after_viewing),
+            )
+        )
+
+    disabled_env = os.environ.copy()
+    disabled_env["AEROLITCTL_LOG_DIR"] = str(command_log_root)
+    disabled_env["AEROLITCTL_NO_COMMAND_LOG"] = "1"
+
+    disabled_output = run_cmd(
+        ["aerolitctl", "version"],
+        env=disabled_env,
+    )
+    assert_contains(disabled_output, "aerolitctl", "command logging disabled output")
+
+    logs_after_disabled = sorted(command_log_root.glob("aerolitctl-*.log"))
+    if logs_after_disabled != logs:
+        raise TestFailure(
+            "AEROLITCTL_NO_COMMAND_LOG should prevent new logs. Before: {} After: {}".format(
+                ", ".join(str(path) for path in logs),
+                ", ".join(str(path) for path in logs_after_disabled),
+            )
+        )
 
 
 def test_backup_config_command_behavior(args, hash_paths):
@@ -3248,6 +3382,7 @@ def main():
         ("basic repo/code sanity", lambda: test_basic_repo_sanity(args)),
         ("CLI help and parser", lambda: test_cli_help_and_parser(args)),
         ("logs command behavior", lambda: test_logs_command_behavior(args)),
+        ("command logging behavior", lambda: test_command_logging_behavior(args)),
         ("backup config command behavior", lambda: test_backup_config_command_behavior(args, hash_paths)),
         ("answers command behavior", lambda: test_answers_command_behavior(args, hash_paths)),
         ("standardized source wording", lambda: test_standardized_source_wording(args)),
