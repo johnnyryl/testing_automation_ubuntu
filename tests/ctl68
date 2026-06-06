@@ -1870,6 +1870,16 @@ class GuidedRepoArgs(object):
     """Simple args container for guided configure repos choices."""
 
 
+def print_repos_guided_step(flow, title):
+    """Print a guided-mode step heading with dynamic numbering."""
+    flow["step"] = flow.get("step", 0) + 1
+
+    print("")
+    print("#" * 80)
+    print("# Step {}. {}".format(flow["step"], title))
+    print("#" * 80)
+
+
 def repos_text_prompt(prompt, default=None, allow_empty=False, blank_label="skip"):
     """Prompt for text with readable default behavior."""
     if default is not None and str(default) != "":
@@ -1972,12 +1982,10 @@ def print_repos_guided_intro():
     print("  aerolitctl deploy server")
 
 
-def choose_repo_source_mode():
+def choose_repo_source_mode(flow):
     """Choose bundle-only, bundle-plus-custom, or custom-only repo mode."""
-    print("")
-    print("#" * 80)
-    print("# Step 1. Repository source mode")
-    print("#" * 80)
+    print_repos_guided_step(flow, "Repository source mode")
+
     print("")
     print("How should AeroLIT choose repositories?")
     print("")
@@ -2012,12 +2020,46 @@ def choose_repo_source_mode():
     return "custom"
 
 
-def choose_repos_bundle_path(source_mode, current_bundle_path):
-    """Prompt for bundle/output path."""
+def choose_custom_repo_source_type(flow):
+    """Choose whether custom-only repos are HTTP/HTTPS, local paths, or both."""
+    print_repos_guided_step(flow, "Custom repository access method")
+
     print("")
-    print("#" * 80)
-    print("# Step 2. Bundle/output path")
-    print("#" * 80)
+    print("What kind of custom repositories will you provide?")
+    print("")
+    print("1) HTTP/HTTPS repository URLs only")
+    print("   Best when clients and the AeroLIT server can both reach an internal")
+    print("   web repo mirror, such as https://repo.example.com/rhel9/BaseOS.")
+    print("")
+    print("2) Local file/NFS paths only")
+    print("   Best when repos are mounted or copied locally and clients will use")
+    print("   file:// repo URLs or an NFS-mounted path.")
+    print("")
+    print("3) Both HTTP/HTTPS URLs and local file/NFS paths")
+
+    choice = repos_choose_option(
+        "Custom repository access method:",
+        [
+            "HTTP/HTTPS repository URLs only",
+            "Local file/NFS paths only",
+            "Both HTTP/HTTPS URLs and local file/NFS paths",
+        ],
+        default_index=0,
+    )
+
+    if choice == 0:
+        return "http"
+
+    if choice == 1:
+        return "local"
+
+    return "both"
+
+
+def choose_repos_bundle_path(flow, source_mode, current_bundle_path):
+    """Prompt for bundle/output path."""
+    print_repos_guided_step(flow, "Bundle/output path")
+
     print("")
 
     if source_mode in ("bundle", "bundle_custom"):
@@ -2044,14 +2086,11 @@ def choose_repos_bundle_path(source_mode, current_bundle_path):
     return absolute_path(value)
 
 
-def choose_repos_client_path(source_mode, default_path):
-    """Prompt for client-visible bundle path."""
-    print("")
-    print("#" * 80)
-    print("# Step 3. Client-visible bundle path")
-    print("#" * 80)
-    print("")
+def choose_repos_client_path(flow, source_mode, custom_source_type, default_path):
+    """Prompt for client-visible bundle path when it is relevant."""
+    print_repos_guided_step(flow, "Client-visible bundle path")
 
+    print("")
     print("Generated provisioning repo URLs may need the path that provisioned")
     print("clients see, not just the path the server uses.")
     print("")
@@ -2063,10 +2102,14 @@ def choose_repos_client_path(source_mode, default_path):
     print("")
 
     if source_mode == "custom":
-        print("For custom-only HTTP/HTTPS repos, this value may not matter.")
-        print("For custom local paths inside the bundle, it lets AeroLIT rewrite")
-        print("server-local paths into client-visible file:// repo URLs.")
-        print("")
+        if custom_source_type in ("local", "both"):
+            print("Because you selected custom local file/NFS repos, this value helps")
+            print("AeroLIT turn server-local bundle paths into client-visible file:// URLs.")
+            print("")
+        else:
+            print("Because you selected HTTP/HTTPS-only custom repos, this value should")
+            print("not normally affect your repo URLs.")
+            print("")
 
     value = repos_text_prompt(
         "Client-visible bundle path",
@@ -2076,20 +2119,19 @@ def choose_repos_client_path(source_mode, default_path):
     return normalize_client_path(value)
 
 
-def guided_add_server_bootstrap_sources(args):
+def guided_add_server_bootstrap_sources(flow, args):
     """Prompt for optional explicit server BaseOS/AppStream sources."""
+    print_repos_guided_step(flow, "Server bootstrap repositories")
+
     print("")
-    print("#" * 80)
-    print("# Step 5. Server bootstrap repositories")
-    print("#" * 80)
+    print("Server bootstrap repos are used by the AeroLIT server itself if deploy")
+    print("needs local packages.")
     print("")
-    print("Server bootstrap repos are used by the AeroLIT server itself if it")
-    print("needs local packages such as:")
-    print("  - ansible-core")
-    print("  - podman")
-    print("  - nfs-utils")
-    print("  - dnsmasq")
-    print("  - firewalld, when firewall management is enabled")
+    print("Package needs depend on what deploy server is going to run:")
+    print("  - ansible-core is always needed")
+    print("  - podman and dnsmasq are needed when PXE is enabled")
+    print("  - nfs-utils is needed when Ansible Controller / NFS is enabled")
+    print("  - firewalld is needed when firewall management is enabled")
     print("")
     print("These are not necessarily the same repo URLs that provisioned clients use.")
 
@@ -2114,12 +2156,10 @@ def guided_add_server_bootstrap_sources(args):
     ) or None
 
 
-def guided_add_provisioning_repos(args, source_mode):
+def guided_add_provisioning_repos(flow, args, source_mode, custom_source_type):
     """Prompt for explicit provisioning/client repos."""
-    print("")
-    print("#" * 80)
-    print("# Step 6. Provisioning/client repositories")
-    print("#" * 80)
+    print_repos_guided_step(flow, "Provisioning/client repositories")
+
     print("")
     print("Provisioning repos are written into:")
     print("  collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml")
@@ -2139,6 +2179,17 @@ def guided_add_provisioning_repos(args, source_mode):
         print("  - EPEL-like repos")
         print("  - application dependencies")
         default_add = False
+
+    if source_mode == "custom" and custom_source_type == "http":
+        print("")
+        print("You selected HTTP/HTTPS-only custom repos, so enter HTTP/HTTPS repo URLs.")
+    elif source_mode == "custom" and custom_source_type == "local":
+        print("")
+        print("You selected local file/NFS custom repos, so enter local paths or file:// URLs.")
+    elif source_mode == "custom" and custom_source_type == "both":
+        print("")
+        print("You selected both custom repo types, so each repo may be HTTP/HTTPS,")
+        print("file://, or a local path.")
 
     provision_repos = list(getattr(args, "provision_repo", None) or [])
     provision_extra_repos = list(getattr(args, "provision_extra_repo", None) or [])
@@ -2163,14 +2214,35 @@ def guided_add_provisioning_repos(args, source_mode):
         print("")
         print("Repo path or URL")
         print("")
-        print("Examples:")
-        print("  /opt/aerolit/aerolit-bundle/repos/{}/custom-tools".format(os_key))
-        print("  file:///home/unix/sysadmin/repos/{}/custom-tools".format(os_key))
-        print("  https://repo.example.com/{}/custom-tools".format(os_key))
+
+        if custom_source_type == "http":
+            print("Example:")
+            print("  https://repo.example.com/{}/custom-tools".format(os_key))
+        elif custom_source_type == "local":
+            print("Examples:")
+            print("  /opt/aerolit/aerolit-bundle/repos/{}/custom-tools".format(os_key))
+            print("  file:///home/unix/sysadmin/repos/{}/custom-tools".format(os_key))
+        else:
+            print("Examples:")
+            print("  /opt/aerolit/aerolit-bundle/repos/{}/custom-tools".format(os_key))
+            print("  file:///home/unix/sysadmin/repos/{}/custom-tools".format(os_key))
+            print("  https://repo.example.com/{}/custom-tools".format(os_key))
+
         print("")
         print("NOTE: for local paths outside the AeroLIT bundle, provisioned clients")
         print("must be able to reach that same path, or you should use HTTP/HTTPS.")
+
         source = repos_text_prompt("Repo path or URL")
+
+        if custom_source_type == "http" and not (
+            source.startswith("http://") or source.startswith("https://")
+        ):
+            print("")
+            print("WARNING: You selected HTTP/HTTPS-only mode, but this does not look")
+            print("like an HTTP/HTTPS URL:")
+            print("  {}".format(source))
+            if not repos_yes_no_prompt("Use this value anyway?", default=False):
+                continue
 
         spec = "{}:{}={}".format(os_key, repo_id, source)
         provision_repos.append(spec)
@@ -2185,18 +2257,15 @@ def guided_add_provisioning_repos(args, source_mode):
     args.provision_extra_repo = provision_extra_repos
 
 
-def choose_guided_save_action(entries):
+def choose_guided_save_action(flow, entries):
     """Prompt for what guided mode should write."""
-    print("")
-    print("#" * 80)
-    print("# Step 9. Save repository configuration")
-    print("#" * 80)
-    print("")
+    print_repos_guided_step(flow, "Save repository configuration")
 
+    print("")
     server_pair = server_bootstrap_pair(entries)
     bootstrap_available = bool(server_pair.get("baseos") and server_pair.get("appstream"))
 
-    print("Choose what to write:")
+    print("Choose what to do:")
     print("")
     print("1) Generate provisioning repo vars only")
     print("   Writes:")
@@ -2206,15 +2275,18 @@ def choose_guided_save_action(entries):
     print("2) Generate provisioning repo vars and write server bootstrap repo")
     print("   Also writes:")
     print("     {}".format(DEFAULT_SERVER_BOOTSTRAP_REPO_FILE))
-    print("   Use this if this server needs local bundle repos for packages.")
+    print("   Use this if this server needs local repos for server packages.")
     if not bootstrap_available:
         print("   NOTE: this option requires a BaseOS/AppStream pair, which is incomplete.")
     print("")
     print("3) Dry-run only")
     print("   Show what would be written, but do not change files.")
     print("")
-    print("4) Show only")
-    print("   Print discovery results and exit without writing files.")
+    print("4) Show final plan only")
+    print("   Print discovery results and validation, but do not change files.")
+    print("")
+    print("5) Exit without writing anything")
+    print("   Stop now without saving, refreshing, or writing repo files.")
 
     while True:
         choice = repos_choose_option(
@@ -2223,7 +2295,8 @@ def choose_guided_save_action(entries):
                 "Generate provisioning repo vars only",
                 "Generate provisioning repo vars and write server bootstrap repo",
                 "Dry-run only",
-                "Show only",
+                "Show final plan only",
+                "Exit without writing anything",
             ],
             default_index=0,
         )
@@ -2249,13 +2322,21 @@ def build_guided_repos_args(args):
     guided_args = GuidedRepoArgs()
     guided_args.__dict__.update(vars(args))
     guided_args.guided = False
+    guided_args.guided_noop = False
 
     original_show = bool(getattr(args, "show", False))
     original_dry_run = bool(getattr(args, "dry_run", False))
 
+    flow = {"step": 0}
+
     print_repos_guided_intro()
 
-    source_mode = choose_repo_source_mode()
+    source_mode = choose_repo_source_mode(flow)
+
+    custom_source_type = "none"
+    if source_mode == "custom":
+        custom_source_type = choose_custom_repo_source_type(flow)
+
     guided_args.no_auto_discovery = source_mode == "custom"
 
     current_bundle_path = getattr(args, "bundle_path", None)
@@ -2264,27 +2345,36 @@ def build_guided_repos_args(args):
     else:
         current_bundle_path = configured_bundle_path()
 
-    bundle_path = choose_repos_bundle_path(source_mode, current_bundle_path)
+    bundle_path = choose_repos_bundle_path(
+        flow,
+        source_mode,
+        current_bundle_path,
+    )
     guided_args.bundle_path = str(bundle_path)
 
     current_client_path = (
         getattr(args, "path_for_ansible", None)
         or DEFAULT_PATH_FOR_ANSIBLE
     )
-    guided_args.path_for_ansible = choose_repos_client_path(
-        source_mode,
-        current_client_path,
+
+    needs_client_path_prompt = (
+        source_mode in ("bundle", "bundle_custom")
+        or custom_source_type in ("local", "both")
     )
 
-    print("")
-    print("#" * 80)
-    print("# Step 4. Bundle discovery")
-    print("#" * 80)
-    print("")
-
-    if source_mode == "custom":
-        print("Custom-only mode selected. Bundle repository discovery is disabled.")
+    if needs_client_path_prompt:
+        guided_args.path_for_ansible = choose_repos_client_path(
+            flow,
+            source_mode,
+            custom_source_type,
+            current_client_path,
+        )
     else:
+        guided_args.path_for_ansible = normalize_client_path(current_client_path)
+
+    if source_mode != "custom":
+        print_repos_guided_step(flow, "Bundle discovery")
+        print("")
         print("AeroLIT will scan the bundle for repositories under locations like:")
         print("  - extracted_isos/")
         print("  - repos/")
@@ -2292,10 +2382,15 @@ def build_guided_repos_args(args):
         print("A valid yum/dnf repository has:")
         print("  repodata/repomd.xml")
 
-    guided_add_server_bootstrap_sources(guided_args)
+    guided_add_server_bootstrap_sources(flow, guided_args)
 
     if source_mode in ("bundle_custom", "custom"):
-        guided_add_provisioning_repos(guided_args, source_mode)
+        guided_add_provisioning_repos(
+            flow,
+            guided_args,
+            source_mode,
+            custom_source_type,
+        )
     else:
         guided_args.provision_repo = list(getattr(args, "provision_repo", None) or [])
         guided_args.provision_extra_repo = list(
@@ -2308,17 +2403,11 @@ def build_guided_repos_args(args):
         args=guided_args,
     )
 
-    print("")
-    print("#" * 80)
-    print("# Step 7. Final repository plan")
-    print("#" * 80)
+    print_repos_guided_step(flow, "Final repository plan")
     print("")
     print_repos_summary(bundle_path, guided_args.path_for_ansible, entries)
 
-    print("")
-    print("#" * 80)
-    print("# Step 8. Validate final repository plan")
-    print("#" * 80)
+    print_repos_guided_step(flow, "Validate final repository plan")
 
     if repos_yes_no_prompt("Validate before saving?", default=True):
         print("")
@@ -2337,12 +2426,27 @@ def build_guided_repos_args(args):
             ):
                 raise RepoConfigError("Guided configure repos cancelled.")
 
+    if source_mode == "custom" and not entries and not original_show:
+        print("")
+        print("WARNING: Custom-only mode is selected, but no repository sources were added.")
+        print("Saving now would generate an empty repository plan.")
+        print("")
+        if not repos_yes_no_prompt("Continue to save options anyway?", default=False):
+            guided_args.show = False
+            guided_args.validate = False
+            guided_args.refresh = False
+            guided_args.write_server_bootstrap = False
+            guided_args.ensure_server_prereqs = False
+            guided_args.dry_run = False
+            guided_args.guided_noop = True
+            return guided_args
+
     if original_show:
         print("")
         print("Original --show option was provided; guided mode will show the final plan only.")
         save_choice = 3
     else:
-        save_choice = choose_guided_save_action(entries)
+        save_choice = choose_guided_save_action(flow, entries)
 
     guided_args.show = False
     guided_args.validate = False
@@ -2350,6 +2454,7 @@ def build_guided_repos_args(args):
     guided_args.write_server_bootstrap = False
     guided_args.ensure_server_prereqs = False
     guided_args.dry_run = False
+    guided_args.guided_noop = False
 
     if save_choice == 0:
         guided_args.refresh = True
@@ -2359,10 +2464,12 @@ def build_guided_repos_args(args):
     elif save_choice == 2:
         guided_args.refresh = True
         guided_args.dry_run = True
-    else:
+    elif save_choice == 3:
         guided_args.show = True
+    else:
+        guided_args.guided_noop = True
 
-    if original_dry_run and not guided_args.show:
+    if original_dry_run and not guided_args.show and not guided_args.guided_noop:
         guided_args.dry_run = True
 
     return guided_args
@@ -2374,6 +2481,11 @@ def run_configure_repos(args):
         if getattr(args, "guided", False):
             guided_args = build_guided_repos_args(args)
             return run_configure_repos(guided_args)
+
+        if getattr(args, "guided_noop", False):
+            print("")
+            print("No save action selected. No files were changed.")
+            return 0
 
         bundle_path = getattr(args, "bundle_path", None)
         if bundle_path:
@@ -2416,6 +2528,14 @@ def run_configure_repos(args):
 
         if show_only:
             print_repos_summary(bundle_path, path_for_ansible, entries)
+
+            if (
+                not refresh_requested
+                and not write_server_bootstrap_requested
+                and not ensure_server_prereqs_requested
+            ):
+                print("")
+                print("Show only. No files were changed.")
 
         if refresh_requested:
             print("")
