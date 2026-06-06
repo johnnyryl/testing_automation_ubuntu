@@ -17,6 +17,9 @@ from .pxe import run_configure_pxe
 from .repos import run_configure_repos
 from .configure_all import run_configure_all
 from .provision import run_provision
+from .answers import run_answers_export, run_answers_import, run_answers_show
+from .backup import run_backup_config
+from .logs import run_logs
 
 
 def cmd_version(args):
@@ -125,6 +128,31 @@ def cmd_doctor(args):
 def cmd_status(args):
     """Show AeroLIT status."""
     return run_status(verbose=getattr(args, "verbose", False))
+
+
+def cmd_logs(args):
+    """Show AeroLIT logs."""
+    return run_logs(args)
+
+
+def cmd_backup_config(args):
+    """Back up AeroLIT configuration footprint."""
+    return run_backup_config(args)
+
+
+def cmd_answers_show(args):
+    """Show saved AeroLIT answers."""
+    return run_answers_show(args)
+
+
+def cmd_answers_export(args):
+    """Export saved AeroLIT answers."""
+    return run_answers_export(args)
+
+
+def cmd_answers_import(args):
+    """Import saved AeroLIT answers."""
+    return run_answers_import(args)
 
 
 def cmd_provision(args):
@@ -975,6 +1003,193 @@ Important:
     return provision_parser
 
 
+def add_logs_parser(subparsers):
+    """Add aerolitctl logs parser."""
+    logs_parser = subparsers.add_parser(
+        "logs",
+        help="Show AeroLIT logs.",
+    )
+
+    logs_parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List AeroLIT log files instead of showing the latest log.",
+    )
+    logs_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit the number of logs shown with --list.",
+    )
+    logs_parser.add_argument(
+        "--tail",
+        type=int,
+        default=100,
+        help="Number of lines to show from the selected log. Default: 100.",
+    )
+    logs_parser.add_argument(
+        "--follow",
+        action="store_true",
+        help="Continue following the selected log like tail -f.",
+    )
+    logs_parser.add_argument(
+        "--dir",
+        action="store_true",
+        help="Print the AeroLIT log directory and exit.",
+    )
+    logs_parser.add_argument(
+        "--path",
+        default=None,
+        help="Show a specific log file instead of the latest AeroLIT log.",
+    )
+    logs_parser.add_argument(
+        "--log-dir",
+        default=None,
+        help="Override the AeroLIT log directory. Defaults to /var/log/aerolit.",
+    )
+    logs_parser.add_argument(
+        "--pattern",
+        default=None,
+        help="Only consider logs matching this shell-style pattern, such as '*.log'.",
+    )
+
+    add_command_verbose(logs_parser)
+    logs_parser.set_defaults(func=cmd_logs)
+
+    return logs_parser
+
+
+def add_backup_parser(subparsers):
+    """Add aerolitctl backup parser."""
+    backup_parser = subparsers.add_parser(
+        "backup",
+        help="Back up AeroLIT files.",
+    )
+
+    backup_subparsers = backup_parser.add_subparsers(dest="backup_command")
+
+    config_parser = backup_subparsers.add_parser(
+        "config",
+        help="Back up the AeroLIT-owned configuration footprint.",
+    )
+    config_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory where the backup archive should be written.",
+    )
+    config_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be backed up without creating an archive.",
+    )
+    config_parser.add_argument(
+        "--list-files",
+        action="store_true",
+        help="List files included in the backup plan.",
+    )
+    config_parser.add_argument(
+        "--include-rendered",
+        action="store_true",
+        help="Include /var/lib/aerolit/rendered files in the backup archive.",
+    )
+    config_parser.add_argument(
+        "--no-state",
+        action="store_true",
+        help="Do not include /var/lib/aerolit/state.yml.",
+    )
+    config_parser.add_argument(
+        "--no-bundle-generated",
+        action="store_true",
+        help=(
+            "Do not include AeroLIT-managed generated files from the active "
+            "collections-hub bundle."
+        ),
+    )
+
+    add_command_verbose(config_parser)
+    config_parser.set_defaults(func=cmd_backup_config)
+
+    return backup_parser
+
+
+def add_answers_parser(subparsers):
+    """Add aerolitctl answers parser."""
+    answers_parser = subparsers.add_parser(
+        "answers",
+        help="Show, export, or import saved AeroLIT answers.",
+    )
+
+    answers_subparsers = answers_parser.add_subparsers(dest="answers_command")
+
+    show_parser = answers_subparsers.add_parser(
+        "show",
+        help="Show saved AeroLIT answers.",
+    )
+    show_parser.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="Show sensitive-looking values instead of redacting them.",
+    )
+    add_command_verbose(show_parser)
+    show_parser.set_defaults(func=cmd_answers_show)
+
+    export_parser = answers_subparsers.add_parser(
+        "export",
+        help="Export saved AeroLIT answers.",
+    )
+    export_parser.add_argument(
+        "--output",
+        "-o",
+        default=None,
+        help="Output file. Defaults to stdout.",
+    )
+    export_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite the output file if it already exists.",
+    )
+    export_parser.add_argument(
+        "--redact",
+        action="store_true",
+        help="Redact sensitive-looking values in the exported file.",
+    )
+    add_command_verbose(export_parser)
+    export_parser.set_defaults(func=cmd_answers_export)
+
+    import_parser = answers_subparsers.add_parser(
+        "import",
+        help="Import saved AeroLIT answers from a YAML file.",
+    )
+    import_parser.add_argument(
+        "file",
+        help="Answers YAML file to import.",
+    )
+    import_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the import diff without changing files.",
+    )
+    import_parser.add_argument(
+        "--merge",
+        action="store_true",
+        help="Deep-merge imported answers into the current config instead of replacing it.",
+    )
+    import_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not create a full config backup before importing.",
+    )
+    import_parser.add_argument(
+        "--no-redact-diff",
+        action="store_true",
+        help="Show sensitive-looking values in the dry-run import diff.",
+    )
+    add_command_verbose(import_parser)
+    import_parser.set_defaults(func=cmd_answers_import)
+
+    return answers_parser
+
+
 def add_deploy_parser(subparsers):
     """Add aerolitctl deploy parser."""
     deploy_parser = subparsers.add_parser(
@@ -1095,6 +1310,10 @@ def build_parser():
     )
     add_command_verbose(status_parser)
     status_parser.set_defaults(func=cmd_status)
+
+    add_logs_parser(subparsers)
+    add_backup_parser(subparsers)
+    add_answers_parser(subparsers)
 
     configure_parser = subparsers.add_parser(
         "configure",
