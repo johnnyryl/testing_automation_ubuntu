@@ -1017,9 +1017,14 @@ def test_cli_help_and_parser(args):
     assert_contains(provision_help, "After PLAYBOOK, arguments are passed through", "provision help")
     assert_contains(provision_help, "aerolitctl path show", "provision help")
     assert_contains(provision_help, "aerolitctl path set /path/to/aerolit-bundle", "provision help")
+    assert_contains(provision_help, "aerolitctl provision list", "provision help")
+    assert_contains(provision_help, "aerolitctl provision check", "provision help")
+    assert_contains(provision_help, "Helper commands:", "provision help")
+    assert_contains(provision_help, "reserved provision targets", "provision help")
 
     for command in commands:
         run_cmd(command)
+
 
 def test_standardized_source_wording(args):
     """Catch old user-facing wording in Python source."""
@@ -2621,6 +2626,42 @@ def test_provision_wrapper_read_only(args, hash_paths):
     assert_contains(output, "-i localhost,", "provision command")
     assert_contains(output, "-c local", "provision command")
     assert_not_contains(output, "-i inventory", "provision command with explicit inventory")
+
+    list_output = run_cmd(
+        ["aerolitctl", "provision", "list"],
+        cwd=args.log_dir,
+        log_path=Path(args.log_dir) / "provision-list.log",
+    )
+    assert_contains(list_output, "AeroLIT provision playbooks", "provision list")
+    assert_contains(list_output, "Bundle path:", "provision list")
+    assert_contains(list_output, "Ansible directory:", "provision list")
+    assert_contains(list_output, str(ansible_dir), "provision list")
+    assert_contains(list_output, "Available playbooks:", "provision list")
+
+    check_output = run_cmd(
+        ["aerolitctl", "provision", "check"],
+        cwd=args.log_dir,
+        log_path=Path(args.log_dir) / "provision-check.log",
+    )
+    assert_contains(check_output, "AeroLIT provision check", "provision check")
+    assert_contains(check_output, "[OK] Bundle path", "provision check")
+    assert_contains(check_output, "[OK] Ansible directory", "provision check")
+    assert_contains(check_output, "[OK] Default inventory", "provision check")
+    assert_contains(check_output, "[OK] ansible-playbook", "provision check")
+    assert_contains(check_output, "Playbooks visible", "provision check")
+    assert_contains(check_output, "Provision check passed.", "provision check")
+
+    helper_guard_output = run_cmd(
+        ["aerolitctl", "provision", "--install-ansible-core", "check"],
+        expected_rc=2,
+        cwd=args.log_dir,
+        log_path=Path(args.log_dir) / "provision-helper-option-guard.log",
+    )
+    assert_contains(
+        helper_guard_output,
+        "does not use --install-ansible-core",
+        "provision helper option guard",
+    )
 
     after = sha256_paths(hash_paths)
     assert_hashes_same(before, after, "provision-wrapper-read-only")
