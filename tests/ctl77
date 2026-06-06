@@ -127,7 +127,7 @@ def command_slug_from_args(args):
         "path_command",
         "bundle_command",
         "backup_command",
-        "answers_command",
+        "settings_command",
     ):
         value = getattr(args, attr, None)
         if value:
@@ -237,19 +237,19 @@ def should_log_command(args):
 def should_capture_output(args):
     """Return whether stdout/stderr should be copied into the command log.
 
-    Some answer commands can intentionally print unredacted config to stdout.
+    Some settings commands can intentionally print unredacted config to stdout.
     Log metadata is still useful, but output capture should be disabled for
     those risky cases.
     """
-    if getattr(args, "command", None) != "answers":
+    if getattr(args, "command", None) != "settings":
         return True
 
-    answers_command = getattr(args, "answers_command", None)
+    settings_command = getattr(args, "settings_command", None)
 
-    if answers_command == "show" and getattr(args, "no_redact", False):
+    if settings_command == "show" and getattr(args, "no_redact", False):
         return False
 
-    if answers_command == "export":
+    if settings_command == "export":
         output = getattr(args, "output", None)
         redact = getattr(args, "redact", False)
 
@@ -257,7 +257,7 @@ def should_capture_output(args):
             return False
 
     if (
-        answers_command == "import"
+        settings_command == "import"
         and getattr(args, "dry_run", False)
         and getattr(args, "no_redact_diff", False)
     ):
