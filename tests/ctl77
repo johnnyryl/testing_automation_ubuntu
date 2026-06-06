@@ -1,0 +1,509 @@
+"""Command-level runtime logging for aerolitctl."""
+
+from __future__ import print_function
+
+import getpass
+import os
+import shlex
+import socket
+import sys
+import threading
+import time
+import traceback
+from datetime import datetime
+from pathlib import Path
+
+from . import __version__
+from .paths import LOG_DIR
+
+
+SENSITIVE_ARG_NAMES = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "credential",
+    "credentials",
+    "private-key",
+    "private_key",
+    "ssh-key",
+    "ssh_key",
+    "api-key",
+    "api_key",
+    "auth-token",
+    "auth_token",
+    "bearer",
+)
+
+
+_LAST_COMMAND_LOG_PATH = None
+_LAST_COMMAND_LOG_ERROR = None
+
+
+def utc_stamp():
+    """Return a filesystem-safe UTC timestamp."""
+    return datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+
+
+def utc_iso():
+    """Return an ISO UTC timestamp."""
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def command_log_dir():
+    """Return the command log directory.
+
+    AEROLITCTL_LOG_DIR is mainly useful for tests.
+    """
+    override = os.environ.get("AEROLITCTL_LOG_DIR")
+    if override:
+        return Path(override)
+
+    return LOG_DIR
+
+
+def reset_command_log_state():
+    """Reset per-process command log state."""
+    global _LAST_COMMAND_LOG_PATH
+    global _LAST_COMMAND_LOG_ERROR
+
+    _LAST_COMMAND_LOG_PATH = None
+    _LAST_COMMAND_LOG_ERROR = None
+
+
+def set_command_log_error(exc):
+    """Store command log setup/write error text."""
+    global _LAST_COMMAND_LOG_ERROR
+    _LAST_COMMAND_LOG_ERROR = str(exc)
+
+
+def get_last_command_log_error():
+    """Return the most recent command log setup/write error."""
+    return _LAST_COMMAND_LOG_ERROR
+
+
+def get_last_command_log_path():
+    """Return the most recent command log path created by this process."""
+    return _LAST_COMMAND_LOG_PATH
+
+
+def ensure_log_dir(path):
+    """Create the command log directory with reasonably private permissions."""
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+    try:
+        os.chmod(str(path), 0o750)
+    except OSError:
+        pass
+
+
+def open_private_log_file(path):
+    """Open a command log file with private permissions."""
+    path = Path(path)
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    if hasattr(os, "O_NOFOLLOW"):
+        flags = flags | os.O_NOFOLLOW
+
+    fd = os.open(str(path), flags, 0o600)
+
+    try:
+        os.chmod(str(path), 0o600)
+    except OSError:
+        pass
+
+    return os.fdopen(fd, "a", encoding="utf-8", errors="replace")
+
+
+def command_slug_from_args(args):
+    """Return a stable command slug from parsed argparse values."""
+    parts = []
+
+    for attr in (
+        "command",
+        "configure_command",
+        "deploy_command",
+        "path_command",
+        "bundle_command",
+        "backup_command",
+        "answers_command",
+    ):
+        value = getattr(args, attr, None)
+        if value:
+            parts.append(str(value))
+
+    if getattr(args, "command", None) == "provision":
+        playbook = getattr(args, "playbook", None)
+        if playbook in ("list", "check"):
+            parts.append(playbook)
+        elif playbook:
+            parts.append("playbook")
+
+    if not parts:
+        return "command"
+
+    raw = "-".join(parts)
+    safe = []
+
+    for char in raw.lower():
+        if char.isalnum() or char in ("-", "_"):
+            safe.append(char)
+        else:
+            safe.append("-")
+
+    slug = "".join(safe).strip("-")
+    return slug or "command"
+
+
+def unique_log_path(args):
+    """Return a unique command log path."""
+    log_dir = command_log_dir()
+    slug = command_slug_from_args(args)
+    pid = os.getpid()
+    stem = "aerolitctl-{}-{}-{}".format(utc_stamp(), pid, slug)
+
+    candidate = log_dir / "{}.log".format(stem)
+    if not candidate.exists():
+        return candidate
+
+    for index in range(1, 100):
+        candidate = log_dir / "{}-{:02d}.log".format(stem, index)
+        if not candidate.exists():
+            return candidate
+
+    return log_dir / "{}-{}.log".format(stem, int(time.time()))
+
+
+def arg_name_is_sensitive(arg):
+    """Return True if a CLI argument name looks sensitive."""
+    lowered = str(arg).lower().lstrip("-")
+    return any(name in lowered for name in SENSITIVE_ARG_NAMES)
+
+
+def redact_argv(argv):
+    """Return argv with sensitive-looking option values redacted."""
+    redacted = []
+    redact_next = False
+
+    for item in argv:
+        text = str(item)
+
+        if redact_next:
+            redacted.append("REDACTED")
+            redact_next = False
+            continue
+
+        if text.startswith("--") and "=" in text:
+            key, _value = text.split("=", 1)
+            if arg_name_is_sensitive(key):
+                redacted.append("{}=REDACTED".format(key))
+            else:
+                redacted.append(text)
+            continue
+
+        if text.startswith("-") and arg_name_is_sensitive(text):
+            redacted.append(text)
+            redact_next = True
+            continue
+
+        redacted.append(text)
+
+    return redacted
+
+
+def render_argv(argv):
+    """Render argv for log metadata."""
+    return " ".join(shlex.quote(str(item)) for item in redact_argv(argv))
+
+
+def should_log_command(args):
+    """Return whether this command should create a command log."""
+    if os.environ.get("AEROLITCTL_NO_COMMAND_LOG"):
+        return False
+
+    command = getattr(args, "command", None)
+
+    if not command:
+        return False
+
+    # Avoid making the log viewer create a new latest log of itself.
+    if command == "logs":
+        return False
+
+    return True
+
+
+def should_capture_output(args):
+    """Return whether stdout/stderr should be copied into the command log.
+
+    Some answer commands can intentionally print unredacted config to stdout.
+    Log metadata is still useful, but output capture should be disabled for
+    those risky cases.
+    """
+    if getattr(args, "command", None) != "answers":
+        return True
+
+    answers_command = getattr(args, "answers_command", None)
+
+    if answers_command == "show" and getattr(args, "no_redact", False):
+        return False
+
+    if answers_command == "export":
+        output = getattr(args, "output", None)
+        redact = getattr(args, "redact", False)
+
+        if (not output or output == "-") and not redact:
+            return False
+
+    if (
+        answers_command == "import"
+        and getattr(args, "dry_run", False)
+        and getattr(args, "no_redact_diff", False)
+    ):
+        return False
+
+    return True
+
+
+class FdTee(object):
+    """Tee one file descriptor to the original fd and a log file."""
+
+    def __init__(self, fd, log_file, lock):
+        self.fd = fd
+        self.log_file = log_file
+        self.lock = lock
+        self.saved_fd = None
+        self.read_fd = None
+        self.write_fd = None
+        self.thread = None
+
+    def __enter__(self):
+        try:
+            if self.fd == 1:
+                sys.stdout.flush()
+            elif self.fd == 2:
+                sys.stderr.flush()
+        except Exception:
+            pass
+
+        self.saved_fd = os.dup(self.fd)
+        self.read_fd, self.write_fd = os.pipe()
+
+        os.dup2(self.write_fd, self.fd)
+        os.close(self.write_fd)
+        self.write_fd = None
+
+        self.thread = threading.Thread(target=self._pump)
+        self.thread.daemon = True
+        self.thread.start()
+
+        return self
+
+    def _pump(self):
+        while True:
+            try:
+                chunk = os.read(self.read_fd, 8192)
+            except OSError:
+                break
+
+            if not chunk:
+                break
+
+            try:
+                os.write(self.saved_fd, chunk)
+            except OSError:
+                pass
+
+            try:
+                text = chunk.decode("utf-8", errors="replace")
+                with self.lock:
+                    self.log_file.write(text)
+                    self.log_file.flush()
+            except Exception:
+                pass
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if self.fd == 1:
+                sys.stdout.flush()
+            elif self.fd == 2:
+                sys.stderr.flush()
+        except Exception:
+            pass
+
+        if self.saved_fd is not None:
+            try:
+                os.dup2(self.saved_fd, self.fd)
+            except OSError:
+                pass
+
+        if self.thread is not None:
+            self.thread.join(timeout=2)
+
+        for fd in (self.read_fd, self.saved_fd):
+            if fd is None:
+                continue
+
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+        self.read_fd = None
+        self.saved_fd = None
+        return False
+
+
+class CommandLog(object):
+    """Context manager for one aerolitctl command log."""
+
+    def __init__(self, args, argv=None):
+        self.args = args
+        self.argv = list(argv if argv is not None else sys.argv[1:])
+        self.path = unique_log_path(args)
+        self.log_file = None
+        self.lock = threading.Lock()
+        self.stdout_tee = None
+        self.stderr_tee = None
+        self.started = time.time()
+        self.capture_output = should_capture_output(args)
+        self.enabled = True
+
+    def __enter__(self):
+        global _LAST_COMMAND_LOG_PATH
+
+        try:
+            ensure_log_dir(self.path.parent)
+            self.log_file = open_private_log_file(self.path)
+            _LAST_COMMAND_LOG_PATH = self.path
+        except Exception as exc:
+            set_command_log_error(exc)
+            self.enabled = False
+            return self
+
+        self._write_header()
+
+        if self.capture_output:
+            self.log_file.write("\n[output]\n")
+            self.log_file.flush()
+
+            try:
+                self.stdout_tee = FdTee(1, self.log_file, self.lock)
+                self.stderr_tee = FdTee(2, self.log_file, self.lock)
+                self.stdout_tee.__enter__()
+                self.stderr_tee.__enter__()
+            except Exception as exc:
+                set_command_log_error(exc)
+
+                if self.stderr_tee is not None:
+                    self.stderr_tee.__exit__(None, None, None)
+                if self.stdout_tee is not None:
+                    self.stdout_tee.__exit__(None, None, None)
+
+                self.stdout_tee = None
+                self.stderr_tee = None
+                self.capture_output = False
+
+                self.log_file.write(
+                    "Output capture disabled because command log tee setup failed: {}.\n".format(
+                        exc
+                    )
+                )
+                self.log_file.flush()
+        else:
+            self.log_file.write("\n[output]\n")
+            self.log_file.write(
+                "Output capture disabled for this command to avoid logging sensitive data.\n"
+            )
+            self.log_file.flush()
+
+        return self
+
+    def _write_header(self):
+        self.log_file.write("AeroLIT command log\n")
+        self.log_file.write("===================\n")
+        self.log_file.write("Started UTC       : {}\n".format(utc_iso()))
+        self.log_file.write("Command           : aerolitctl {}\n".format(render_argv(self.argv)))
+        self.log_file.write("Command slug      : {}\n".format(command_slug_from_args(self.args)))
+        self.log_file.write("CWD               : {}\n".format(os.getcwd()))
+        self.log_file.write("Host              : {}\n".format(socket.gethostname()))
+        self.log_file.write("User              : {}\n".format(getpass.getuser()))
+
+        if hasattr(os, "getuid"):
+            self.log_file.write("UID               : {}\n".format(os.getuid()))
+        if hasattr(os, "geteuid"):
+            self.log_file.write("EUID              : {}\n".format(os.geteuid()))
+
+        self.log_file.write("Python            : {}\n".format(sys.executable))
+        self.log_file.write("aerolitctl version: {}\n".format(__version__))
+        self.log_file.flush()
+
+    def write_exception(self):
+        """Write exception traceback to the command log."""
+        if not self.enabled or not self.log_file:
+            return
+
+        with self.lock:
+            self.log_file.write("\n[exception]\n")
+            self.log_file.write(traceback.format_exc())
+            self.log_file.flush()
+
+    def write_footer(self, return_code=None):
+        """Write final command status."""
+        if not self.enabled or not self.log_file:
+            return
+
+        duration = time.time() - self.started
+
+        with self.lock:
+            self.log_file.write("\n")
+            self.log_file.write("[summary]\n")
+            self.log_file.write("Finished UTC      : {}\n".format(utc_iso()))
+            self.log_file.write("Return code       : {}\n".format(return_code))
+            self.log_file.write("Duration seconds  : {:.3f}\n".format(duration))
+            self.log_file.flush()
+
+    def __exit__(self, exc_type, exc, tb):
+        if not self.enabled:
+            return False
+
+        if self.stderr_tee is not None:
+            self.stderr_tee.__exit__(exc_type, exc, tb)
+
+        if self.stdout_tee is not None:
+            self.stdout_tee.__exit__(exc_type, exc, tb)
+
+        try:
+            self.log_file.close()
+        except Exception:
+            pass
+
+        return False
+
+
+def normalize_return_code(result):
+    """Normalize command return value for process exit/logging."""
+    if result is None:
+        return 0
+
+    return result
+
+
+def run_with_command_log(args, func, argv=None):
+    """Run a parsed command while writing a command log."""
+    reset_command_log_state()
+
+    if not should_log_command(args):
+        return normalize_return_code(func())
+
+    with CommandLog(args, argv=argv) as command_log:
+        try:
+            result = normalize_return_code(func())
+        except BaseException:
+            command_log.write_exception()
+            command_log.write_footer(return_code="exception")
+            raise
+
+        command_log.write_footer(return_code=result)
+        return result
