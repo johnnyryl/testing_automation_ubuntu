@@ -935,10 +935,10 @@ def test_cli_help_and_parser(args):
         ["aerolitctl", "backup", "--help"],
         ["aerolitctl", "backup", "config", "--help"],
         ["aerolitctl", "backup", "config", "--dry-run"],
-        ["aerolitctl", "answers", "--help"],
-        ["aerolitctl", "answers", "show", "--help"],
-        ["aerolitctl", "answers", "export", "--help"],
-        ["aerolitctl", "answers", "import", "--help"],
+        ["aerolitctl", "settings", "--help"],
+        ["aerolitctl", "settings", "show", "--help"],
+        ["aerolitctl", "settings", "export", "--help"],
+        ["aerolitctl", "settings", "import", "--help"],
         ["aerolitctl", "--verbose", "status"],
         ["aerolitctl", "status", "--verbose"],
         ["aerolitctl", "deploy", "server", "--dry-run", "--verbose"],
@@ -1066,19 +1066,19 @@ def test_cli_help_and_parser(args):
     assert_contains(backup_help, "--no-state", "backup config help")
     assert_contains(backup_help, "--no-bundle-generated", "backup config help")
 
-    answers_show_help = run_cmd(["aerolitctl", "answers", "show", "--help"])
-    assert_contains(answers_show_help, "--no-redact", "answers show help")
+    settings_show_help = run_cmd(["aerolitctl", "settings", "show", "--help"])
+    assert_contains(settings_show_help, "--no-redact", "settings show help")
 
-    answers_export_help = run_cmd(["aerolitctl", "answers", "export", "--help"])
-    assert_contains(answers_export_help, "--output", "answers export help")
-    assert_contains(answers_export_help, "--force", "answers export help")
-    assert_contains(answers_export_help, "--redact", "answers export help")
+    settings_export_help = run_cmd(["aerolitctl", "settings", "export", "--help"])
+    assert_contains(settings_export_help, "--output", "settings export help")
+    assert_contains(settings_export_help, "--force", "settings export help")
+    assert_contains(settings_export_help, "--redact", "settings export help")
 
-    answers_import_help = run_cmd(["aerolitctl", "answers", "import", "--help"])
-    assert_contains(answers_import_help, "--dry-run", "answers import help")
-    assert_contains(answers_import_help, "--merge", "answers import help")
-    assert_contains(answers_import_help, "--no-backup", "answers import help")
-    assert_contains(answers_import_help, "--no-redact-diff", "answers import help")
+    settings_import_help = run_cmd(["aerolitctl", "settings", "import", "--help"])
+    assert_contains(settings_import_help, "--dry-run", "settings import help")
+    assert_contains(settings_import_help, "--merge", "settings import help")
+    assert_contains(settings_import_help, "--no-backup", "settings import help")
+    assert_contains(settings_import_help, "--no-redact-diff", "settings import help")
 
     for command in commands:
         run_cmd(command)
@@ -1395,40 +1395,40 @@ def test_backup_config_command_behavior(args, hash_paths):
     assert_hashes_same(before, after, "backup-config-command-behavior")
 
 
-def test_answers_command_behavior(args, hash_paths):
-    """Validate aerolitctl answers show/export/import safety behavior."""
+def test_settings_command_behavior(args, hash_paths):
+    """Validate aerolitctl settings show/export/import safety behavior."""
     before = sha256_paths(hash_paths)
 
-    export_path = Path(args.log_dir) / "answers-export.yml"
-    redacted_export_path = Path(args.log_dir) / "answers-redacted.yml"
-    partial_import_path = Path(args.log_dir) / "answers-partial.yml"
-    redacted_import_path = Path(args.log_dir) / "answers-redacted-import.yml"
+    export_path = Path(args.log_dir) / "settings-export.yml"
+    redacted_export_path = Path(args.log_dir) / "settings-redacted.yml"
+    partial_import_path = Path(args.log_dir) / "settings-partial.yml"
+    redacted_import_path = Path(args.log_dir) / "settings-redacted-import.yml"
 
-    show_output = run_cmd(["aerolitctl", "answers", "show"])
-    assert_contains(show_output, "paths:", "answers show")
-    assert_contains(show_output, "version:", "answers show")
+    show_output = run_cmd(["aerolitctl", "settings", "show"])
+    assert_contains(show_output, "paths:", "settings show")
+    assert_contains(show_output, "version:", "settings show")
 
     export_output = run_cmd(
         [
             "aerolitctl",
-            "answers",
+            "settings",
             "export",
             "--output",
             str(export_path),
         ]
     )
-    assert_contains(export_output, "Exported AeroLIT answers:", "answers export")
-    assert_contains(export_output, str(export_path), "answers export")
-    assert_path_exists(export_path, "answers export file")
+    assert_contains(export_output, "Exported AeroLIT settings:", "settings export")
+    assert_contains(export_output, str(export_path), "settings export")
+    assert_path_exists(export_path, "settings export file")
 
     exported_text = read_text(export_path)
-    assert_contains(exported_text, "paths:", "answers export file")
-    assert_contains(exported_text, "version:", "answers export file")
+    assert_contains(exported_text, "paths:", "settings export file")
+    assert_contains(exported_text, "version:", "settings export file")
 
     duplicate_output = run_cmd(
         [
             "aerolitctl",
-            "answers",
+            "settings",
             "export",
             "--output",
             str(export_path),
@@ -1438,17 +1438,17 @@ def test_answers_command_behavior(args, hash_paths):
     assert_contains(
         duplicate_output,
         "Output file already exists. Use --force to overwrite",
-        "answers export overwrite guard",
+        "settings export overwrite guard",
     )
 
     import_same_output = run_cmd(
-        ["aerolitctl", "answers", "import", str(export_path), "--dry-run"]
+        ["aerolitctl", "settings", "import", str(export_path), "--dry-run"]
     )
-    assert_contains(import_same_output, "AeroLIT answers import", "answers import same")
+    assert_contains(import_same_output, "AeroLIT settings import", "settings import same")
     assert_contains(
         import_same_output,
-        "No changes made. Imported answers match the current config.",
-        "answers import same",
+        "No changes made. Imported settings match the current config.",
+        "settings import same",
     )
 
     write_text(
@@ -1459,24 +1459,24 @@ def test_answers_command_behavior(args, hash_paths):
     )
 
     replace_partial_output = run_cmd(
-        ["aerolitctl", "answers", "import", str(partial_import_path), "--dry-run"],
+        ["aerolitctl", "settings", "import", str(partial_import_path), "--dry-run"],
         expected_rc=1,
     )
     assert_contains(
         replace_partial_output,
         "Replacement imports must include a top-level 'paths' section.",
-        "answers partial replace guard",
+        "settings partial replace guard",
     )
     assert_contains(
         replace_partial_output,
-        "Use --merge for partial answer files.",
-        "answers partial replace guard",
+        "Use --merge for partial setting files.",
+        "settings partial replace guard",
     )
 
     merge_partial_output = run_cmd(
         [
             "aerolitctl",
-            "answers",
+            "settings",
             "import",
             str(partial_import_path),
             "--merge",
@@ -1486,15 +1486,15 @@ def test_answers_command_behavior(args, hash_paths):
     )
     assert_contains(
         merge_partial_output,
-        "AeroLIT answers import dry run",
-        "answers partial merge dry-run",
+        "AeroLIT settings import dry run",
+        "settings partial merge dry-run",
     )
-    assert_contains(merge_partial_output, "18081", "answers partial merge dry-run")
+    assert_contains(merge_partial_output, "18081", "settings partial merge dry-run")
 
     redacted_output = run_cmd(
         [
             "aerolitctl",
-            "answers",
+            "settings",
             "export",
             "--redact",
             "--output",
@@ -1503,10 +1503,10 @@ def test_answers_command_behavior(args, hash_paths):
     )
     assert_contains(
         redacted_output,
-        "Exported redacted AeroLIT answers:",
-        "answers redacted export",
+        "Exported redacted AeroLIT settings:",
+        "settings redacted export",
     )
-    assert_path_exists(redacted_export_path, "redacted answers export file")
+    assert_path_exists(redacted_export_path, "redacted settings export file")
 
     write_text(
         redacted_import_path,
@@ -1516,22 +1516,22 @@ def test_answers_command_behavior(args, hash_paths):
     )
 
     redacted_import_output = run_cmd(
-        ["aerolitctl", "answers", "import", str(redacted_import_path), "--dry-run"],
+        ["aerolitctl", "settings", "import", str(redacted_import_path), "--dry-run"],
         expected_rc=1,
     )
     assert_contains(
         redacted_import_output,
-        "Answers file contains REDACTED placeholder values.",
-        "answers redacted import guard",
+        "Settings file contains REDACTED placeholder values.",
+        "settings redacted import guard",
     )
     assert_contains(
         redacted_import_output,
         "Export without --redact before importing.",
-        "answers redacted import guard",
+        "settings redacted import guard",
     )
 
     after = sha256_paths(hash_paths)
-    assert_hashes_same(before, after, "answers-command-behavior")
+    assert_hashes_same(before, after, "settings-command-behavior")
 
 
 def test_standardized_source_wording(args):
@@ -3384,7 +3384,7 @@ def main():
         ("logs command behavior", lambda: test_logs_command_behavior(args)),
         ("command logging behavior", lambda: test_command_logging_behavior(args)),
         ("backup config command behavior", lambda: test_backup_config_command_behavior(args, hash_paths)),
-        ("answers command behavior", lambda: test_answers_command_behavior(args, hash_paths)),
+        ("settings command behavior", lambda: test_settings_command_behavior(args, hash_paths)),
         ("standardized source wording", lambda: test_standardized_source_wording(args)),
         ("server DHCP range math", lambda: test_server_dhcp_range_math(args)),
         ("configure all read-only behavior", lambda: test_configure_all_read_only(args, hash_paths)),
