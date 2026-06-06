@@ -1,4 +1,4 @@
-"""Saved answer import/export/show helpers for aerolitctl."""
+"""Saved settings import/export/show helpers for aerolitctl."""
 
 from __future__ import print_function
 
@@ -47,8 +47,8 @@ def key_is_sensitive(key):
     return any(keyword in lowered for keyword in SENSITIVE_KEYWORDS)
 
 
-def redact_answers(data):
-    """Return a redacted deep copy of answers/config data."""
+def redact_settings(data):
+    """Return a redacted deep copy of settings/config data."""
     if isinstance(data, dict):
         redacted = {}
 
@@ -56,12 +56,12 @@ def redact_answers(data):
             if key_is_sensitive(key):
                 redacted[key] = "REDACTED"
             else:
-                redacted[key] = redact_answers(value)
+                redacted[key] = redact_settings(value)
 
         return redacted
 
     if isinstance(data, list):
-        return [redact_answers(item) for item in data]
+        return [redact_settings(item) for item in data]
 
     return data
 
@@ -77,39 +77,39 @@ def contains_redacted_marker(data):
     return data == "REDACTED"
 
 
-def load_answers_file(path):
-    """Load answers from a YAML file."""
+def load_settings_file(path):
+    """Load settings from a YAML file."""
     path = Path(path)
 
     if not path.exists():
-        raise FileNotFoundError("Answers file not found: {}".format(path))
+        raise FileNotFoundError("Settings file not found: {}".format(path))
 
     with path.open("r", encoding="utf-8") as handle:
         data = yaml_load(handle) or {}
 
     if not isinstance(data, dict):
-        raise ValueError("Answers file must be a YAML mapping: {}".format(path))
+        raise ValueError("Settings file must be a YAML mapping: {}".format(path))
 
     return data
 
 
 def validate_import_data(data, replace=True):
-    """Validate imported answer/config data."""
+    """Validate imported setting/config data."""
     errors = []
 
     if not data:
-        errors.append("Answers file is empty.")
+        errors.append("Settings file is empty.")
         return errors
 
     if not any(key in data for key in KNOWN_TOP_LEVEL_KEYS):
         errors.append(
-            "Answers file does not look like an AeroLIT answers/config file."
+            "Settings file does not look like an AeroLIT settings/config file."
         )
 
     if replace and "paths" not in data:
         errors.append(
             "Replacement imports must include a top-level 'paths' section. "
-            "Use --merge for partial answer files."
+            "Use --merge for partial setting files."
         )
 
     return errors
@@ -155,23 +155,23 @@ def load_current_config_or_empty():
         return {}
 
 
-def run_answers_show(args):
-    """Run aerolitctl answers show."""
+def run_settings_show(args):
+    """Run aerolitctl settings show."""
     config = load_config()
 
     if not args.no_redact:
-        config = redact_answers(config)
+        config = redact_settings(config)
 
     print(dump_yaml(config), end="")
     return 0
 
 
-def run_answers_export(args):
-    """Run aerolitctl answers export."""
+def run_settings_export(args):
+    """Run aerolitctl settings export."""
     config = load_config()
 
     if args.redact:
-        config = redact_answers(config)
+        config = redact_settings(config)
 
     text = dump_yaml(config)
 
@@ -194,28 +194,28 @@ def run_answers_export(args):
     output.write_text(text, encoding="utf-8")
 
     if args.redact:
-        print("Exported redacted AeroLIT answers:")
+        print("Exported redacted AeroLIT settings:")
     else:
-        print("Exported AeroLIT answers:")
+        print("Exported AeroLIT settings:")
 
     print("  {}".format(output))
     return 0
 
 
-def run_answers_import(args):
-    """Run aerolitctl answers import."""
-    imported = load_answers_file(args.file)
+def run_settings_import(args):
+    """Run aerolitctl settings import."""
+    imported = load_settings_file(args.file)
 
     validation_errors = validate_import_data(imported, replace=not args.merge)
 
     if contains_redacted_marker(imported):
         validation_errors.append(
-            "Answers file contains REDACTED placeholder values. "
+            "Settings file contains REDACTED placeholder values. "
             "Export without --redact before importing."
         )
 
     if validation_errors:
-        print("ERROR: Cannot import answers file:", file=sys.stderr)
+        print("ERROR: Cannot import settings file:", file=sys.stderr)
         for error in validation_errors:
             print("  - {}".format(error), file=sys.stderr)
         return 1
@@ -228,17 +228,17 @@ def run_answers_import(args):
         final_config = imported
 
     if current == final_config:
-        print("AeroLIT answers import")
+        print("AeroLIT settings import")
         print("")
-        print("No changes made. Imported answers match the current config.")
+        print("No changes made. Imported settings match the current config.")
         return 0
 
     if getattr(args, "no_redact_diff", False):
         diff_old = current
         diff_new = final_config
     else:
-        diff_old = redact_answers(current)
-        diff_new = redact_answers(final_config)
+        diff_old = redact_settings(current)
+        diff_new = redact_settings(final_config)
 
     diff = unified_config_diff(
         diff_old,
@@ -248,7 +248,7 @@ def run_answers_import(args):
     )
 
     if args.dry_run:
-        print("AeroLIT answers import dry run")
+        print("AeroLIT settings import dry run")
         print("")
         if diff:
             print(diff, end="")
@@ -277,7 +277,7 @@ def run_answers_import(args):
 
     save_config(final_config, path=CONFIG_FILE, backup=False)
 
-    print("Imported AeroLIT answers:")
+    print("Imported AeroLIT settings:")
     print("  {}".format(args.file))
     print("")
     print("Updated config:")
