@@ -866,6 +866,8 @@ def add_provision_parser(subparsers):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
+  aerolitctl provision list
+  aerolitctl provision check
   aerolitctl provision provision-workstation.yml
   aerolitctl provision provision-workstation.yml --limit host01
   aerolitctl provision provision-workstation.yml --limit host01 --check
@@ -895,6 +897,17 @@ Inventory:
 
   That default inventory is relative to:
     <bundle_path>/collections-hub/ansible
+
+Helper commands:
+  List available top-level playbooks:
+    aerolitctl provision list
+
+  Check provision readiness:
+    aerolitctl provision check
+
+  These names are reserved provision targets. To run a playbook literally named
+  list or check, pass it by path, for example:
+    aerolitctl provision ./list.yml
 
 ansible-core:
   aerolitctl provision uses ansible-playbook.
