@@ -16,6 +16,7 @@ from .ansible import run_configure_ansible
 from .pxe import run_configure_pxe
 from .repos import run_configure_repos
 from .configure_all import run_configure_all
+from .provision import run_provision
 
 
 def cmd_version(args):
@@ -124,6 +125,11 @@ def cmd_doctor(args):
 def cmd_status(args):
     """Show AeroLIT status."""
     return run_status(verbose=getattr(args, "verbose", False))
+
+
+def cmd_provision(args):
+    """Run ansible-playbook from the active AeroLIT bundle Ansible directory."""
+    return run_provision(args)
 
 
 def cmd_configure_server(args):
@@ -848,6 +854,114 @@ def add_configure_server_parser(configure_subparsers):
     return server_parser
 
 
+def add_provision_parser(subparsers):
+    """Add aerolitctl provision parser."""
+    provision_parser = subparsers.add_parser(
+        "provision",
+        help="Run ansible-playbook from the active AeroLIT bundle Ansible directory.",
+        description=(
+            "Run ansible-playbook from the active AeroLIT bundle Ansible directory, "
+            "no matter where the shell is currently located."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Examples:
+  aerolitctl provision provision-workstation.yml
+  aerolitctl provision provision-workstation.yml --limit host01
+  aerolitctl provision provision-workstation.yml --limit host01 --check
+  aerolitctl provision provision-workstation.yml -i inventory/site2.ini --limit host01
+  aerolitctl provision --verbose provision-workstation.yml --limit host01
+  aerolitctl --verbose provision provision-workstation.yml --limit host01
+
+Install ansible-core if ansible-playbook is missing:
+  sudo aerolitctl provision --install-ansible-core provision-workstation.yml
+
+Behavior:
+  Runs ansible-playbook as though the command started from:
+    <bundle_path>/collections-hub/ansible
+
+  The active bundle path comes from:
+    /etc/aerolit/aerolitctl.yml
+
+  Show the active bundle path:
+    aerolitctl path show
+
+  Change the active bundle path:
+    aerolitctl path set /path/to/aerolit-bundle
+
+Inventory:
+  If -i, --inventory, or --inventory-file is not provided, AeroLIT automatically adds:
+    -i inventory
+
+  That default inventory is relative to:
+    <bundle_path>/collections-hub/ansible
+
+ansible-core:
+  aerolitctl provision uses ansible-playbook.
+
+  If ansible-playbook is missing and this system already has working package repos:
+    sudo dnf install -y ansible-core
+
+  Or let AeroLIT try to install it before running the playbook:
+    sudo aerolitctl provision --install-ansible-core provision-workstation.yml
+
+  If this is an offline AeroLIT server, or you are not using the default bundle repos,
+  prepare the AeroLIT repo/prerequisite plan first:
+    sudo aerolitctl configure repos --ensure-server-prereqs
+
+  For custom repo locations:
+    sudo aerolitctl configure repos --guided --ensure-server-prereqs
+
+Important:
+  AeroLIT options must come before PLAYBOOK.
+
+  Correct:
+    aerolitctl provision --verbose provision-workstation.yml --limit host01
+
+  Correct:
+    sudo aerolitctl provision --install-ansible-core provision-workstation.yml
+
+  Incorrect:
+    sudo aerolitctl provision provision-workstation.yml --install-ansible-core
+
+  After PLAYBOOK, arguments are passed through to ansible-playbook.
+
+  Example:
+    aerolitctl provision provision-workstation.yml --limit host01 --check
+
+  Here, --limit and --check are passed to ansible-playbook.
+""",
+    )
+
+    provision_parser.add_argument(
+        "--install-ansible-core",
+        action="store_true",
+        help=(
+            "If ansible-playbook is missing, attempt to install ansible-core "
+            "using dnf before running the playbook. Requires root privileges "
+            "and working package repositories."
+        ),
+    )
+
+    provision_parser.add_argument(
+        "playbook",
+        metavar="PLAYBOOK",
+        help="Playbook to run from the active AeroLIT Ansible directory.",
+    )
+
+    provision_parser.add_argument(
+        "ansible_args",
+        nargs=argparse.REMAINDER,
+        metavar="ANSIBLE_PLAYBOOK_ARGS",
+        help="Additional arguments passed through to ansible-playbook.",
+    )
+
+    add_command_verbose(provision_parser)
+    provision_parser.set_defaults(func=cmd_provision)
+
+    return provision_parser
+
+
 def add_deploy_parser(subparsers):
     """Add aerolitctl deploy parser."""
     deploy_parser = subparsers.add_parser(
@@ -1308,6 +1422,7 @@ def build_parser():
     add_configure_pxe_parser(configure_subparsers)
     add_configure_server_parser(configure_subparsers)
     add_deploy_parser(subparsers)
+    add_provision_parser(subparsers)
 
     path_parser = subparsers.add_parser(
         "path",
