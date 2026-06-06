@@ -9,6 +9,7 @@ from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
 
+from .command_log import command_log_dir
 from .paths import LOG_DIR
 
 
@@ -181,7 +182,7 @@ def run_logs(args):
     if validation_rc:
         return validation_rc
 
-    log_dir = Path(args.log_dir) if args.log_dir else LOG_DIR
+    log_dir = Path(args.log_dir) if args.log_dir else command_log_dir()
 
     if args.dir:
         print(log_dir)
