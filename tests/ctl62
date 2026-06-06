@@ -20,6 +20,11 @@ from .provision import run_provision
 from .answers import run_answers_export, run_answers_import, run_answers_show
 from .backup import run_backup_config
 from .logs import run_logs
+from .command_log import (
+    get_last_command_log_error,
+    get_last_command_log_path,
+    run_with_command_log,
+)
 
 
 def cmd_version(args):
@@ -1045,7 +1050,10 @@ def add_logs_parser(subparsers):
     logs_parser.add_argument(
         "--log-dir",
         default=None,
-        help="Override the AeroLIT log directory. Defaults to /var/log/aerolit.",
+        help=(
+            "Override the AeroLIT log directory. Defaults to AEROLITCTL_LOG_DIR "
+            "when set, otherwise /var/log/aerolit."
+        ),
     )
     logs_parser.add_argument(
         "--pattern",
@@ -1727,14 +1735,55 @@ def main(argv=None):
         parser.print_help()
         return 2
 
+    command_argv = list(argv if argv is not None else sys.argv[1:])
+
     try:
-        return args.func(args)
+        result = run_with_command_log(
+            args,
+            lambda: args.func(args),
+            argv=command_argv,
+        )
+
+        if getattr(args, "verbose", False):
+            log_path = get_last_command_log_path()
+            log_error = get_last_command_log_error()
+
+            if log_path:
+                print("")
+                print("Command log:")
+                print("  {}".format(log_path))
+            elif log_error:
+                print("")
+                print("Command log:")
+                print("  not written: {}".format(log_error))
+
+        return result
+
     except KeyboardInterrupt:
         print("")
         print("Cancelled.", file=sys.stderr)
+
+        log_path = get_last_command_log_path()
+        log_error = get_last_command_log_error()
+
+        if log_path:
+            print("Command log: {}".format(log_path), file=sys.stderr)
+        elif log_error:
+            print("Command log not written: {}".format(log_error), file=sys.stderr)
+
         return 130
+
     except Exception as exc:
         print("ERROR: {}".format(exc), file=sys.stderr)
+
+        log_path = get_last_command_log_path()
+        log_error = get_last_command_log_error()
+
+        if log_path:
+            print("Command log: {}".format(log_path), file=sys.stderr)
+        elif log_error:
+            print("Command log not written: {}".format(log_error), file=sys.stderr)
+
         return 1
 
 
