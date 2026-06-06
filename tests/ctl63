@@ -43,11 +43,13 @@ import argparse
 import datetime
 import difflib
 import hashlib
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 
@@ -913,6 +915,15 @@ def test_cli_help_and_parser(args):
         ["aerolitctl", "provision", "--help"],
         ["aerolitctl", "path", "--help"],
         ["aerolitctl", "bundle", "--help"],
+        ["aerolitctl", "logs", "--help"],
+        ["aerolitctl", "logs", "--dir"],
+        ["aerolitctl", "backup", "--help"],
+        ["aerolitctl", "backup", "config", "--help"],
+        ["aerolitctl", "backup", "config", "--dry-run"],
+        ["aerolitctl", "answers", "--help"],
+        ["aerolitctl", "answers", "show", "--help"],
+        ["aerolitctl", "answers", "export", "--help"],
+        ["aerolitctl", "answers", "import", "--help"],
         ["aerolitctl", "--verbose", "status"],
         ["aerolitctl", "status", "--verbose"],
         ["aerolitctl", "deploy", "server", "--dry-run", "--verbose"],
@@ -1022,8 +1033,371 @@ def test_cli_help_and_parser(args):
     assert_contains(provision_help, "Helper commands:", "provision help")
     assert_contains(provision_help, "reserved provision targets", "provision help")
 
+    logs_help = run_cmd(["aerolitctl", "logs", "--help"])
+    assert_contains(logs_help, "--list", "logs help")
+    assert_contains(logs_help, "--limit", "logs help")
+    assert_contains(logs_help, "--tail", "logs help")
+    assert_contains(logs_help, "--follow", "logs help")
+    assert_contains(logs_help, "--dir", "logs help")
+    assert_contains(logs_help, "--path", "logs help")
+    assert_contains(logs_help, "--log-dir", "logs help")
+    assert_contains(logs_help, "--pattern", "logs help")
+
+    backup_help = run_cmd(["aerolitctl", "backup", "config", "--help"])
+    assert_contains(backup_help, "--output-dir", "backup config help")
+    assert_contains(backup_help, "--dry-run", "backup config help")
+    assert_contains(backup_help, "--list-files", "backup config help")
+    assert_contains(backup_help, "--include-rendered", "backup config help")
+    assert_contains(backup_help, "--no-state", "backup config help")
+    assert_contains(backup_help, "--no-bundle-generated", "backup config help")
+
+    answers_show_help = run_cmd(["aerolitctl", "answers", "show", "--help"])
+    assert_contains(answers_show_help, "--no-redact", "answers show help")
+
+    answers_export_help = run_cmd(["aerolitctl", "answers", "export", "--help"])
+    assert_contains(answers_export_help, "--output", "answers export help")
+    assert_contains(answers_export_help, "--force", "answers export help")
+    assert_contains(answers_export_help, "--redact", "answers export help")
+
+    answers_import_help = run_cmd(["aerolitctl", "answers", "import", "--help"])
+    assert_contains(answers_import_help, "--dry-run", "answers import help")
+    assert_contains(answers_import_help, "--merge", "answers import help")
+    assert_contains(answers_import_help, "--no-backup", "answers import help")
+    assert_contains(answers_import_help, "--no-redact-diff", "answers import help")
+
     for command in commands:
         run_cmd(command)
+
+
+def test_logs_command_behavior(args):
+    """Validate aerolitctl logs behavior using a temporary log directory."""
+    log_root = Path(args.log_dir) / "sample-aerolit-logs"
+    empty_log_root = Path(args.log_dir) / "empty-aerolit-logs"
+
+    log_root.mkdir(parents=True, exist_ok=True)
+    empty_log_root.mkdir(parents=True, exist_ok=True)
+
+    old_log = log_root / "old-command.log"
+    latest_log = log_root / "latest-command.log"
+    nested_dir = log_root / "nested"
+    nested_dir.mkdir(parents=True, exist_ok=True)
+    nested_log = nested_dir / "nested-command.out"
+
+    write_text(old_log, "old line 1\nold line 2\n")
+    write_text(latest_log, "latest line 1\nlatest line 2\nlatest line 3\n")
+    write_text(nested_log, "nested line 1\n")
+
+    old_time = datetime.datetime.now().timestamp() - 300
+    nested_time = datetime.datetime.now().timestamp() - 200
+    latest_time = datetime.datetime.now().timestamp() - 100
+
+    os.utime(str(old_log), (old_time, old_time))
+    os.utime(str(nested_log), (nested_time, nested_time))
+    os.utime(str(latest_log), (latest_time, latest_time))
+
+    dir_output = run_cmd(
+        ["aerolitctl", "logs", "--dir", "--log-dir", str(log_root)]
+    )
+    assert_contains(dir_output, str(log_root), "logs --dir")
+
+    list_output = run_cmd(
+        ["aerolitctl", "logs", "--list", "--log-dir", str(log_root)]
+    )
+    assert_contains(list_output, "AeroLIT logs", "logs --list")
+    assert_contains(list_output, str(latest_log), "logs --list")
+    assert_contains(list_output, str(old_log), "logs --list")
+    assert_contains(list_output, str(nested_log), "logs --list")
+
+    pattern_output = run_cmd(
+        [
+            "aerolitctl",
+            "logs",
+            "--list",
+            "--limit",
+            "1",
+            "--pattern",
+            "*.log",
+            "--log-dir",
+            str(log_root),
+        ]
+    )
+    assert_contains(pattern_output, "AeroLIT logs", "logs --pattern")
+    assert_contains(pattern_output, str(latest_log), "logs --pattern")
+    assert_not_contains(pattern_output, str(nested_log), "logs --pattern")
+
+    tail_output = run_cmd(
+        ["aerolitctl", "logs", "--tail", "2", "--log-dir", str(log_root)]
+    )
+    assert_contains(tail_output, "AeroLIT log:", "logs tail")
+    assert_contains(tail_output, str(latest_log), "logs tail")
+    assert_contains(tail_output, "latest line 2", "logs tail")
+    assert_contains(tail_output, "latest line 3", "logs tail")
+    assert_not_contains(tail_output, "latest line 1", "logs tail")
+
+    relative_path_output = run_cmd(
+        [
+            "aerolitctl",
+            "logs",
+            "--path",
+            "nested/nested-command.out",
+            "--tail",
+            "1",
+            "--log-dir",
+            str(log_root),
+        ]
+    )
+    assert_contains(relative_path_output, str(nested_log), "logs relative path")
+    assert_contains(relative_path_output, "nested line 1", "logs relative path")
+
+    missing_output = run_cmd(
+        ["aerolitctl", "logs", "--log-dir", str(empty_log_root)],
+        expected_rc=1,
+    )
+    assert_contains(missing_output, "No AeroLIT log files found in:", "logs empty")
+    assert_contains(missing_output, "aerolitctl logs --list", "logs empty")
+    assert_contains(missing_output, "aerolitctl logs --dir", "logs empty")
+
+    bad_tail_output = run_cmd(
+        ["aerolitctl", "logs", "--tail", "-1", "--log-dir", str(log_root)],
+        expected_rc=1,
+    )
+    assert_contains(bad_tail_output, "--tail must be zero or greater", "logs bad tail")
+
+
+def test_backup_config_command_behavior(args, hash_paths):
+    """Validate aerolitctl backup config dry-run and archive behavior."""
+    backup_output_dir = Path(args.log_dir) / "config-backup-output"
+    backup_output_dir.mkdir(parents=True, exist_ok=True)
+
+    for old_archive in backup_output_dir.glob("aerolit-config-*.tar.gz"):
+        try:
+            old_archive.unlink()
+        except OSError:
+            pass
+
+    before = sha256_paths(hash_paths)
+
+    dry_run_output = run_cmd(
+        [
+            "aerolitctl",
+            "backup",
+            "config",
+            "--dry-run",
+            "--list-files",
+            "--output-dir",
+            str(backup_output_dir),
+        ]
+    )
+    assert_contains(dry_run_output, "AeroLIT config backup dry run", "backup dry-run")
+    assert_contains(dry_run_output, "Archive that would be created:", "backup dry-run")
+    assert_contains(dry_run_output, "Included files:", "backup dry-run")
+    assert_contains(dry_run_output, "Missing paths:", "backup dry-run")
+    assert_contains(dry_run_output, "Skipped paths:", "backup dry-run")
+    assert_contains(dry_run_output, str(args.config_file), "backup dry-run")
+
+    dry_run_archives = list(backup_output_dir.glob("aerolit-config-*.tar.gz"))
+    if dry_run_archives:
+        raise TestFailure(
+            "backup config --dry-run unexpectedly created archive(s): {}".format(
+                ", ".join(str(path) for path in dry_run_archives)
+            )
+        )
+
+    real_output = run_cmd(
+        [
+            "aerolitctl",
+            "backup",
+            "config",
+            "--list-files",
+            "--output-dir",
+            str(backup_output_dir),
+        ]
+    )
+    assert_contains(real_output, "AeroLIT config backup created", "backup real")
+    assert_contains(real_output, "Archive:", "backup real")
+    assert_contains(real_output, "Included files:", "backup real")
+    assert_contains(real_output, str(args.config_file), "backup real")
+
+    archives = sorted(backup_output_dir.glob("aerolit-config-*.tar.gz"))
+    if len(archives) != 1:
+        raise TestFailure(
+            "Expected exactly one backup archive, found {}: {}".format(
+                len(archives),
+                ", ".join(str(path) for path in archives),
+            )
+        )
+
+    archive = archives[0]
+    assert_path_exists(archive, "backup archive")
+
+    with tarfile.open(str(archive), "r:gz") as tar:
+        names = tar.getnames()
+
+        if "aerolit-backup-manifest.json" not in names:
+            raise TestFailure("Backup archive missing aerolit-backup-manifest.json")
+
+        if "etc/aerolit/aerolitctl.yml" not in names:
+            raise TestFailure("Backup archive missing etc/aerolit/aerolitctl.yml")
+
+        manifest_file = tar.extractfile("aerolit-backup-manifest.json")
+        if manifest_file is None:
+            raise TestFailure("Could not read aerolit-backup-manifest.json")
+
+        manifest = json.loads(manifest_file.read().decode("utf-8"))
+
+    if manifest.get("kind") != "AeroLITConfigBackup":
+        raise TestFailure(
+            "Unexpected backup manifest kind: {}".format(manifest.get("kind"))
+        )
+
+    for key in ("created_utc", "archive", "files", "missing", "skipped", "warnings"):
+        if key not in manifest:
+            raise TestFailure("Backup manifest missing key: {}".format(key))
+
+    if not manifest.get("files"):
+        raise TestFailure("Backup manifest did not record included files")
+
+    after = sha256_paths(hash_paths)
+    assert_hashes_same(before, after, "backup-config-command-behavior")
+
+
+def test_answers_command_behavior(args, hash_paths):
+    """Validate aerolitctl answers show/export/import safety behavior."""
+    before = sha256_paths(hash_paths)
+
+    export_path = Path(args.log_dir) / "answers-export.yml"
+    redacted_export_path = Path(args.log_dir) / "answers-redacted.yml"
+    partial_import_path = Path(args.log_dir) / "answers-partial.yml"
+    redacted_import_path = Path(args.log_dir) / "answers-redacted-import.yml"
+
+    show_output = run_cmd(["aerolitctl", "answers", "show"])
+    assert_contains(show_output, "paths:", "answers show")
+    assert_contains(show_output, "version:", "answers show")
+
+    export_output = run_cmd(
+        [
+            "aerolitctl",
+            "answers",
+            "export",
+            "--output",
+            str(export_path),
+        ]
+    )
+    assert_contains(export_output, "Exported AeroLIT answers:", "answers export")
+    assert_contains(export_output, str(export_path), "answers export")
+    assert_path_exists(export_path, "answers export file")
+
+    exported_text = read_text(export_path)
+    assert_contains(exported_text, "paths:", "answers export file")
+    assert_contains(exported_text, "version:", "answers export file")
+
+    duplicate_output = run_cmd(
+        [
+            "aerolitctl",
+            "answers",
+            "export",
+            "--output",
+            str(export_path),
+        ],
+        expected_rc=1,
+    )
+    assert_contains(
+        duplicate_output,
+        "Output file already exists. Use --force to overwrite",
+        "answers export overwrite guard",
+    )
+
+    import_same_output = run_cmd(
+        ["aerolitctl", "answers", "import", str(export_path), "--dry-run"]
+    )
+    assert_contains(import_same_output, "AeroLIT answers import", "answers import same")
+    assert_contains(
+        import_same_output,
+        "No changes made. Imported answers match the current config.",
+        "answers import same",
+    )
+
+    write_text(
+        partial_import_path,
+        "server:\n"
+        "  pxe_http:\n"
+        "    port: 18081\n",
+    )
+
+    replace_partial_output = run_cmd(
+        ["aerolitctl", "answers", "import", str(partial_import_path), "--dry-run"],
+        expected_rc=1,
+    )
+    assert_contains(
+        replace_partial_output,
+        "Replacement imports must include a top-level 'paths' section.",
+        "answers partial replace guard",
+    )
+    assert_contains(
+        replace_partial_output,
+        "Use --merge for partial answer files.",
+        "answers partial replace guard",
+    )
+
+    merge_partial_output = run_cmd(
+        [
+            "aerolitctl",
+            "answers",
+            "import",
+            str(partial_import_path),
+            "--merge",
+            "--dry-run",
+            "--no-redact-diff",
+        ]
+    )
+    assert_contains(
+        merge_partial_output,
+        "AeroLIT answers import dry run",
+        "answers partial merge dry-run",
+    )
+    assert_contains(merge_partial_output, "18081", "answers partial merge dry-run")
+
+    redacted_output = run_cmd(
+        [
+            "aerolitctl",
+            "answers",
+            "export",
+            "--redact",
+            "--output",
+            str(redacted_export_path),
+        ]
+    )
+    assert_contains(
+        redacted_output,
+        "Exported redacted AeroLIT answers:",
+        "answers redacted export",
+    )
+    assert_path_exists(redacted_export_path, "redacted answers export file")
+
+    write_text(
+        redacted_import_path,
+        "version: 1\n"
+        "paths:\n"
+        "  bundle: REDACTED\n",
+    )
+
+    redacted_import_output = run_cmd(
+        ["aerolitctl", "answers", "import", str(redacted_import_path), "--dry-run"],
+        expected_rc=1,
+    )
+    assert_contains(
+        redacted_import_output,
+        "Answers file contains REDACTED placeholder values.",
+        "answers redacted import guard",
+    )
+    assert_contains(
+        redacted_import_output,
+        "Export without --redact before importing.",
+        "answers redacted import guard",
+    )
+
+    after = sha256_paths(hash_paths)
+    assert_hashes_same(before, after, "answers-command-behavior")
 
 
 def test_standardized_source_wording(args):
@@ -2873,6 +3247,9 @@ def main():
         ("environment preflight", lambda: test_environment_preflight(args)),
         ("basic repo/code sanity", lambda: test_basic_repo_sanity(args)),
         ("CLI help and parser", lambda: test_cli_help_and_parser(args)),
+        ("logs command behavior", lambda: test_logs_command_behavior(args)),
+        ("backup config command behavior", lambda: test_backup_config_command_behavior(args, hash_paths)),
+        ("answers command behavior", lambda: test_answers_command_behavior(args, hash_paths)),
         ("standardized source wording", lambda: test_standardized_source_wording(args)),
         ("server DHCP range math", lambda: test_server_dhcp_range_math(args)),
         ("configure all read-only behavior", lambda: test_configure_all_read_only(args, hash_paths)),
