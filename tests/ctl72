@@ -1,0 +1,566 @@
+"""AeroLIT configure all orchestration helper.
+
+This command coordinates existing configure commands. It does not apply system
+state directly. Real system changes still belong to deploy commands and Ansible
+roles.
+"""
+
+from __future__ import print_function
+
+import sys
+from argparse import Namespace
+
+from .ansible import run_configure_ansible
+from .initialize import run_configure_init
+from .pxe import run_configure_pxe
+from .repos import DEFAULT_PATH_FOR_ANSIBLE, run_configure_repos
+from .server import run_configure_server
+
+
+SECTION_ORDER = [
+    ("init", "Initialization"),
+    ("server", "Server / PXE / Ansible Controller / NFS intent"),
+    ("repos", "Repository discovery and generated repo vars"),
+    ("ansible", "Ansible inventory and generated vars"),
+    ("pxe", "PXE profile and generator inputs"),
+]
+
+
+def bool_arg(args, name, default=False):
+    """Return a boolean argument value."""
+    return bool(getattr(args, name, default))
+
+
+def print_section(title):
+    """Print a consistent configure all section heading."""
+    print("")
+    print("#" * 80)
+    print("# {}".format(title))
+    print("#" * 80)
+
+
+def stdin_is_interactive():
+    """Return True when prompts can be shown."""
+    try:
+        return sys.stdin.isatty()
+    except AttributeError:
+        return False
+
+
+def prompt_yes_no(question, default=True):
+    """Prompt for yes/no input."""
+    default_text = "Y" if default else "N"
+    choices = "Y/n" if default else "y/N"
+
+    while True:
+        value = input(
+            "{} [{}; Enter={}]: ".format(question, choices, default_text)
+        ).strip().lower()
+
+        if not value:
+            return default
+
+        if value in ("y", "yes"):
+            return True
+
+        if value in ("n", "no"):
+            return False
+
+        print("Please answer yes or no.")
+
+
+def section_is_skipped(args, section):
+    """Return True when a configure all section is skipped by CLI option."""
+    return bool_arg(args, "skip_{}".format(section), False)
+
+
+def selected_sections(args):
+    """Return enabled configure all sections in execution order."""
+    return [
+        (section, label)
+        for section, label in SECTION_ORDER
+        if not section_is_skipped(args, section)
+    ]
+
+
+def print_configure_all_plan(args, guided):
+    """Show what configure all would coordinate."""
+    print("")
+    print("AeroLIT configure all plan")
+    print("")
+    print("{:<28} {}".format("Guided:", "yes" if guided else "no"))
+    print("{:<28} {}".format("Dry run:", bool_arg(args, "dry_run")))
+    print("{:<28} {}".format("Validate only:", bool_arg(args, "validate")))
+    print("{:<28} {}".format("Non-interactive:", bool_arg(args, "non_interactive")))
+    print(
+        "{:<28} {}".format(
+            "Bundle override:",
+            getattr(args, "bundle", None) or "configured default",
+        )
+    )
+    print(
+        "{:<28} {}".format(
+            "Server mode:",
+            getattr(args, "mode", None) or "existing/default",
+        )
+    )
+    print("")
+
+    print("Sections:")
+    for section, label in SECTION_ORDER:
+        if section_is_skipped(args, section):
+            print("  - {}: skipped".format(label))
+        else:
+            print("  - {}: enabled".format(label))
+
+    print("")
+    print("Configure all is an orchestration command. It coordinates existing")
+    print("configure commands and does not directly run deploy actions, start")
+    print("services, configure interfaces, open firewall ports, export NFS paths,")
+    print("or run Ansible playbooks.")
+    print("")
+    print("Show complete. No files were changed.")
+
+
+def validate_mode_combination(args):
+    """Return an error string for conflicting configure all modes, else None."""
+    show_only = bool_arg(args, "show")
+    dry_run = bool_arg(args, "dry_run")
+    validate_only = bool_arg(args, "validate")
+    guided = bool_arg(args, "guided")
+    non_interactive = bool_arg(args, "non_interactive")
+
+    if show_only and dry_run:
+        return "Use either --show or --dry-run, not both."
+
+    if show_only and validate_only:
+        return "Use either --show or --validate, not both."
+
+    if dry_run and validate_only:
+        return "Use either --dry-run or --validate, not both."
+
+    if guided and non_interactive:
+        return "Use either --guided or --non-interactive, not both."
+
+    return None
+
+
+def run_step(label, callback):
+    """Run one configure all step and return its integer return code."""
+    print_section(label)
+
+    try:
+        rc = callback()
+    except Exception as exc:
+        print("ERROR: {}".format(exc))
+        rc = 1
+
+    if rc is None:
+        rc = 0
+
+    try:
+        rc = int(rc)
+    except (TypeError, ValueError):
+        rc = 1
+
+    if rc != 0:
+        print("")
+        print("{} failed with return code {}.".format(label, rc))
+
+    return rc
+
+
+def configure_init_step(args, guided, dry_run, validate_only):
+    """Run configure init step."""
+    if validate_only:
+        print("Initialization has no standalone validate mode. Skipping init validation.")
+        return 0
+
+    init_non_interactive = bool_arg(args, "non_interactive") or dry_run
+
+    return run_configure_init(
+        bundle_path=getattr(args, "bundle", None),
+        force=bool_arg(args, "force"),
+        dry_run=dry_run,
+        non_interactive=init_non_interactive and not guided,
+        verbose=bool_arg(args, "verbose"),
+        no_backup=bool_arg(args, "no_backup"),
+        skip_preserve_file=False,
+        skip_ci_file=False,
+        skip_ansible_files=False,
+    )
+
+
+def configure_server_step(args, guided, dry_run, validate_only):
+    """Run configure server step."""
+    if validate_only:
+        return run_configure_server(
+            guided=False,
+            dry_run=True,
+            show=True,
+            mode=getattr(args, "mode", None),
+            interface=None,
+            server_ip=None,
+            network=None,
+            prefix=None,
+            gateway=None,
+            dns_servers=None,
+            dhcp_start=None,
+            dhcp_end=None,
+            pxe_http_port=None,
+            pxe_http_bind_address=None,
+            configure_interface=None,
+            nfs_enabled=None,
+            nfs_export_path=None,
+            nfs_allowed_clients=None,
+            nfs_allow_all_clients=None,
+            nfs_create_export_path=None,
+            nfs_exports_file=None,
+            target_mount_path=None,
+            mount_mode=None,
+            mount_owner=None,
+            mount_group=None,
+            firewall_manage=None,
+            verbose=bool_arg(args, "verbose"),
+        )
+
+    return run_configure_server(
+        guided=guided,
+        dry_run=dry_run,
+        show=False,
+        mode=getattr(args, "mode", None),
+        interface=None,
+        server_ip=None,
+        network=None,
+        prefix=None,
+        gateway=None,
+        dns_servers=None,
+        dhcp_start=None,
+        dhcp_end=None,
+        pxe_http_port=None,
+        pxe_http_bind_address=None,
+        configure_interface=None,
+        nfs_enabled=None,
+        nfs_export_path=None,
+        nfs_allowed_clients=None,
+        nfs_allow_all_clients=None,
+        nfs_create_export_path=None,
+        nfs_exports_file=None,
+        target_mount_path=None,
+        mount_mode=None,
+        mount_owner=None,
+        mount_group=None,
+        firewall_manage=None,
+        verbose=bool_arg(args, "verbose"),
+    )
+
+
+def configure_repos_args(args, guided, dry_run, validate_only):
+    """Build args for configure repos."""
+    return Namespace(
+        bundle_path=getattr(args, "bundle", None),
+        path_for_ansible=(
+            getattr(args, "path_for_ansible", None) or DEFAULT_PATH_FOR_ANSIBLE
+        ),
+        guided=guided,
+        show=False,
+        validate=validate_only,
+        refresh=(not guided and not validate_only),
+        dry_run=dry_run,
+        write_server_bootstrap=(
+            bool_arg(args, "write_server_bootstrap") and not validate_only
+        ),
+        server_bootstrap_repo_file=None,
+        ensure_server_prereqs=False,
+        server_prereq_package=[],
+        server_bootstrap_only=False,
+        force=bool_arg(args, "force"),
+        no_backup=bool_arg(args, "no_backup"),
+        server_baseos_source=None,
+        server_appstream_source=None,
+        provision_repo=[],
+        provision_extra_repo=[],
+        no_auto_discovery=False,
+        verbose=bool_arg(args, "verbose"),
+    )
+
+
+def configure_repos_step(args, guided, dry_run, validate_only):
+    """Run configure repos step."""
+    return run_configure_repos(
+        configure_repos_args(
+            args,
+            guided=guided,
+            dry_run=dry_run,
+            validate_only=validate_only,
+        )
+    )
+
+
+def configure_ansible_args(args, guided, dry_run, validate_only):
+    """Build args for configure ansible."""
+    write_defaults = bool(not guided and not validate_only)
+
+    return Namespace(
+        bundle_path=getattr(args, "bundle", None),
+        guided=guided,
+        show=False,
+        validate=validate_only,
+        dry_run=dry_run,
+        ansible_inventory_check=False,
+        force=bool_arg(args, "force"),
+        no_backup=bool_arg(args, "no_backup"),
+        ensure_standard_groups=write_defaults,
+        local_controller=False,
+        add_group=[],
+        remove_group=[],
+        add_child_group=[],
+        remove_child_group=[],
+        add_host=[],
+        add_host_to_group=[],
+        remove_host=[],
+        remove_host_from_group=[],
+        group=[],
+        ansible_host=None,
+        ansible_user=None,
+        ansible_port=None,
+        ssh_key=None,
+        connection=None,
+        python_interpreter=None,
+        become=None,
+        host_var=[],
+        set_host_var=[],
+        remove_host_var=[],
+        set_global_var=[],
+        remove_global_var=[],
+        set_group_var=[],
+        remove_group_var=[],
+        allow_sensitive_vars=False,
+        add_host_range=None,
+        range_start=None,
+        range_end=None,
+        host_number_width=3,
+        ip_start=None,
+        add_k3s_cluster=[],
+        add_k3s_server=[],
+        add_k3s_agent=[],
+        add_kubernetes_cluster=[],
+        add_kubernetes_server=[],
+        add_kubernetes_agent=[],
+        verbose=bool_arg(args, "verbose"),
+    )
+
+
+def configure_ansible_step(args, guided, dry_run, validate_only):
+    """Run configure ansible step."""
+    return run_configure_ansible(
+        configure_ansible_args(
+            args,
+            guided=guided,
+            dry_run=dry_run,
+            validate_only=validate_only,
+        )
+    )
+
+
+def configure_pxe_args(args, guided, dry_run, validate_only):
+    """Build args for configure pxe."""
+    write_defaults = bool(not guided and not validate_only)
+
+    return Namespace(
+        bundle_path=getattr(args, "bundle", None),
+        guided=guided,
+        show=False,
+        validate=validate_only,
+        dry_run=dry_run,
+        force=bool_arg(args, "force"),
+        no_backup=bool_arg(args, "no_backup"),
+        enable_profile=[],
+        disable_profile=[],
+        remove_profile=[],
+        implement_profile=[],
+        placeholder_profile=[],
+        set_profile_title=[],
+        set_profile_label=[],
+        set_profile_menu_target=[],
+        set_profile_template=[],
+        set_profile_os=[],
+        set_profile_kernel_args=[],
+        profile_uefi=[],
+        no_profile_uefi=[],
+        profile_bios=[],
+        no_profile_bios=[],
+        watch_interval=None,
+        generated_ks_edit_policy=None,
+        validation_failure_policy=None,
+        pxe_content_iso_root=None,
+        reset_standard_profiles=write_defaults,
+        verbose=bool_arg(args, "verbose"),
+    )
+
+
+def configure_pxe_step(args, guided, dry_run, validate_only):
+    """Run configure pxe step."""
+    return run_configure_pxe(
+        configure_pxe_args(
+            args,
+            guided=guided,
+            dry_run=dry_run,
+            validate_only=validate_only,
+        )
+    )
+
+
+def run_configure_all(args):
+    """Run aerolitctl configure all."""
+    mode_error = validate_mode_combination(args)
+    if mode_error:
+        print("ERROR: {}".format(mode_error))
+        return 1
+
+    dry_run = bool_arg(args, "dry_run")
+    show_only = bool_arg(args, "show")
+    validate_only = bool_arg(args, "validate")
+    non_interactive = bool_arg(args, "non_interactive")
+
+    guided = bool_arg(args, "guided")
+    if (
+        not guided
+        and not non_interactive
+        and not dry_run
+        and not show_only
+        and not validate_only
+    ):
+        guided = True
+
+    if show_only:
+        print_configure_all_plan(args, guided=guided)
+        return 0
+
+    selected = selected_sections(args)
+    if not selected:
+        print("")
+        print("No configure sections selected. No files were changed.")
+        return 0
+
+    if guided and not stdin_is_interactive():
+        print(
+            "ERROR: configure all --guided requires an interactive terminal. "
+            "Use --show, --validate, --dry-run, or --non-interactive for automation."
+        )
+        return 1
+
+    if (
+        non_interactive
+        and not dry_run
+        and not validate_only
+        and not section_is_skipped(args, "server")
+    ):
+        print("")
+        print("ERROR: configure all --non-interactive cannot safely configure the server section yet.")
+        print("")
+        print("The server section needs site-specific network, DHCP, NFS, and firewall choices.")
+        print("Use one of these instead:")
+        print("  aerolitctl configure all --guided")
+        print("  aerolitctl configure all --non-interactive --skip-server")
+        print("  aerolitctl configure server --guided")
+        return 1
+
+    print("")
+    print("AeroLIT configure all")
+    print("")
+    print("This command coordinates existing configure commands.")
+    print("It writes configuration intent and generated inputs only.")
+    print("It does not run deploy actions, start services, configure interfaces,")
+    print("open firewall ports, export NFS paths, or run Ansible playbooks.")
+    print("")
+
+    completed = []
+    skipped = []
+    failures = []
+
+    callbacks = {
+        "init": lambda: configure_init_step(
+            args,
+            guided=guided,
+            dry_run=dry_run,
+            validate_only=validate_only,
+        ),
+        "server": lambda: configure_server_step(
+            args,
+            guided=guided,
+            dry_run=dry_run,
+            validate_only=validate_only,
+        ),
+        "repos": lambda: configure_repos_step(
+            args,
+            guided=guided,
+            dry_run=dry_run,
+            validate_only=validate_only,
+        ),
+        "ansible": lambda: configure_ansible_step(
+            args,
+            guided=guided,
+            dry_run=dry_run,
+            validate_only=validate_only,
+        ),
+        "pxe": lambda: configure_pxe_step(
+            args,
+            guided=guided,
+            dry_run=dry_run,
+            validate_only=validate_only,
+        ),
+    }
+
+    for section, label in selected:
+        if guided:
+            print("")
+            if not prompt_yes_no("Run {}?".format(label), default=True):
+                print("Skipped: {}".format(label))
+                skipped.append(label)
+                continue
+
+        rc = run_step(label, callbacks[section])
+
+        if rc != 0:
+            failures.append((label, rc))
+            if not bool_arg(args, "continue_on_error"):
+                break
+            continue
+
+        completed.append(label)
+
+    print("")
+    print("AeroLIT configure all summary")
+    print("")
+
+    if completed:
+        print("Completed:")
+        for label in completed:
+            print("  - {}".format(label))
+        print("")
+
+    if skipped:
+        print("Skipped:")
+        for label in skipped:
+            print("  - {}".format(label))
+        print("")
+
+    if failures:
+        print("Failures:")
+        for label, rc in failures:
+            print("  - {} returned {}".format(label, rc))
+        return 1
+
+    if not completed and skipped:
+        print("No configure sections were run. No files were changed.")
+        return 0
+
+    print("All selected configure sections completed successfully.")
+
+    if dry_run:
+        print("Dry run complete. No files were changed by configure all.")
+    elif validate_only:
+        print("Validation complete. No files were changed by configure all.")
+
+    return 0
