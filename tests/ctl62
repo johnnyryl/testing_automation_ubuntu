@@ -25,6 +25,7 @@ from .command_log import (
     get_last_command_log_path,
     run_with_command_log,
 )
+from .sync import run_sync
 
 
 def cmd_version(args):
@@ -113,6 +114,11 @@ def cmd_path_set(args):
         print("  aerolitctl configure init --bundle {}".format(new_path))
 
     return 0
+
+
+def cmd_sync(args):
+    """Run aerolitctl sync."""
+    return run_sync(args)
 
 
 def cmd_bundle_show(args):
@@ -887,6 +893,170 @@ def add_configure_server_parser(configure_subparsers):
     return server_parser
 
 
+def add_sync_parser(subparsers):
+    """Add aerolitctl sync parser."""
+    sync_parser = subparsers.add_parser(
+        "sync",
+        help="Safely sync bundle updates into the active AeroLIT bundle.",
+    )
+
+    sync_parser.add_argument(
+        "sync_args",
+        nargs="*",
+        help=(
+            "Sync source or sync subcommand. Examples: "
+            "aerolitctl sync status, aerolitctl sync diff SOURCE, aerolitctl sync SOURCE."
+        ),
+    )
+    sync_parser.add_argument(
+        "--bundle-path",
+        default=None,
+        help="Target AeroLIT bundle path. Defaults to configured bundle path.",
+    )
+    sync_parser.add_argument(
+        "--section",
+        choices=(
+            "all",
+            "collections-hub",
+            "files",
+            "repos",
+            "extracted_isos",
+            "extracted-isos",
+        ),
+        default="all",
+        help="Only sync one bundle section.",
+    )
+    sync_parser.add_argument(
+        "--files-mode",
+        choices=("additive", "mirror"),
+        default=None,
+        help=(
+            "Files sync mode. additive adds/updates approved files and keeps "
+            "local files missing from the incoming source. mirror can remove "
+            "old tracked files missing from the incoming source."
+        ),
+    )
+    sync_parser.add_argument(
+        "--repo-mode",
+        choices=("additive", "mirror"),
+        default=None,
+        help=(
+            "Repo sync mode. additive adds/updates incoming repo content and keeps "
+            "older local packages. mirror can remove old tracked repo files, but "
+            "only within repo trees present in the incoming source."
+        ),
+    )
+    sync_parser.add_argument(
+        "--rhel-major",
+        choices=("7", "8", "9", "10", "11"),
+        default=None,
+        help=(
+            "Limit extracted_isos or repos sync to one RHEL major version, "
+            "for example --rhel-major 9."
+        ),
+    )
+    sync_parser.add_argument(
+        "--keep-old-isos",
+        action="store_true",
+        help=(
+            "For extracted_isos sync, move the existing RHEL major tree to "
+            "extracted_isos/archive instead of deleting it before replacement."
+        ),
+    )
+    sync_parser.add_argument(
+        "--to",
+        dest="rollback_to",
+        default=None,
+        help=(
+            "Rollback target timestamp or report path for "
+            "'aerolitctl sync rollback --to VALUE'."
+        ),
+    )
+    sync_parser.add_argument(
+        "--keep",
+        type=int,
+        default=None,
+        help=(
+            "For 'aerolitctl sync cleanup', keep at least this many newest "
+            "backup/report items. Defaults to sync.backup_retention_count."
+        ),
+    )
+    sync_parser.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help=(
+            "For 'aerolitctl sync cleanup', remove backup/report items older "
+            "than this many days. Defaults to sync.backup_retention_days."
+        ),
+    )
+    sync_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the sync plan without changing files.",
+    )
+    sync_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Apply the sync plan without asking for confirmation.",
+    )
+    sync_parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Replace differing files unless they are protected by preserve rules. "
+            "Use after reviewing --dry-run output."
+        ),
+    )
+    sync_parser.add_argument(
+        "--show-files",
+        action="store_true",
+        help="Show file-level add/update/remove/preserve details.",
+    )
+    sync_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not back up overwritten or removed collections-hub files.",
+    )
+    sync_parser.add_argument(
+        "--review",
+        action="store_true",
+        help="Interactively review conflicts and removals before applying sync.",
+    )
+    sync_parser.add_argument(
+        "--review-conflicts",
+        action="store_true",
+        help="Interactively resolve file conflicts before applying sync.",
+    )
+    sync_parser.add_argument(
+        "--review-removals",
+        action="store_true",
+        help="Interactively review files that would be removed.",
+    )
+    sync_parser.add_argument(
+        "--defaults",
+        action="store_true",
+        help=(
+            "For 'aerolitctl sync preserve list', also show built-in default "
+            "preserve patterns."
+        ),
+    )
+    sync_parser.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "For 'aerolitctl sync preserve list', show all preserve patterns, "
+            "including built-in defaults."
+        ),
+    )
+
+    add_command_verbose(sync_parser)
+    sync_parser.set_defaults(func=cmd_sync)
+
+    return sync_parser
+
+
 def add_provision_parser(subparsers):
     """Add aerolitctl provision parser."""
     provision_parser = subparsers.add_parser(
@@ -1322,6 +1492,7 @@ def build_parser():
     add_logs_parser(subparsers)
     add_backup_parser(subparsers)
     add_settings_parser(subparsers)
+    add_sync_parser(subparsers)
 
     configure_parser = subparsers.add_parser(
         "configure",
