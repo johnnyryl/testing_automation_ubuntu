@@ -350,6 +350,28 @@ def detect_sections(source_root):
     return detected
 
 
+def print_detected_sections(detected_sections, show_paths=False):
+    """Print detected sync sections without noisy staging paths by default."""
+    section_names = sorted(detected_sections.keys())
+
+    print("Detected sync sections:")
+
+    if not section_names:
+        print("  none")
+        return
+
+    if not show_paths:
+        print("  {}".format(", ".join(section_names)))
+        print("  Full detected paths are written to the sync report.")
+        print("")
+        return
+
+    for section in section_names:
+        print("  {}: {}".format(section, detected_sections[section]))
+
+    print("")
+
+
 def skipped_entry_name(item):
     """Return normalized skipped entry name."""
     if not isinstance(item, dict):
@@ -4015,10 +4037,10 @@ def run_sync_apply_or_diff(args, source, diff_mode=False):
             print("  {}".format(source), file=sys.stderr)
             return 1
 
-        print("Detected sync sections:")
-        for section in sorted(detected_sections):
-            print("  {}: {}".format(section, detected_sections[section]))
-        print("")
+        print_detected_sections(
+            detected_sections,
+            show_paths=getattr(args, "verbose", False),
+        )
 
         selected = selected_sections(args, detected_sections)
 
