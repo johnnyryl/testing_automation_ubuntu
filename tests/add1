@@ -1,3 +1,146 @@
+Now we should **stop adding big features for a minute and harden/test what we built**.
+
+I checked the two uploaded files, and both compile. Your `sync.py` now includes all four major bundle sections: `collections-hub`, `files`, `repos`, and `extracted_isos`. It also has the improved `sync status` output for ISO trees.  Your `cli.py` has the major sync options wired: `--files-mode`, `--repo-mode`, `--rhel-major`, and `--keep-old-isos`. 
+
+The next step should be **testing, not more features**.
+
+Run this first:
+
+```bash
+python3 -m compileall src
+```
+
+Then run these safe read-only/dry-run checks:
+
+```bash
+aerolitctl sync status
+
+aerolitctl sync preserve list --defaults
+
+aerolitctl sync /path/to/aerolit-bundle.tar.gz --dry-run --show-files
+
+aerolitctl sync /path/to/aerolit-bundle.tar.gz --section files --dry-run --show-files
+
+aerolitctl sync /path/to/aerolit-bundle.tar.gz --section repos --repo-mode additive --dry-run --show-files
+
+aerolitctl sync /path/to/aerolit-bundle.tar.gz --section repos --repo-mode mirror --dry-run --show-files
+
+aerolitctl sync /path/to/aerolit-bundle.tar.gz --section extracted-isos --dry-run --show-files
+
+aerolitctl sync /path/to/aerolit-bundle.tar.gz --section extracted-isos --rhel-major 9 --dry-run --show-files
+
+aerolitctl sync /path/to/aerolit-bundle.tar.gz --section extracted-isos --rhel-major 9 --keep-old-isos --dry-run --show-files
+```
+
+What we’re looking for:
+
+```text
+collections-hub:
+  generated/local files preserved
+  .initialization-backups not noisy
+
+files:
+  additive mode keeps older local files
+  mirror mode only plans removals when appropriate
+
+repos:
+  additive mode keeps older RPMs
+  mirror mode does not touch unrelated repo trees
+
+extracted_isos:
+  only selected RHEL major is replaced
+  unrelated RHEL majors are tree_keep
+  no file-by-file backup is attempted
+```
+
+After we review those outputs, the next code improvement should be a **small hardening pass**, not another major section. I’d do:
+
+```text
+1. Add binary-safe diff detection.
+2. Add --diff-lines.
+3. Add source archive checksum to reports.
+4. Add better status output: last report, last backup, retention summary.
+```
+
+But first, run the dry-runs. That will tell us whether the big pieces behave safely.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Yes — this should be done with **both a directory and a spec file**, but **not inside `src/aerolitctl/`**.
 
 `src/aerolitctl/` is for Python code. RPM packaging should live beside it in a packaging area. Your current CLI already expects the command to be launched through the normal `aerolitctl` entry point and now imports the provision feature from `.provision`, so the RPM’s job is to install the Python package, install the command, and place the default config file. 
