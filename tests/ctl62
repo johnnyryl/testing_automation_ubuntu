@@ -1031,6 +1031,23 @@ def add_sync_parser(subparsers):
         ),
     )
     sync_parser.add_argument(
+        "--diff-lines",
+        type=int,
+        default=None,
+        help=(
+            "Maximum number of unified diff lines to show for conflict review "
+            "or 'aerolitctl sync diff'. Defaults to 300."
+        ),
+    )
+    sync_parser.add_argument(
+        "--path",
+        default=None,
+        help=(
+            "For 'aerolitctl sync diff', limit output to one path relative to "
+            "the active section, for example ansible/site.yml."
+        ),
+    )
+    sync_parser.add_argument(
         "--no-backup",
         action="store_true",
         help="Do not back up overwritten or removed collections-hub files.",
@@ -1923,6 +1940,7 @@ def main(argv=None):
         return 2
 
     command_argv = list(argv if argv is not None else sys.argv[1:])
+    setattr(args, "_aerolitctl_argv", command_argv)
 
     try:
         result = run_with_command_log(
