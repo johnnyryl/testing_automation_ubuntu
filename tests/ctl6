@@ -2,6 +2,304 @@ SRC="/aerolit_rhel8_standard-1.13.0.tar.gz"
 
 echo
 echo "================================================================================"
+echo "TEST 21: compile before real sync"
+echo "================================================================================"
+python3 -m compileall src
+
+echo
+echo "================================================================================"
+echo "TEST 22: real sync precheck dry-run collections-hub"
+echo "================================================================================"
+aerolitctl sync "$SRC" --section collections-hub --dry-run --show-files
+
+echo
+echo "================================================================================"
+echo "TEST 23: real sync collections-hub only"
+echo "================================================================================"
+aerolitctl sync "$SRC" --section collections-hub --yes
+
+echo
+echo "================================================================================"
+echo "TEST 24: confirm manifest exists"
+echo "================================================================================"
+ls -lh /var/lib/aerolit/sync/installed-manifest.yml
+sed -n '1,80p' /var/lib/aerolit/sync/installed-manifest.yml
+
+echo
+echo "================================================================================"
+echo "TEST 25: confirm latest sync report exists"
+echo "================================================================================"
+latest_sync_report="$(ls -1t /var/log/aerolit/sync/*sync-report.yml | head -1)"
+echo "$latest_sync_report"
+sed -n '1,120p' "$latest_sync_report"
+
+echo
+echo "================================================================================"
+echo "TEST 26: confirm backup directory exists if sync changed files"
+echo "================================================================================"
+if ls -1dt /var/lib/aerolit/sync/backups/* >/dev/null 2>&1; then
+    latest_backup="$(ls -1dt /var/lib/aerolit/sync/backups/* | head -1)"
+    echo "$latest_backup"
+    find "$latest_backup" -maxdepth 3 -type f | sort | head -80
+
+    if [ -f "$latest_backup/aerolit-sync-backup.yml" ]; then
+        echo
+        echo "Backup metadata:"
+        sed -n '1,120p' "$latest_backup/aerolit-sync-backup.yml"
+    fi
+
+    if [ -f "$latest_backup/installed-manifest.before.yml" ]; then
+        echo
+        echo "Pre-sync manifest backup exists:"
+        ls -lh "$latest_backup/installed-manifest.before.yml"
+    fi
+else
+    echo "No backup directory found. This is only okay if the sync had no updates/removals."
+fi
+
+echo
+echo "================================================================================"
+echo "TEST 27: sync status after real sync"
+echo "================================================================================"
+aerolitctl sync status
+
+echo
+echo "================================================================================"
+echo "TEST 28: second collections-hub dry-run after real sync"
+echo "================================================================================"
+aerolitctl sync "$SRC" --section collections-hub --dry-run --show-files
+
+echo
+echo "================================================================================"
+echo "TEST 29: create tar safety test archive"
+echo "================================================================================"
+rm -rf /tmp/aerolit-tar-safety
+mkdir -p /tmp/aerolit-tar-safety/src/good-bundle/collections-hub/ansible
+mkdir -p /tmp/aerolit-tar-safety/src/good-bundle/collections-hub/collections
+echo "safe file" > /tmp/aerolit-tar-safety/src/good-bundle/collections-hub/ansible/safe.yml
+
+python3 - <<'PY'
+import io
+import os
+import tarfile
+
+tar_path = "/tmp/aerolit-tar-safety/aerolit-tar-safety.tar"
+
+with tarfile.open(tar_path, "w") as tar:
+    # Normal safe directories/files.
+    for directory in (
+        "good-bundle/",
+        "good-bundle/collections-hub/",
+        "good-bundle/collections-hub/ansible/",
+        "good-bundle/collections-hub/collections/",
+    ):
+        info = tarfile.TarInfo(directory)
+        info.type = tarfile.DIRTYPE
+        info.mode = 0o755
+        tar.addfile(info)
+
+    data = b"safe file\n"
+    info = tarfile.TarInfo("good-bundle/collections-hub/ansible/safe.yml")
+    info.size = len(data)
+    info.mode = 0o644
+    tar.addfile(info, io.BytesIO(data))
+
+    # Unsafe absolute path.
+    data = b"bad absolute\n"
+    info = tarfile.TarInfo("/tmp/aerolit-evil-absolute.txt")
+    info.size = len(data)
+    info.mode = 0o644
+    tar.addfile(info, io.BytesIO(data))
+
+    # Unsafe parent traversal.
+    data = b"bad parent\n"
+    info = tarfile.TarInfo("../aerolit-evil-parent.txt")
+    info.size = len(data)
+    info.mode = 0o644
+    tar.addfile(info, io.BytesIO(data))
+
+    # Symlink member.
+    info = tarfile.TarInfo("good-bundle/collections-hub/ansible/bad-symlink")
+    info.type = tarfile.SYMTYPE
+    info.linkname = "/etc/passwd"
+    info.mode = 0o777
+    tar.addfile(info)
+
+    # Hardlink member.
+    info = tarfile.TarInfo("good-bundle/collections-hub/ansible/bad-hardlink")
+    info.type = tarfile.LNKTYPE
+    info.linkname = "good-bundle/collections-hub/ansible/safe.yml"
+    info.mode = 0o777
+    tar.addfile(info)
+
+    # Special member: FIFO.
+    info = tarfile.TarInfo("good-bundle/collections-hub/ansible/bad-fifo")
+    info.type = tarfile.FIFOTYPE
+    info.mode = 0o644
+    tar.addfile(info)
+
+print(tar_path)
+PY
+
+ls -lh /tmp/aerolit-tar-safety/aerolit-tar-safety.tar
+
+echo
+echo "================================================================================"
+echo "TEST 30: tar safety dry-run"
+echo "================================================================================"
+aerolitctl sync /tmp/aerolit-tar-safety/aerolit-tar-safety.tar --section collections-hub --dry-run --show-files --show-skipped
+
+echo
+echo "================================================================================"
+echo "TEST 31: inspect latest tar safety report for skipped unsafe members"
+echo "================================================================================"
+latest_report="$(ls -1t /var/log/aerolit/sync/*sync-report.yml /var/log/aerolit/sync/*multi-section-sync-plan.yml 2>/dev/null | head -1)"
+echo "$latest_report"
+grep -nE "unsafe path|link member|special tar member|bad-symlink|bad-hardlink|bad-fifo|aerolit-evil" "$latest_report" || true
+
+echo
+echo "================================================================================"
+echo "TEST 32: confirm unsafe files were not written outside staging"
+echo "================================================================================"
+if [ -e /tmp/aerolit-evil-absolute.txt ] || [ -e /tmp/aerolit-evil-parent.txt ]; then
+    echo "ERROR: unsafe tar member escaped staging"
+    ls -l /tmp/aerolit-evil-absolute.txt /tmp/aerolit-evil-parent.txt 2>/dev/null || true
+else
+    echo "OK: unsafe tar members did not escape staging"
+fi
+
+echo
+echo "================================================================================"
+echo "DONE"
+echo "================================================================================"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+SRC="/aerolit_rhel8_standard-1.13.0.tar.gz"
+
+echo
+echo "================================================================================"
 echo "TEST 1: compile"
 echo "================================================================================"
 python3 -m compileall src
