@@ -964,6 +964,23 @@ def add_sync_parser(subparsers):
         ),
     )
     sync_parser.add_argument(
+        "--large-backup",
+        action="store_true",
+        help=(
+            "Allow large-section backup behavior where supported. "
+            "For extracted_isos, this behaves like --keep-old-isos and moves "
+            "the existing RHEL major tree to extracted_isos/archive before replacement."
+        ),
+    )
+    sync_parser.add_argument(
+        "--restart-affected",
+        action="store_true",
+        help=(
+            "Accepted for future service restart workflows. Current sync runs "
+            "will report affected areas but will not restart services automatically."
+        ),
+    )
+    sync_parser.add_argument(
         "--to",
         dest="rollback_to",
         default=None,
@@ -1045,6 +1062,24 @@ def add_sync_parser(subparsers):
         help=(
             "For 'aerolitctl sync diff', limit output to one path relative to "
             "the active section, for example ansible/site.yml."
+        ),
+    )
+    sync_parser.add_argument(
+        "--output",
+        choices=("text", "json", "yaml"),
+        default="text",
+        help=(
+            "Output format for plan-only runs. Use json or yaml with "
+            "--dry-run or 'aerolitctl sync diff'. Default: text."
+        ),
+    )
+    sync_parser.add_argument(
+        "--plan-output",
+        default=None,
+        help=(
+            "Write the sync plan to a file without applying changes. "
+            "Use with --dry-run or 'aerolitctl sync diff'. "
+            "The file format is chosen from --output or the file extension."
         ),
     )
     sync_parser.add_argument(
