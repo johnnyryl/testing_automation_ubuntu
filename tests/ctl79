@@ -8,6 +8,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -1619,26 +1620,29 @@ def normalized_repo_tree_name(name):
 
 
 def normalized_repo_major_name(name):
-    """Return normalized repo major name like rhel8, or None."""
-    cleaned = str(name or "").strip().lower()
-    cleaned = cleaned.replace("-", "").replace("_", "").replace(".", "")
+    """Return normalized repo major name like rhel8, or None.
 
-    prefixes = ("rhel", "el")
+    Handles names like:
+      rhel8
+      rhel8-rpms
+      rhel8_appstream
+      el8
+      el8-baseos
+      third-party-rhel8-rpms
+      custom_el9_repo
+    """
+    text = str(name or "").strip().lower()
 
-    for prefix in prefixes:
-        if not cleaned.startswith(prefix):
-            continue
+    patterns = (
+        r"(^|[^a-z0-9])rhel[\._-]*([0-9]+)",
+        r"(^|[^a-z0-9])el[\._-]*([0-9]+)",
+    )
 
-        suffix = cleaned[len(prefix):]
-        digits = []
+    for pattern in patterns:
+        match = re.search(pattern, text)
 
-        for char in suffix:
-            if not char.isdigit():
-                break
-            digits.append(char)
-
-        if digits:
-            return "rhel{}".format("".join(digits))
+        if match:
+            return "rhel{}".format(match.group(2))
 
     return None
 
