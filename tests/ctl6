@@ -1,26 +1,28 @@
-
-python3 -m compileall src
-
 aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section collections-hub --dry-run
 
 aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section collections-hub --dry-run --show-files
 
-aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section collections-hub --dry-run --show-files --show-all-files
+aerolitctl sync baseline --section files --dry-run
 
-aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section collections-hub --dry-run --show-files --show-skipped
+aerolitctl sync baseline --section files --yes
 
-aerolitctl sync diff /aerolit_rhel8_standard-1.13.0.tar.gz --section collections-hub
+aerolitctl sync baseline --section repos --dry-run
 
-aerolitctl sync diff /aerolit_rhel8_standard-1.13.0.tar.gz --section collections-hub --show-all-files
+aerolitctl sync baseline --section repos --yes
+
+aerolitctl sync baseline --section extracted-isos --dry-run
+
+aerolitctl sync baseline --section extracted-isos --yes
 
 aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section files --dry-run --show-files
+
 aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section repos --repo-mode additive --dry-run --show-files
+
 aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section extracted-isos --rhel-major 8 --dry-run --show-files
 
+aerolitctl sync cleanup --dry-run --show-files
 
-
-
-
+aerolitctl sync cleanup --yes
 
 
 
