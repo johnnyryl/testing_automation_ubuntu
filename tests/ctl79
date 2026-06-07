@@ -34,6 +34,8 @@ from .paths import (
 MANIFEST_KIND = "AeroLITSyncManifest"
 REPORT_KIND = "AeroLITSyncReport"
 DEFAULT_FILE_LIST_LIMIT = 25
+DEFAULT_DIFF_LINE_LIMIT = 300
+BINARY_SCAN_BYTES = 8192
 
 SECTION_COLLECTIONS_HUB = "collections-hub"
 SECTION_FILES = "files"
@@ -927,6 +929,7 @@ def empty_plan(section, source_path, target_path):
         "local_untracked": [],
         "skipped": [],
         "warnings": [],
+        "notes": [],
     }
 
 
@@ -1061,7 +1064,16 @@ def build_collections_hub_plan(source_path, target_path, manifest, force=False):
         previous_checksum = previous_files[relative].get("checksum")
 
         if previous_checksum and target_meta["checksum"] == previous_checksum:
-            plan["remove"].append({"path": relative})
+            plan["remove"].append(
+                {
+                    "path": relative,
+                    "reason": (
+                        "previously tracked by AeroLIT, missing from incoming "
+                        "source, and unchanged locally since last sync"
+                    ),
+                    "action": "would remove old bundle-owned file",
+                }
+            )
         else:
             plan["conflicts"].append(
                 {
@@ -1255,6 +1267,80 @@ def top_level_names(file_map):
     return names
 
 
+def normalized_repo_tree_name(name):
+    """Return normalized repo tree name for reporting."""
+    normalized = normalized_rhel_tree_name(name)
+
+    if normalized:
+        return normalized
+
+    return str(name).strip()
+
+
+def repo_metadata_file(repo_root):
+    """Return repo metadata file path for one repo root."""
+    return Path(repo_root) / "repodata" / "repomd.xml"
+
+
+def repo_metadata_exists(repo_root):
+    """Return True when repo root has repodata/repomd.xml."""
+    return repo_metadata_file(repo_root).is_file()
+
+
+def find_repo_metadata_dirs(root):
+    """Return directories under root that contain repodata/repomd.xml."""
+    root = Path(root)
+    found = []
+
+    if not root.exists() or not root.is_dir():
+        return found
+
+    for current_root, dirnames, filenames in os.walk(str(root), followlinks=False):
+        current_root_path = Path(current_root)
+
+        kept_dirnames = []
+        for dirname in dirnames:
+            child = current_root_path / dirname
+            if child.is_symlink():
+                continue
+            kept_dirnames.append(dirname)
+
+        dirnames[:] = kept_dirnames
+
+        if "repodata" in dirnames:
+            candidate = current_root_path
+            if repo_metadata_exists(candidate):
+                found.append(candidate)
+
+    return sorted(found)
+
+
+def repo_tree_metadata_summary(root):
+    """Return repo metadata summary for top-level repo trees."""
+    root = Path(root)
+    summary = {}
+
+    if not root.exists() or not root.is_dir():
+        return summary
+
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+
+        metadata_dirs = find_repo_metadata_dirs(child)
+
+        summary[child.name] = {
+            "tree": child.name,
+            "normalized_tree": normalized_repo_tree_name(child.name),
+            "path": str(child),
+            "metadata_count": len(metadata_dirs),
+            "metadata_dirs": [str(path) for path in metadata_dirs],
+            "has_metadata": bool(metadata_dirs),
+        }
+
+    return summary
+
+
 def build_repos_plan(source_path, target_path, manifest, force=False, mode="additive"):
     """Build repos/ sync plan.
 
@@ -1274,6 +1360,8 @@ def build_repos_plan(source_path, target_path, manifest, force=False, mode="addi
     previous_files = manifest_section_files(manifest, SECTION_REPOS)
     previous_exists = bool(previous_files)
     incoming_top_levels = top_level_names(source_files)
+    repo_metadata = repo_tree_metadata_summary(source_path)
+    plan["repo_metadata"] = repo_metadata
 
     if not previous_exists:
         plan["warnings"].append(
@@ -1283,8 +1371,41 @@ def build_repos_plan(source_path, target_path, manifest, force=False, mode="addi
             "aerolitctl sync baseline --section repos"
         )
 
-    if mode == "additive":
+    if repo_metadata:
+        missing_metadata = []
+
+        for tree_name, tree_info in sorted(repo_metadata.items()):
+            if not tree_info.get("has_metadata"):
+                missing_metadata.append(tree_name)
+
+        if missing_metadata:
+            plan["warnings"].append(
+                "Incoming repos/ source has repo trees without repodata/repomd.xml: {}".format(
+                    ", ".join(sorted(missing_metadata))
+                )
+            )
+
+        metadata_count = 0
+        for tree_info in repo_metadata.values():
+            metadata_count += tree_info.get("metadata_count", 0)
+
+        if metadata_count:
+            plan["notes"].append(
+                "Incoming repos/ source contains {} repo metadata location(s).".format(
+                    metadata_count
+                )
+            )
+        else:
+            plan["warnings"].append(
+                "Incoming repos/ source does not contain any repodata/repomd.xml files."
+            )
+    else:
         plan["warnings"].append(
+            "Incoming repos/ source has no top-level repo trees to inspect."
+        )
+
+    if mode == "additive":
+        plan["notes"].append(
             "repos/ additive mode keeps local repo files that are missing from "
             "the incoming source. Older RPMs are not removed."
         )
@@ -1497,6 +1618,92 @@ def extracted_iso_tree_info(tree_path):
     }
 
 
+def extracted_iso_version_label(info):
+    """Return display label for extracted ISO version metadata."""
+    if not info:
+        return "none"
+
+    return info.get("version") or "unknown version"
+
+
+def directory_size_bytes(path):
+    """Return total size for a directory tree."""
+    path = Path(path)
+
+    if not path.exists():
+        return 0
+
+    if path.is_file():
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+
+    total = 0
+
+    for current_root, dirnames, filenames in os.walk(str(path), followlinks=False):
+        current_root_path = Path(current_root)
+
+        kept_dirnames = []
+        for dirname in dirnames:
+            child = current_root_path / dirname
+            if child.is_symlink():
+                continue
+            kept_dirnames.append(dirname)
+
+        dirnames[:] = kept_dirnames
+
+        for filename in filenames:
+            item = current_root_path / filename
+
+            try:
+                if item.is_symlink() or not item.is_file():
+                    continue
+                total += item.stat().st_size
+            except OSError:
+                continue
+
+    return total
+
+
+def filesystem_free_bytes(path):
+    """Return free bytes on the filesystem containing path."""
+    path = Path(path)
+
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+
+    if not probe.exists():
+        probe = Path("/")
+
+    try:
+        return shutil.disk_usage(str(probe)).free
+    except OSError:
+        return None
+
+
+def disk_space_check_for_keep_old(source_tree, target_tree, target_root):
+    """Return disk-space check for --keep-old-isos behavior."""
+    incoming_size = directory_size_bytes(source_tree)
+    current_size = directory_size_bytes(target_tree) if target_tree else 0
+    free_bytes = filesystem_free_bytes(target_root)
+
+    required_bytes = int(incoming_size * 1.10)
+
+    return {
+        "incoming_size_bytes": incoming_size,
+        "incoming_size": format_bytes(incoming_size),
+        "current_size_bytes": current_size,
+        "current_size": format_bytes(current_size),
+        "free_bytes": free_bytes,
+        "free": format_bytes(free_bytes) if free_bytes is not None else "unknown",
+        "required_bytes": required_bytes,
+        "required": format_bytes(required_bytes),
+        "ok": free_bytes is not None and free_bytes >= required_bytes,
+    }
+
+
 def selected_rhel_tree_names(args, incoming_trees):
     """Return incoming RHEL tree names selected by args."""
     requested_major = getattr(args, "rhel_major", None)
@@ -1539,12 +1746,12 @@ def build_extracted_isos_plan(source_path, target_path, args):
             "No recognized extracted ISO trees were found. Expected directories like rhel8, rhel9, or rhel10."
         )
 
-    plan["warnings"].append(
+    plan["notes"].append(
         "extracted_isos sync replaces entire RHEL major trees. It does not perform file-by-file backup."
     )
 
     if getattr(args, "keep_old_isos", False):
-        plan["warnings"].append(
+        plan["notes"].append(
             "--keep-old-isos is enabled. Existing trees will be moved to extracted_isos/archive before replacement."
         )
 
@@ -1557,13 +1764,59 @@ def build_extracted_isos_plan(source_path, target_path, args):
         else:
             planned_target = target_path / source_tree.name
 
+        incoming_info = extracted_iso_tree_info(source_tree)
+        current_info = extracted_iso_tree_info(target_tree) if target_tree else None
+
         item = {
             "path": name,
             "source": str(source_tree),
             "target": str(planned_target),
-            "incoming": extracted_iso_tree_info(source_tree),
-            "current": extracted_iso_tree_info(target_tree) if target_tree else None,
+            "incoming": incoming_info,
+            "current": current_info,
         }
+
+        if not incoming_info.get("version"):
+            plan["warnings"].append(
+                "Incoming extracted ISO tree {} version could not be determined from .discinfo.".format(
+                    name
+                )
+            )
+
+        if target_tree and current_info and not current_info.get("version"):
+            plan["warnings"].append(
+                "Current extracted ISO tree {} version could not be determined from .discinfo.".format(
+                    name
+                )
+            )
+
+        if target_tree and getattr(args, "keep_old_isos", False):
+            disk_check = disk_space_check_for_keep_old(
+                source_tree,
+                target_tree,
+                target_path,
+            )
+            item["disk_check"] = disk_check
+
+            if disk_check.get("ok"):
+                plan["notes"].append(
+                    "--keep-old-isos disk check for {}: incoming {}, current {}, free {}, required {}.".format(
+                        name,
+                        disk_check.get("incoming_size"),
+                        disk_check.get("current_size"),
+                        disk_check.get("free"),
+                        disk_check.get("required"),
+                    )
+                )
+            else:
+                plan["warnings"].append(
+                    "--keep-old-isos may not have enough free space for {}: incoming {}, current {}, free {}, required {}.".format(
+                        name,
+                        disk_check.get("incoming_size"),
+                        disk_check.get("current_size"),
+                        disk_check.get("free"),
+                        disk_check.get("required"),
+                    )
+                )
 
         if target_tree:
             item["reason"] = "replace existing extracted ISO tree"
@@ -1603,6 +1856,7 @@ def plan_counts(plan):
         "local_untracked": len(plan.get("local_untracked", [])),
         "skipped": len(plan.get("skipped", [])),
         "warnings": len(plan.get("warnings", [])),
+        "notes": len(plan.get("notes", [])),
         "tree_add": len(plan.get("tree_add", [])),
         "tree_replace": len(plan.get("tree_replace", [])),
         "tree_keep": len(plan.get("tree_keep", [])),
@@ -1675,6 +1929,78 @@ def print_path_list(title, items, limit=None, show_details=True, intro=None):
             print("  - {}".format(item))
 
 
+def print_repo_metadata_details(plan):
+    """Print repo metadata details for repos section."""
+    if plan.get("section") != SECTION_REPOS:
+        return
+
+    repo_metadata = plan.get("repo_metadata") or {}
+
+    if not repo_metadata:
+        return
+
+    print("")
+    print("Repo metadata:")
+
+    for tree_name, tree_info in sorted(repo_metadata.items()):
+        metadata_count = tree_info.get("metadata_count", 0)
+        normalized = tree_info.get("normalized_tree") or tree_name
+
+        print("  - {} ({})".format(tree_name, normalized))
+        print("      metadata locations: {}".format(metadata_count))
+
+        for path in tree_info.get("metadata_dirs", [])[:5]:
+            print("        - {}".format(path))
+
+        extra_count = len(tree_info.get("metadata_dirs", [])) - 5
+        if extra_count > 0:
+            print("        ... {} more".format(extra_count))
+
+
+def print_extracted_iso_tree_details(plan):
+    """Print extracted ISO current/incoming tree details."""
+    if plan.get("section") != SECTION_EXTRACTED_ISOS:
+        return
+
+    items = []
+    items.extend(plan.get("tree_add", []))
+    items.extend(plan.get("tree_replace", []))
+    items.extend(plan.get("tree_keep", []))
+
+    if not items:
+        return
+
+    print("")
+    print("Extracted ISO trees:")
+
+    for item in items:
+        path = item.get("path")
+        incoming = item.get("incoming")
+        current = item.get("current")
+        action = item.get("action") or "leave unchanged"
+
+        print("  - {}".format(path))
+        print("      action:   {}".format(action))
+
+        if current:
+            print("      current:  {}".format(extracted_iso_version_label(current)))
+        else:
+            print("      current:  none")
+
+        if incoming:
+            print("      incoming: {}".format(extracted_iso_version_label(incoming)))
+
+        if item.get("target"):
+            print("      target:   {}".format(item.get("target")))
+
+        disk_check = item.get("disk_check")
+        if disk_check:
+            print("      disk:     free {}, required {}".format(
+                disk_check.get("free"),
+                disk_check.get("required"),
+            ))
+
+
 def print_plan(
     plan,
     show_files=False,
@@ -1718,11 +2044,20 @@ def print_plan(
         print("  tree keep:              {}".format(counts["tree_keep"]))
         print("  tree skipped:           {}".format(counts["tree_skipped"]))
 
+    print_repo_metadata_details(plan)
+    print_extracted_iso_tree_details(plan)
+
     if plan.get("warnings"):
         print("")
         print("Warnings:")
         for warning in plan["warnings"]:
             print("  - {}".format(warning))
+
+    if plan.get("notes"):
+        print("")
+        print("Notes:")
+        for note in plan["notes"]:
+            print("  - {}".format(note))
 
     if counts["bundle_managed_update"]:
         print("")
@@ -1838,17 +2173,270 @@ def append_unique_plan_item(plan, key, item):
     return True
 
 
+def plan_has_force_backup(plan):
+    """Return True when any planned item explicitly requests backup."""
+    for key in ("update", "bundle_managed_update", "remove", "preserve"):
+        for item in plan.get(key, []):
+            if isinstance(item, dict) and item.get("force_backup"):
+                return True
+
+    return False
+
+
+def print_conflict_resolution_help():
+    """Print non-interactive conflict resolution guidance."""
+    print("")
+    print("How to resolve conflicts:")
+    print("  - Review details first:")
+    print("      aerolitctl sync SOURCE --dry-run --show-files")
+    print("  - Review conflicts interactively:")
+    print("      aerolitctl sync SOURCE --review-conflicts")
+    print("  - Keep a file permanently:")
+    print("      aerolitctl sync preserve add PATH")
+    print("  - Replace differing files after review:")
+    print("      aerolitctl sync SOURCE --force")
+    print("")
+    print("Use --force only after confirming local changes can be replaced.")
+
+
+def count_plan_items(plan, key):
+    """Return count for a plan list."""
+    return len(plan.get(key, []))
+
+
+def print_conflict_review_summary(
+    plan,
+    start_update,
+    start_preserve,
+    start_remove,
+    original_count,
+    remaining_count,
+    cancelled=False,
+):
+    """Print conflict review summary."""
+    resolved_to_update = max(0, count_plan_items(plan, "update") - start_update)
+    resolved_to_preserve = max(0, count_plan_items(plan, "preserve") - start_preserve)
+    resolved_to_remove = max(0, count_plan_items(plan, "remove") - start_remove)
+
+    print("")
+    print("Conflict review summary:")
+    print("  reviewed:             {}".format(original_count))
+    print("  use incoming/update:  {}".format(resolved_to_update))
+    print("  keep/preserve:        {}".format(resolved_to_preserve))
+    print("  remove:               {}".format(resolved_to_remove))
+    print("  remaining conflicts:  {}".format(remaining_count))
+
+    if cancelled:
+        print("  status:               cancelled")
+
+
+def resolve_diff_line_limit(args):
+    """Return configured diff line limit."""
+    value = getattr(args, "diff_lines", None)
+
+    if value is None:
+        return DEFAULT_DIFF_LINE_LIMIT
+
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_DIFF_LINE_LIMIT
+
+    if value < 1:
+        return DEFAULT_DIFF_LINE_LIMIT
+
+    return value
+
+
+def is_probably_binary_file(path):
+    """Return True when a file appears to be binary."""
+    path = Path(path)
+
+    if not path.exists() or not path.is_file():
+        return False
+
+    try:
+        with path.open("rb") as handle:
+            chunk = handle.read(BINARY_SCAN_BYTES)
+    except OSError:
+        return False
+
+    return b"\0" in chunk
+
+
+def normalize_diff_path(path, section=None):
+    """Normalize a user-provided diff path."""
+    path = normalize_relative_path(str(path).strip())
+
+    while path.startswith("./"):
+        path = path[2:]
+
+    path = path.lstrip("/")
+
+    prefixes = [
+        "collections-hub/",
+        "collections_hub/",
+        "files/",
+        "repos/",
+        "extracted_isos/",
+        "extracted-isos/",
+    ]
+
+    if section:
+        prefixes.insert(0, str(section).rstrip("/") + "/")
+
+    for prefix in prefixes:
+        if path.startswith(prefix):
+            return path[len(prefix):]
+
+    return path
+
+
+def plan_item_path(item):
+    """Return path from one plan item."""
+    if isinstance(item, dict):
+        return normalize_relative_path(item.get("path") or item.get("name") or "")
+
+    return normalize_relative_path(str(item))
+
+
+def plan_item_matches_path(item, path_filter):
+    """Return True when one plan item matches a path filter."""
+    item_path = plan_item_path(item)
+    path_filter = normalize_relative_path(path_filter)
+
+    if item_path == path_filter:
+        return True
+
+    if item_path.startswith(path_filter + "/"):
+        return True
+
+    if path_filter.startswith(item_path + "/"):
+        return True
+
+    return False
+
+
+def filter_plan_to_path(plan, path_filter):
+    """Return a copy of a plan filtered to one path."""
+    path_filter = normalize_relative_path(path_filter)
+    filtered = dict(plan)
+
+    list_keys = (
+        "add",
+        "update",
+        "bundle_managed_update",
+        "remove",
+        "preserve",
+        "conflicts",
+        "unchanged",
+        "local_untracked",
+        "skipped",
+        "tree_add",
+        "tree_replace",
+        "tree_keep",
+        "tree_skipped",
+    )
+
+    matched_any = False
+
+    for key in list_keys:
+        original = list(plan.get(key, []))
+        kept = [
+            item
+            for item in original
+            if plan_item_matches_path(item, path_filter)
+        ]
+
+        if kept:
+            matched_any = True
+
+        filtered[key] = kept
+
+    filtered["notes"] = list(plan.get("notes", []))
+    filtered["warnings"] = list(plan.get("warnings", []))
+
+    filtered["notes"].append(
+        "Plan output is filtered to path: {}".format(path_filter)
+    )
+
+    if not matched_any:
+        filtered["warnings"].append(
+            "No planned item matched path filter: {}".format(path_filter)
+        )
+
+    return filtered
+
+
+def diffable_plan_item_for_path(plan, path_filter):
+    """Return a diffable item for a path filter, if one exists."""
+    for key in (
+        "conflicts",
+        "update",
+        "bundle_managed_update",
+        "preserve",
+        "unchanged",
+        "add",
+        "remove",
+    ):
+        for item in plan.get(key, []):
+            if plan_item_matches_path(item, path_filter):
+                return key, item
+
+    return None, None
+
+
+def show_diff_for_path(plan, path_filter, max_lines):
+    """Show a direct text diff for one path when possible."""
+    key, item = diffable_plan_item_for_path(plan, path_filter)
+
+    print("")
+    print("Path diff request:")
+    print("  {}".format(path_filter))
+
+    if not item:
+        print("")
+        print("No matching planned file was found for this path.")
+        return
+
+    relative = plan_item_path(item)
+
+    if key == "add":
+        print("")
+        print("Incoming file is new. No local file exists to diff against.")
+        return
+
+    if key == "remove":
+        print("")
+        print("Incoming bundle removed this file. No incoming file exists to diff against.")
+        return
+
+    show_conflict_diff(
+        plan,
+        relative,
+        max_lines=max_lines,
+    )
+
+
 def read_text_lines_for_diff(path):
     """Read text lines for a diff, replacing undecodable bytes."""
+    path = Path(path)
+
+    if is_probably_binary_file(path):
+        return None
+
     try:
-        with Path(path).open("r", encoding="utf-8", errors="replace") as handle:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
             return handle.readlines()
     except OSError:
         return None
 
 
-def show_conflict_diff(plan, relative_path, max_lines=300):
+def show_conflict_diff(plan, relative_path, max_lines=None):
     """Show a unified diff for a conflicted file."""
+    if max_lines is None:
+        max_lines = plan.get("_diff_lines", DEFAULT_DIFF_LINE_LIMIT)
+
     source_path = Path(plan["source_path"]) / relative_path
     target_path = Path(plan["target_path"]) / relative_path
 
@@ -1863,12 +2451,21 @@ def show_conflict_diff(plan, relative_path, max_lines=300):
         print("No local target file exists for this path.")
         return
 
+    if is_probably_binary_file(source_path) or is_probably_binary_file(target_path):
+        print("")
+        print("Binary file diff skipped:")
+        print("  local:    {}".format(target_path))
+        print("  incoming: {}".format(source_path))
+        print("")
+        print("Use checksums or external tools to compare binary files.")
+        return
+
     source_lines = read_text_lines_for_diff(source_path)
     target_lines = read_text_lines_for_diff(target_path)
 
     if source_lines is None or target_lines is None:
         print("")
-        print("Could not read one of the files for diff:")
+        print("Could not read one of the files for text diff:")
         print("  local:    {}".format(target_path))
         print("  incoming: {}".format(source_path))
         return
@@ -1877,6 +2474,7 @@ def show_conflict_diff(plan, relative_path, max_lines=300):
     print("Diff:")
     print("  local:    {}".format(target_path))
     print("  incoming: {}".format(source_path))
+    print("  max lines: {}".format(max_lines))
     print("")
 
     diff = difflib.unified_diff(
@@ -1914,6 +2512,11 @@ def resolve_conflicts_interactively(plan, preserve_file):
     if not conflicts:
         return True
 
+    start_update = count_plan_items(plan, "update")
+    start_preserve = count_plan_items(plan, "preserve")
+    start_remove = count_plan_items(plan, "remove")
+    original_count = len(conflicts)
+
     print("")
     print("Interactive conflict review")
     print("")
@@ -1948,14 +2551,27 @@ def resolve_conflicts_interactively(plan, preserve_file):
             if incoming_exists:
                 print("Choices:")
                 print("  [u] use incoming version")
+                print("  [b] back up local, then use incoming version")
                 print("  [k] keep local version for this run")
+                print("  [s] skip / keep local for this run")
                 print("  [p] preserve this path permanently")
                 print("  [d] show diff")
                 print("  [q] quit review")
-                choice = prompt_choice("Choice [k]: ", ("u", "k", "p", "d", "q"), "k")
+                choice = prompt_choice(
+                    "Choice [k]: ",
+                    ("u", "b", "k", "s", "p", "d", "q"),
+                    "k",
+                )
 
                 if choice == "d":
-                    show_conflict_diff(plan, relative)
+                    show_conflict_diff(
+                        plan,
+                        relative,
+                        max_lines=plan.get(
+                            "_diff_lines",
+                            DEFAULT_DIFF_LINE_LIMIT,
+                        ),
+                    )
                     continue
 
                 if choice == "u":
@@ -1969,7 +2585,19 @@ def resolve_conflicts_interactively(plan, preserve_file):
                     )
                     break
 
-                if choice == "k":
+                if choice == "b":
+                    append_unique_plan_item(
+                        plan,
+                        "update",
+                        {
+                            "path": relative,
+                            "reason": "resolved conflict: backup local then use incoming",
+                            "force_backup": True,
+                        },
+                    )
+                    break
+
+                if choice in ("k", "s"):
                     append_unique_plan_item(
                         plan,
                         "preserve",
@@ -1997,15 +2625,30 @@ def resolve_conflicts_interactively(plan, preserve_file):
                 if choice == "q":
                     remaining.append(conflict)
                     plan["conflicts"] = remaining
+                    print_conflict_review_summary(
+                        plan,
+                        start_update,
+                        start_preserve,
+                        start_remove,
+                        original_count,
+                        len(remaining),
+                        cancelled=True,
+                    )
                     return False
 
             else:
                 print("Choices:")
                 print("  [r] remove local file")
+                print("  [b] back up local, then remove local file")
                 print("  [k] keep local file for this run")
+                print("  [s] skip / keep local file for this run")
                 print("  [p] preserve this path permanently")
                 print("  [q] quit review")
-                choice = prompt_choice("Choice [k]: ", ("r", "k", "p", "q"), "k")
+                choice = prompt_choice(
+                    "Choice [k]: ",
+                    ("r", "b", "k", "s", "p", "q"),
+                    "k",
+                )
 
                 if choice == "r":
                     append_unique_plan_item(
@@ -2018,7 +2661,19 @@ def resolve_conflicts_interactively(plan, preserve_file):
                     )
                     break
 
-                if choice == "k":
+                if choice == "b":
+                    append_unique_plan_item(
+                        plan,
+                        "remove",
+                        {
+                            "path": relative,
+                            "reason": "resolved conflict: backup local then remove",
+                            "force_backup": True,
+                        },
+                    )
+                    break
+
+                if choice in ("k", "s"):
                     append_unique_plan_item(
                         plan,
                         "preserve",
@@ -2046,9 +2701,28 @@ def resolve_conflicts_interactively(plan, preserve_file):
                 if choice == "q":
                     remaining.append(conflict)
                     plan["conflicts"] = remaining
+                    print_conflict_review_summary(
+                        plan,
+                        start_update,
+                        start_preserve,
+                        start_remove,
+                        original_count,
+                        len(remaining),
+                        cancelled=True,
+                    )
                     return False
 
     plan["conflicts"] = remaining
+
+    print_conflict_review_summary(
+        plan,
+        start_update,
+        start_preserve,
+        start_remove,
+        original_count,
+        len(remaining),
+    )
+
     return True
 
 
@@ -2088,6 +2762,89 @@ def parse_number_selection(answer, maximum):
     return selected
 
 
+def print_removal_reason(item):
+    """Print why a removal is considered safe/planned."""
+    path = item.get("path")
+    reason = item.get("reason") or (
+        "tracked by AeroLIT and missing from incoming source"
+    )
+    action = item.get("action") or "would remove local file"
+
+    print("  path:   {}".format(path))
+    print("  reason: {}".format(reason))
+    print("  action: {}".format(action))
+
+
+def review_removals_one_by_one(plan, preserve_file, removals):
+    """Review removal candidates one by one."""
+    kept_removals = []
+    skipped_count = 0
+    preserved_count = 0
+    removed_count = 0
+
+    for index, item in enumerate(removals, 1):
+        path = item.get("path")
+
+        while True:
+            print("")
+            print("Removal {}/{}:".format(index, len(removals)))
+            print_removal_reason(item)
+            print("")
+            print("Choices:")
+            print("  [r] remove this file")
+            print("  [s] skip this removal for this run")
+            print("  [p] preserve this path permanently")
+            print("  [q] cancel removal review")
+            choice = prompt_choice("Choice [s]: ", ("r", "s", "p", "q"), "s")
+
+            if choice == "r":
+                kept_removals.append(item)
+                removed_count += 1
+                break
+
+            if choice == "s":
+                append_unique_plan_item(
+                    plan,
+                    "preserve",
+                    {
+                        "path": path,
+                        "reason": "manual removal review",
+                        "action": "skip removal for this run",
+                    },
+                )
+                skipped_count += 1
+                break
+
+            if choice == "p":
+                add_preserve_pattern(preserve_file, path)
+                append_unique_plan_item(
+                    plan,
+                    "preserve",
+                    {
+                        "path": path,
+                        "reason": "added to preserve file",
+                        "action": "skip removal",
+                    },
+                )
+                preserved_count += 1
+                break
+
+            if choice == "q":
+                return False, kept_removals, skipped_count, preserved_count, removed_count
+
+    return True, kept_removals, skipped_count, preserved_count, removed_count
+
+
+def print_removal_review_summary(total, remove_count, skip_count, preserve_count):
+    """Print removal review summary."""
+    print("")
+    print("Removal review summary:")
+    print("  reviewed:              {}".format(total))
+    print("  remove:                {}".format(remove_count))
+    print("  skipped for this run:  {}".format(skip_count))
+    print("  preserved permanently: {}".format(preserve_count))
+
+
 def review_removals_interactively(plan, preserve_file):
     """Interactively review safe removals."""
     removals = list(plan.get("remove", []))
@@ -2098,27 +2855,54 @@ def review_removals_interactively(plan, preserve_file):
     print("")
     print("Removal review")
     print("")
-    print("These files are safe removal candidates because they were previously")
+    print("These files are removal candidates because they were previously")
     print("tracked by AeroLIT, are missing from the incoming source, and do not")
     print("appear to have local changes.")
     print("")
 
     for index, item in enumerate(removals, 1):
         print("  [{}] {}".format(index, item.get("path")))
+        reason = item.get("reason")
+        if reason:
+            print("      {}".format(reason))
 
     print("")
     print("Choices:")
     print("  [r] remove all listed files")
     print("  [s] skip all removals for this run")
+    print("  [o] review removals one by one")
     print("  [p] preserve selected files permanently")
     print("  [q] cancel sync")
-    choice = prompt_choice("Choice [s]: ", ("r", "s", "p", "q"), "s")
+    choice = prompt_choice("Choice [s]: ", ("r", "s", "o", "p", "q"), "s")
 
     if choice == "r":
+        print_removal_review_summary(
+            len(removals),
+            remove_count=len(removals),
+            skip_count=0,
+            preserve_count=0,
+        )
         return True
 
     if choice == "q":
         return False
+
+    if choice == "o":
+        reviewed, kept_removals, skipped_count, preserved_count, removed_count = (
+            review_removals_one_by_one(plan, preserve_file, removals)
+        )
+
+        if not reviewed:
+            return False
+
+        plan["remove"] = kept_removals
+        print_removal_review_summary(
+            len(removals),
+            remove_count=removed_count,
+            skip_count=skipped_count,
+            preserve_count=preserved_count,
+        )
+        return True
 
     if choice == "s":
         plan["remove"] = []
@@ -2134,6 +2918,12 @@ def review_removals_interactively(plan, preserve_file):
                 },
             )
 
+        print_removal_review_summary(
+            len(removals),
+            remove_count=0,
+            skip_count=len(removals),
+            preserve_count=0,
+        )
         return True
 
     if choice == "p":
@@ -2147,6 +2937,7 @@ def review_removals_interactively(plan, preserve_file):
         selected = parse_number_selection(answer, len(removals))
         selected_indexes = set(selected)
         kept_removals = []
+        preserved_count = 0
 
         for index, item in enumerate(removals, 1):
             path = item.get("path")
@@ -2162,10 +2953,18 @@ def review_removals_interactively(plan, preserve_file):
                         "action": "skip removal",
                     },
                 )
+                preserved_count += 1
             else:
                 kept_removals.append(item)
 
         plan["remove"] = kept_removals
+
+        print_removal_review_summary(
+            len(removals),
+            remove_count=len(kept_removals),
+            skip_count=0,
+            preserve_count=preserved_count,
+        )
         return True
 
     return True
@@ -2221,10 +3020,16 @@ def apply_collections_hub_plan(plan, no_backup=False):
     changed = []
 
     backup_root = None
-    if not no_backup and (
-        plan.get("update")
-        or plan.get("bundle_managed_update")
-        or plan.get("remove")
+    if (
+        (
+            not no_backup
+            and (
+                plan.get("update")
+                or plan.get("bundle_managed_update")
+                or plan.get("remove")
+            )
+        )
+        or plan_has_force_backup(plan)
     ):
         backup_root = sync_backup_dir() / utc_stamp()
         backup_root.mkdir(parents=True, exist_ok=True)
@@ -2286,10 +3091,16 @@ def apply_bundle_section_plan(plan, section, no_backup=False):
     changed = []
 
     backup_root = None
-    if not no_backup and (
-        plan.get("update")
-        or plan.get("bundle_managed_update")
-        or plan.get("remove")
+    if (
+        (
+            not no_backup
+            and (
+                plan.get("update")
+                or plan.get("bundle_managed_update")
+                or plan.get("remove")
+            )
+        )
+        or plan_has_force_backup(plan)
     ):
         backup_root = sync_backup_dir() / utc_stamp()
         backup_root.mkdir(parents=True, exist_ok=True)
@@ -2485,6 +3296,35 @@ def write_report(report):
     return path
 
 
+def record_manifest_sync_report(report_path, report):
+    """Record last successful sync report details in the installed manifest."""
+    if report.get("dry_run"):
+        return
+
+    manifest = load_manifest()
+    source_metadata = report.get("source_metadata", {})
+    plan = report.get("plan", {})
+
+    entry = {
+        "created_utc": report.get("created_utc"),
+        "report": str(report_path),
+        "source": report.get("source"),
+        "source_sha256": source_metadata.get("sha256"),
+        "section": plan.get("section"),
+    }
+
+    history = list(manifest.get("sync_history", []))
+    history.append(entry)
+
+    manifest["last_sync_report"] = str(report_path)
+    manifest["last_sync_utc"] = report.get("created_utc")
+    manifest["last_sync_source"] = report.get("source")
+    manifest["last_sync_source_sha256"] = source_metadata.get("sha256")
+    manifest["sync_history"] = history[-20:]
+
+    save_manifest(manifest)
+
+
 def report_safe_value(value):
     """Return a YAML-safe value for reports."""
     if isinstance(value, Path):
@@ -2539,8 +3379,94 @@ def detected_section_paths(detected_sections):
     return result
 
 
-def source_report_metadata(source):
-    """Return basic source metadata without expensive checksum work."""
+def source_top_level_directories(source_root):
+    """Return top-level directories found in the prepared source root."""
+    source_root = Path(source_root)
+    directories = []
+
+    if not source_root.exists() or not source_root.is_dir():
+        return directories
+
+    try:
+        for item in sorted(source_root.iterdir()):
+            if item.is_dir():
+                directories.append(item.name)
+    except OSError:
+        return directories
+
+    return directories
+
+
+def source_file_sha256(path):
+    """Return SHA256 for a source file, or None when unavailable."""
+    path = Path(path)
+
+    if not path.exists() or not path.is_file():
+        return None
+
+    try:
+        return sha256_file(path)
+    except OSError:
+        return None
+
+
+def find_source_bundle_manifest(source_root):
+    """Return source aerolit-bundle.yml path if found."""
+    source_root = Path(source_root)
+
+    for root in candidate_roots(source_root):
+        manifest = root / "aerolit-bundle.yml"
+
+        if manifest.is_file():
+            return manifest
+
+    return None
+
+
+def source_bundle_metadata(source_root):
+    """Return best-effort bundle metadata from aerolit-bundle.yml."""
+    manifest = find_source_bundle_manifest(source_root)
+
+    metadata = {
+        "manifest_path": str(manifest) if manifest else None,
+        "manifest_found": bool(manifest),
+        "version": None,
+    }
+
+    if not manifest:
+        return metadata
+
+    try:
+        with manifest.open("r") as handle:
+            data = yaml_load(handle) or {}
+    except Exception as exc:
+        metadata["error"] = str(exc)
+        return metadata
+
+    if not isinstance(data, dict):
+        metadata["error"] = "bundle manifest is not a YAML mapping"
+        return metadata
+
+    metadata["version"] = (
+        data.get("version")
+        or data.get("bundle_version")
+        or data.get("aerolit_bundle_version")
+    )
+
+    if "name" in data:
+        metadata["name"] = data.get("name")
+
+    if "created" in data:
+        metadata["created"] = data.get("created")
+
+    if "created_utc" in data:
+        metadata["created_utc"] = data.get("created_utc")
+
+    return metadata
+
+
+def source_report_metadata(source, source_root=None):
+    """Return source metadata for reports."""
     path = Path(source).expanduser()
 
     metadata = {
@@ -2548,13 +3474,15 @@ def source_report_metadata(source):
         "exists": path.exists(),
         "kind": "missing",
         "size_bytes": None,
+        "sha256": None,
+        "prepared_source_root": str(source_root) if source_root else None,
+        "top_level_directories": [],
+        "bundle": {},
     }
 
     if path.is_dir():
         metadata["kind"] = "directory"
-        return metadata
-
-    if path.is_file():
+    elif path.is_file():
         metadata["kind"] = "file"
 
         try:
@@ -2562,7 +3490,19 @@ def source_report_metadata(source):
         except OSError:
             metadata["size_bytes"] = None
 
+        metadata["sha256"] = source_file_sha256(path)
+
+        try:
+            if source_is_tar(path):
+                metadata["archive_type"] = "tar"
+        except Exception:
+            metadata["archive_type"] = "unknown"
+    else:
         return metadata
+
+    if source_root:
+        metadata["top_level_directories"] = source_top_level_directories(source_root)
+        metadata["bundle"] = source_bundle_metadata(source_root)
 
     return metadata
 
@@ -2576,6 +3516,8 @@ def build_report(
     backup_root,
     dry_run,
     started_at=None,
+    source_root=None,
+    argv=None,
 ):
     """Build sync report data."""
     duration_seconds = None
@@ -2588,7 +3530,11 @@ def build_report(
         "created_utc": utc_iso(),
         "duration_seconds": duration_seconds,
         "source": str(source),
-        "source_metadata": source_report_metadata(source),
+        "argv": list(argv or []),
+        "source_metadata": source_report_metadata(
+            source,
+            source_root=source_root,
+        ),
         "bundle_path": str(bundle_path),
         "detected_sections": sorted(detected_sections.keys()),
         "detected_section_paths": detected_section_paths(detected_sections),
@@ -2598,8 +3544,10 @@ def build_report(
             "section": plan["section"],
             "counts": plan_counts(plan),
             "warnings": list(plan.get("warnings", [])),
+            "notes": list(plan.get("notes", [])),
             "conflicts": report_plan_items(plan, "conflicts"),
             "files": report_plan_files(plan),
+            "repo_metadata": report_safe_value(plan.get("repo_metadata", {})),
         },
         "changed": report_safe_value(changed),
         "backup_root": str(backup_root) if backup_root else None,
@@ -3716,6 +4664,370 @@ def selected_sections(args, detected_sections):
     return [requested]
 
 
+def path_mtime_utc(path):
+    """Return path modification time as UTC ISO string."""
+    path = Path(path)
+
+    try:
+        return datetime.utcfromtimestamp(path.stat().st_mtime).replace(
+            microsecond=0
+        ).isoformat() + "Z"
+    except OSError:
+        return "unknown"
+
+
+def newest_file(paths):
+    """Return newest existing file from a list of paths."""
+    files = [Path(path) for path in paths if Path(path).is_file()]
+
+    if not files:
+        return None
+
+    return sorted(files, key=lambda item: item.stat().st_mtime, reverse=True)[0]
+
+
+def newest_directory(paths):
+    """Return newest existing directory from a list of paths."""
+    dirs = [Path(path) for path in paths if Path(path).is_dir()]
+
+    if not dirs:
+        return None
+
+    return sorted(dirs, key=lambda item: item.stat().st_mtime, reverse=True)[0]
+
+
+def newest_sync_report():
+    """Return newest sync report path."""
+    report_dir = sync_log_dir()
+
+    if not report_dir.exists():
+        return None
+
+    return newest_file(report_dir.glob("*-sync-report.yml"))
+
+
+def newest_backup_dir():
+    """Return newest sync backup directory."""
+    backup_dir = sync_backup_dir()
+
+    if not backup_dir.exists():
+        return None
+
+    return newest_directory(backup_dir.iterdir())
+
+
+def immediate_child_dirs(path):
+    """Return immediate child directories."""
+    path = Path(path)
+
+    if not path.exists() or not path.is_dir():
+        return []
+
+    try:
+        return sorted([item for item in path.iterdir() if item.is_dir()])
+    except OSError:
+        return []
+
+
+def immediate_child_files(path):
+    """Return immediate child files."""
+    path = Path(path)
+
+    if not path.exists() or not path.is_dir():
+        return []
+
+    try:
+        return sorted([item for item in path.iterdir() if item.is_file()])
+    except OSError:
+        return []
+
+
+def status_staging_summary():
+    """Return staging directory summary."""
+    items = immediate_child_dirs(sync_staging_dir())
+    total_size = 0
+
+    for item in items:
+        total_size += directory_size_bytes(item)
+
+    return {
+        "count": len(items),
+        "size_bytes": total_size,
+        "size": format_bytes(total_size),
+        "items": items,
+    }
+
+
+def status_backup_summary():
+    """Return backup directory summary."""
+    items = immediate_child_dirs(sync_backup_dir())
+    total_size = 0
+
+    for item in items:
+        total_size += directory_size_bytes(item)
+
+    return {
+        "count": len(items),
+        "size_bytes": total_size,
+        "size": format_bytes(total_size),
+        "items": items,
+    }
+
+
+def status_report_summary():
+    """Return report file summary."""
+    report_dir = sync_log_dir()
+
+    if not report_dir.exists():
+        return {
+            "count": 0,
+            "size_bytes": 0,
+            "size": format_bytes(0),
+            "items": [],
+        }
+
+    items = []
+    for pattern in ("*-sync-report.yml", "*-cleanup-report.yml", "*-rollback-report.yml"):
+        items.extend(immediate_child_files(report_dir))
+
+    unique = []
+    seen = set()
+    for item in items:
+        if str(item) in seen:
+            continue
+        seen.add(str(item))
+        unique.append(item)
+
+    total_size = 0
+    for item in unique:
+        try:
+            total_size += item.stat().st_size
+        except OSError:
+            pass
+
+    return {
+        "count": len(unique),
+        "size_bytes": total_size,
+        "size": format_bytes(total_size),
+        "items": unique,
+    }
+
+
+def configured_sync_retention():
+    """Return configured sync retention values."""
+    try:
+        config = load_config()
+    except Exception:
+        config = {}
+
+    sync_config = config.get("sync", {})
+
+    return {
+        "keep": sync_config.get("backup_retention_count", 5),
+        "days": sync_config.get("backup_retention_days", 30),
+    }
+
+
+def manifest_locally_modified_files(bundle_path, manifest, limit=20):
+    """Return tracked files that no longer match the installed manifest."""
+    modified = []
+
+    for section_name, section in sorted(manifest.get("sections", {}).items()):
+        if section_name == SECTION_EXTRACTED_ISOS:
+            continue
+
+        files = section.get("files", {})
+        if not files:
+            continue
+
+        try:
+            root = section_target_path(bundle_path, section_name)
+        except ValueError:
+            root = Path(section.get("root") or "")
+
+        if not root:
+            continue
+
+        for relative, meta in sorted(files.items()):
+            expected = meta.get("checksum")
+            if not expected:
+                continue
+
+            path = Path(root) / relative
+
+            if not path.exists():
+                modified.append(
+                    {
+                        "section": section_name,
+                        "path": relative,
+                        "status": "missing",
+                    }
+                )
+                if len(modified) >= limit:
+                    return modified
+                continue
+
+            if not path.is_file():
+                modified.append(
+                    {
+                        "section": section_name,
+                        "path": relative,
+                        "status": "not regular file",
+                    }
+                )
+                if len(modified) >= limit:
+                    return modified
+                continue
+
+            try:
+                current = sha256_file(path)
+            except OSError:
+                modified.append(
+                    {
+                        "section": section_name,
+                        "path": relative,
+                        "status": "could not checksum",
+                    }
+                )
+                if len(modified) >= limit:
+                    return modified
+                continue
+
+            if current != expected:
+                modified.append(
+                    {
+                        "section": section_name,
+                        "path": relative,
+                        "status": "modified",
+                    }
+                )
+                if len(modified) >= limit:
+                    return modified
+
+    return modified
+
+
+def print_status_last_activity(manifest):
+    """Print last sync report and backup details."""
+    print("Last activity:")
+
+    last_report = manifest.get("last_sync_report")
+    last_sync_utc = manifest.get("last_sync_utc")
+    last_source = manifest.get("last_sync_source")
+    last_source_sha256 = manifest.get("last_sync_source_sha256")
+
+    if last_report:
+        print("  last sync report: {}".format(last_report))
+        print("  last sync time:   {}".format(last_sync_utc or "unknown"))
+        print("  last source:      {}".format(last_source or "unknown"))
+        if last_source_sha256:
+            print("  source sha256:    {}".format(last_source_sha256))
+    else:
+        newest_report = newest_sync_report()
+        if newest_report:
+            print("  newest report:    {}".format(newest_report))
+            print("  report modified:  {}".format(path_mtime_utc(newest_report)))
+        else:
+            print("  last sync report: none")
+
+    backup = newest_backup_dir()
+    if backup:
+        print("  last backup:      {}".format(backup))
+        print("  backup modified:  {}".format(path_mtime_utc(backup)))
+    else:
+        print("  last backup:      none")
+
+    print("")
+
+
+def print_status_retention():
+    """Print sync retention and stale item summary."""
+    retention = configured_sync_retention()
+    staging = status_staging_summary()
+    backups = status_backup_summary()
+    reports = status_report_summary()
+
+    print("Retention / cleanup:")
+    print("  keep:             {}".format(retention["keep"]))
+    print("  days:             {}".format(retention["days"]))
+    print("  staging dirs:     {} ({})".format(staging["count"], staging["size"]))
+    print("  backup dirs:      {} ({})".format(backups["count"], backups["size"]))
+    print("  report files:     {} ({})".format(reports["count"], reports["size"]))
+
+    if staging["count"]:
+        print("  note:             run 'aerolitctl sync cleanup --dry-run --show-files' to review stale staging.")
+
+    print("")
+
+
+def print_status_repo_versions(bundle_path):
+    """Print detected repo metadata summary from installed bundle."""
+    repos_root = bundle_repos_dir(bundle_path)
+    repo_metadata = repo_tree_metadata_summary(repos_root)
+
+    print("Detected repos:")
+
+    if not repo_metadata:
+        print("  none found")
+        print("")
+        return
+
+    for tree_name, info in sorted(repo_metadata.items()):
+        normalized = info.get("normalized_tree") or tree_name
+        metadata_count = info.get("metadata_count", 0)
+
+        print("  - {} ({})".format(tree_name, normalized))
+        print("      metadata locations: {}".format(metadata_count))
+
+    print("")
+
+
+def print_status_extracted_isos(bundle_path):
+    """Print detected extracted ISO tree summary from installed bundle."""
+    iso_root = bundle_extracted_isos_dir(bundle_path)
+    trees = extracted_iso_tree_dirs(iso_root)
+
+    print("Detected extracted ISOs:")
+
+    if not trees:
+        print("  none found")
+        print("")
+        return
+
+    for tree_name, path in sorted(trees.items()):
+        info = extracted_iso_tree_info(path)
+        print("  - {}: {}".format(tree_name, extracted_iso_version_label(info)))
+        print("      path: {}".format(path))
+        print("      BaseOS: {}".format("yes" if info.get("has_baseos") else "no"))
+        print("      AppStream: {}".format("yes" if info.get("has_appstream") else "no"))
+
+    print("")
+
+
+def print_status_local_modifications(bundle_path, manifest):
+    """Print tracked local modifications summary."""
+    modified = manifest_locally_modified_files(bundle_path, manifest, limit=20)
+
+    print("Tracked local changes:")
+
+    if not modified:
+        print("  none detected")
+        print("")
+        return
+
+    print("  showing first {}".format(len(modified)))
+    for item in modified:
+        print(
+            "  - {}:{} ({})".format(
+                item.get("section"),
+                item.get("path"),
+                item.get("status"),
+            )
+        )
+
+    print("")
+
+
 def configured_sync_value(name, default):
     """Return one configured sync value."""
     try:
@@ -3967,6 +5279,7 @@ def run_sync_status(args):
     bundle_path = resolve_bundle_path(args)
     manifest = load_manifest()
     sections = manifest.get("sections", {})
+    verbose = getattr(args, "verbose", False)
 
     print("AeroLIT sync status")
     print("")
@@ -3983,8 +5296,14 @@ def run_sync_status(args):
     print("  {}".format(sync_manifest_file().parent))
     print("")
 
+    print_status_last_activity(manifest)
+    print_status_retention()
+
     if not sections:
         print("No synced sections are currently tracked.")
+        print("")
+        print_status_repo_versions(bundle_path)
+        print_status_extracted_isos(bundle_path)
         return 0
 
     print("Tracked sections:")
@@ -4005,6 +5324,17 @@ def run_sync_status(args):
                 print("      - {}: {}".format(tree_name, version))
         else:
             print("    files: {}".format(len(files)))
+
+    print("")
+    print_status_repo_versions(bundle_path)
+    print_status_extracted_isos(bundle_path)
+
+    if verbose:
+        print_status_local_modifications(bundle_path, manifest)
+    else:
+        print("Tracked local changes:")
+        print("  run with --verbose to scan tracked files for local modifications")
+        print("")
 
     return 0
 
@@ -4146,12 +5476,37 @@ def run_sync_apply_or_diff(args, source, diff_mode=False):
             ):
                 plan["skipped"].append(item)
 
+        plan["_diff_lines"] = resolve_diff_line_limit(args)
+
+        diff_path = getattr(args, "path", None)
+
+        if diff_path and not diff_mode:
+            print(
+                "ERROR: --path is currently supported only with 'aerolitctl sync diff'.",
+                file=sys.stderr,
+            )
+            return 2
+
+        if diff_path:
+            diff_path = normalize_diff_path(
+                diff_path,
+                section=active_section,
+            )
+            plan = filter_plan_to_path(plan, diff_path)
+
         print_plan(
             plan,
             show_files=getattr(args, "show_files", False) or diff_mode,
             show_all_files=getattr(args, "show_all_files", False),
             show_skipped=getattr(args, "show_skipped", False),
         )
+
+        if diff_mode and diff_path:
+            show_diff_for_path(
+                plan,
+                diff_path,
+                max_lines=plan.get("_diff_lines", DEFAULT_DIFF_LINE_LIMIT),
+            )
 
         dry_run = bool(getattr(args, "dry_run", False) or diff_mode)
         preserve_file = sync_preserve_file(bundle_path)
@@ -4179,11 +5534,8 @@ def run_sync_apply_or_diff(args, source, diff_mode=False):
 
         if plan.get("conflicts"):
             print("")
-            print("Sync blocked because conflicts were found.")
-            print(
-                "Review the conflicts above, then either preserve those files, "
-                "rerun with --review-conflicts, or rerun with --force."
-            )
+            print("Sync blocked because possible user/manual changes were found.")
+            print_conflict_resolution_help()
             return 2
 
         if dry_run:
@@ -4196,6 +5548,8 @@ def run_sync_apply_or_diff(args, source, diff_mode=False):
                 backup_root=None,
                 dry_run=True,
                 started_at=started_at,
+                source_root=source_root,
+                argv=getattr(args, "_aerolitctl_argv", []),
             )
             report_path = write_report(report)
             print("")
@@ -4290,8 +5644,11 @@ def run_sync_apply_or_diff(args, source, diff_mode=False):
             backup_root=backup_root,
             dry_run=False,
             started_at=started_at,
+            source_root=source_root,
+            argv=getattr(args, "_aerolitctl_argv", []),
         )
         report_path = write_report(report)
+        record_manifest_sync_report(report_path, report)
 
         print("")
         print("AeroLIT sync completed.")
@@ -4340,6 +5697,8 @@ def usage_error():
     print("  aerolitctl sync diff /path/to/collections-hub.tar", file=sys.stderr)
     print("  aerolitctl sync baseline --section collections-hub", file=sys.stderr)
     print("  aerolitctl sync baseline --section all --dry-run", file=sys.stderr)
+    print("  aerolitctl sync diff /path/to/collections-hub.tar --diff-lines 80", file=sys.stderr)
+    print("  aerolitctl sync diff /path/to/collections-hub.tar --path ansible/site.yml", file=sys.stderr)
     return 2
 
 
