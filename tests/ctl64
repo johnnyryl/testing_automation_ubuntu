@@ -27,6 +27,13 @@ BACKUP_DIR = STATE_DIR / "backups"
 
 LOG_DIR = Path("/var/log/aerolit")
 
+SYNC_STATE_DIR = STATE_DIR / "sync"
+SYNC_STAGING_DIR = SYNC_STATE_DIR / "staging"
+SYNC_BACKUP_DIR = SYNC_STATE_DIR / "backups"
+SYNC_MANIFEST_FILE = SYNC_STATE_DIR / "installed-manifest.yml"
+SYNC_LOCK_FILE = SYNC_STATE_DIR / "sync.lock"
+SYNC_LOG_DIR = LOG_DIR / "sync"
+
 
 def required_control_directories():
     """Return non-bundle directories required by aerolitctl."""
@@ -41,6 +48,10 @@ def required_control_directories():
         RENDERED_DIR,
         BACKUP_DIR,
         LOG_DIR,
+        SYNC_STATE_DIR,
+        SYNC_STAGING_DIR,
+        SYNC_BACKUP_DIR,
+        SYNC_LOG_DIR,
     ]
 
 
@@ -232,6 +243,36 @@ def initialization_backup_root(bundle_path):
     return collections_hub_path(bundle_path) / ".initialization-backups"
 
 
+def sync_state_dir():
+    """Return aerolitctl sync state directory."""
+    return SYNC_STATE_DIR
+
+
+def sync_staging_dir():
+    """Return aerolitctl sync staging directory."""
+    return SYNC_STAGING_DIR
+
+
+def sync_backup_dir():
+    """Return aerolitctl sync backup directory."""
+    return SYNC_BACKUP_DIR
+
+
+def sync_manifest_file():
+    """Return aerolitctl installed sync manifest path."""
+    return SYNC_MANIFEST_FILE
+
+
+def sync_lock_file():
+    """Return aerolitctl sync lock file path."""
+    return SYNC_LOCK_FILE
+
+
+def sync_log_dir():
+    """Return aerolitctl sync log directory."""
+    return SYNC_LOG_DIR
+
+
 def bundle_derived_paths(bundle_path):
     """Return standard paths derived from the bundle root."""
     bundle_path = Path(bundle_path)
@@ -270,6 +311,12 @@ def bundle_derived_paths(bundle_path):
         "pxe_server_playbook": str(pxe_server_playbook(bundle_path)),
         "ansible_controller_playbook": str(ansible_controller_playbook(bundle_path)),
         "sync_preserve": str(sync_preserve_file(bundle_path)),
+        "sync_state": str(sync_state_dir()),
+        "sync_staging": str(sync_staging_dir()),
+        "sync_backups": str(sync_backup_dir()),
+        "sync_manifest": str(sync_manifest_file()),
+        "sync_lock": str(sync_lock_file()),
+        "sync_logs": str(sync_log_dir()),
         "gitlab_ci": str(gitlab_ci_file(bundle_path)),
         "initialization_backups": str(initialization_backup_root(bundle_path)),
     }
