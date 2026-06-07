@@ -1,0 +1,239 @@
+"""Config creation and YAML helpers for aerolitctl."""
+
+import shutil
+from datetime import datetime
+from pathlib import Path
+
+from . import __version__
+from .compat import yaml_dump, yaml_load
+from .paths import (
+    BACKUP_DIR,
+    CONFIG_FILE,
+    LOG_DIR,
+    OVERRIDE_KICKSTARTS_DIR,
+    RENDERED_DIR,
+    STATE_DIR,
+    ansible_cfg_file,
+    ansible_dir,
+    ansible_group_vars_all_dir,
+    ansible_group_vars_dir,
+    ansible_inventory_dir,
+    bundle_derived_paths,
+    aerolitctl_server_generated_vars_file,
+    gitlab_ci_file,
+    initialization_backup_root,
+    sync_preserve_file,
+    sync_backup_dir,
+    sync_log_dir,
+    sync_lock_file,
+    sync_manifest_file,
+    sync_staging_dir,
+    sync_state_dir,
+)
+
+
+def default_config(bundle_path):
+    """Build default aerolitctl config."""
+    bundle_path = Path(bundle_path)
+    paths = bundle_derived_paths(bundle_path)
+
+    return {
+        "version": 1,
+        "aerolitctl": {
+            "version": __version__,
+        },
+        "paths": {
+            **paths,
+            "config": str(CONFIG_FILE),
+            "state": str(STATE_DIR),
+            "logs": str(LOG_DIR),
+            "rendered": str(RENDERED_DIR),
+            "override_kickstarts": str(OVERRIDE_KICKSTARTS_DIR),
+        },
+        "server": {
+            "interface": None,
+            "ip_address": None,
+            "prefix": None,
+            "gateway": None,
+            "dns": [],
+            "configure_interface": False,
+            "nfs": {
+                "enabled": True,
+                "export_path": str(bundle_path),
+                "allowed_clients": None,
+            },
+            "pxe_http": {
+                "bind_address": "0.0.0.0",
+                "port": 18080,
+            },
+        },
+        "repos": {
+            "enabled": True,
+            "mode": "local",
+        },
+        "pxe": {
+            "enabled": True,
+            "default_profile": None,
+            "menu_timeout_seconds": 10,
+            "watcher_interval_seconds": 15,
+            "custom_kickstart_dir": str(OVERRIDE_KICKSTARTS_DIR),
+        },
+        "ansible": {
+            "enabled": True,
+            "root": str(ansible_dir(bundle_path)),
+            "config_path": str(ansible_cfg_file(bundle_path)),
+            "inventory_path": str(ansible_inventory_dir(bundle_path)),
+            "group_vars_path": str(ansible_group_vars_dir(bundle_path)),
+            "group_vars_all_path": str(ansible_group_vars_all_dir(bundle_path)),
+            "generated_vars_path": str(aerolitctl_server_generated_vars_file(bundle_path)),
+            "playbook_dir": str(ansible_dir(bundle_path)),
+        },
+        "sync": {
+            "preserve_file": str(sync_preserve_file(bundle_path)),
+            "initialization_backup_root": str(initialization_backup_root(bundle_path)),
+            "state_dir": str(sync_state_dir()),
+            "staging_dir": str(sync_staging_dir()),
+            "backup_dir": str(sync_backup_dir()),
+            "manifest_file": str(sync_manifest_file()),
+            "lock_file": str(sync_lock_file()),
+            "log_dir": str(sync_log_dir()),
+            "backup_retention_count": 5,
+            "backup_retention_days": 30,
+            "collections_hub_mode": "smart-mirror",
+            "files_mode": "additive",
+            "repos_mode": "additive",
+            "extracted_isos_mode": "replace-by-rhel-major",
+        },
+        "ci": {
+            "gitlab_ci_file": str(gitlab_ci_file(bundle_path)),
+        },
+    }
+
+
+def dump_yaml(data):
+    """Return YAML text."""
+    return yaml_dump(data)
+
+
+def load_config(path=CONFIG_FILE):
+    """Load aerolitctl config."""
+    path = Path(path)
+
+    if not path.exists():
+        raise FileNotFoundError(
+            "{} does not exist. Run: aerolitctl configure init".format(path)
+        )
+
+    with path.open("r") as handle:
+        return yaml_load(handle) or {}
+
+
+def config_backup_path(path=CONFIG_FILE):
+    """Return backup path for a config file."""
+    path = Path(path)
+    stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    backup_dir = BACKUP_DIR / "config"
+    backup_name = "{}.{}".format(path.name, stamp)
+    return backup_dir / backup_name
+
+
+def save_config(config, path=CONFIG_FILE, backup=True):
+    """Save aerolitctl config."""
+    path = Path(path)
+    backup_path = None
+
+    if backup and path.exists():
+        backup_path = config_backup_path(path)
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(path), str(backup_path))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(dump_yaml(config))
+
+    return backup_path
+
+
+def config_text(bundle_path):
+    """Return default config YAML text."""
+    return dump_yaml(default_config(bundle_path))
+
+
+def get_bundle_path(config):
+    """Return configured bundle path."""
+    return config.get("paths", {}).get("bundle")
+
+
+def update_bundle_path(config, bundle_path):
+    """Update bundle-derived paths without resetting user configuration."""
+    bundle_path = Path(bundle_path)
+    old_bundle_path = get_bundle_path(config)
+
+    config.setdefault("paths", {})
+    config["paths"].update(bundle_derived_paths(bundle_path))
+    config["paths"]["config"] = str(CONFIG_FILE)
+    config["paths"]["state"] = str(STATE_DIR)
+    config["paths"]["logs"] = str(LOG_DIR)
+    config["paths"]["rendered"] = str(RENDERED_DIR)
+    config["paths"]["override_kickstarts"] = str(OVERRIDE_KICKSTARTS_DIR)
+
+    server = config.setdefault("server", {})
+    nfs = server.setdefault("nfs", {})
+    current_export_path = nfs.get("export_path")
+
+    if not current_export_path or current_export_path == old_bundle_path:
+        nfs["export_path"] = str(bundle_path)
+
+    ansible = config.setdefault("ansible", {})
+    ansible["enabled"] = ansible.get("enabled", True)
+    ansible["root"] = str(ansible_dir(bundle_path))
+    ansible["config_path"] = str(ansible_cfg_file(bundle_path))
+    ansible["inventory_path"] = str(ansible_inventory_dir(bundle_path))
+    ansible["group_vars_path"] = str(ansible_group_vars_dir(bundle_path))
+    ansible["generated_vars_path"] = str(aerolitctl_server_generated_vars_file(bundle_path))
+    ansible["playbook_dir"] = str(ansible_dir(bundle_path))
+
+    sync = config.setdefault("sync", {})
+    sync["preserve_file"] = str(sync_preserve_file(bundle_path))
+    sync["initialization_backup_root"] = str(initialization_backup_root(bundle_path))
+    sync["state_dir"] = str(sync_state_dir())
+    sync["staging_dir"] = str(sync_staging_dir())
+    sync["backup_dir"] = str(sync_backup_dir())
+    sync["manifest_file"] = str(sync_manifest_file())
+    sync["lock_file"] = str(sync_lock_file())
+    sync["log_dir"] = str(sync_log_dir())
+    sync["backup_retention_count"] = sync.get("backup_retention_count", 5)
+    sync["backup_retention_days"] = sync.get("backup_retention_days", 30)
+    sync["collections_hub_mode"] = sync.get("collections_hub_mode", "smart-mirror")
+    sync["files_mode"] = sync.get("files_mode", "additive")
+    sync["repos_mode"] = sync.get("repos_mode", "additive")
+    sync["extracted_isos_mode"] = sync.get(
+        "extracted_isos_mode",
+        "replace-by-rhel-major",
+    )
+
+    ci = config.setdefault("ci", {})
+    ci["gitlab_ci_file"] = str(gitlab_ci_file(bundle_path))
+
+    pxe = config.setdefault("pxe", {})
+    pxe["custom_kickstart_dir"] = pxe.get(
+        "custom_kickstart_dir",
+        str(OVERRIDE_KICKSTARTS_DIR),
+    )
+
+    return config
+
+
+def set_bundle_path(bundle_path, path=CONFIG_FILE, backup=True):
+    """Set bundle path in aerolitctl config."""
+    config = load_config(path)
+
+    current_path = get_bundle_path(config)
+    new_path = str(Path(bundle_path))
+
+    if current_path == new_path:
+        return config, None, False
+
+    config = update_bundle_path(config, new_path)
+    backup_path = save_config(config, path=path, backup=backup)
+
+    return config, backup_path, True
