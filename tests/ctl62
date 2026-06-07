@@ -1015,6 +1015,22 @@ def add_sync_parser(subparsers):
         help="Show file-level add/update/remove/preserve details.",
     )
     sync_parser.add_argument(
+        "--show-all-files",
+        action="store_true",
+        help=(
+            "When used with --show-files, show every planned file instead of "
+            "limiting each file list."
+        ),
+    )
+    sync_parser.add_argument(
+        "--show-skipped",
+        action="store_true",
+        help=(
+            "When used with --show-files, also show skipped files such as "
+            "symlinks and preserved directories."
+        ),
+    )
+    sync_parser.add_argument(
         "--no-backup",
         action="store_true",
         help="Do not back up overwritten or removed collections-hub files.",
