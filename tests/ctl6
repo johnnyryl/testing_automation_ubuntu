@@ -1,3 +1,392 @@
+set -u
+
+LAB="/tmp/aerolit-sync-interactive-lab"
+TARGET="$LAB/target-bundle"
+INCOMING="$LAB/incoming"
+SOURCE_TAR="$LAB/incoming-collections-hub.tar"
+MANIFEST="/var/lib/aerolit/sync/installed-manifest.yml"
+MANIFEST_SAVE="$LAB/installed-manifest.original.yml"
+
+echo
+echo "================================================================================"
+echo "SETUP: temporary interactive sync lab"
+echo "================================================================================"
+
+rm -rf "$LAB"
+mkdir -p "$LAB"
+
+if [ -f "$MANIFEST" ]; then
+    cp -a "$MANIFEST" "$MANIFEST_SAVE"
+    echo "Saved current manifest:"
+    echo "  $MANIFEST_SAVE"
+else
+    echo "No existing manifest found."
+fi
+
+make_base_target() {
+    rm -rf "$TARGET" "$INCOMING" "$SOURCE_TAR"
+
+    mkdir -p "$TARGET/collections-hub/ansible"
+    mkdir -p "$TARGET/collections-hub/collections"
+
+    mkdir -p "$INCOMING/collections-hub/ansible"
+    mkdir -p "$INCOMING/collections-hub/collections"
+
+    cat > "$TARGET/collections-hub/README.md" <<'EOF'
+Target README
+EOF
+
+    cat > "$INCOMING/collections-hub/README.md" <<'EOF'
+Target README
+EOF
+}
+
+make_source_tar() {
+    rm -f "$SOURCE_TAR"
+    tar -C "$INCOMING" -cf "$SOURCE_TAR" collections-hub
+    ls -lh "$SOURCE_TAR"
+}
+
+restore_real_manifest() {
+    if [ -f "$MANIFEST_SAVE" ]; then
+        cp -a "$MANIFEST_SAVE" "$MANIFEST"
+        echo
+        echo "Restored original manifest:"
+        echo "  $MANIFEST"
+    else
+        rm -f "$MANIFEST"
+        echo
+        echo "Removed test manifest because no original manifest existed."
+    fi
+}
+
+echo
+echo "================================================================================"
+echo "TEST 33: unresolved conflict blocks sync"
+echo "================================================================================"
+
+make_base_target
+
+cat > "$TARGET/collections-hub/ansible/conflict-block.yml" <<'EOF'
+original block file
+EOF
+
+cat > "$INCOMING/collections-hub/ansible/conflict-block.yml" <<'EOF'
+incoming block file
+EOF
+
+make_source_tar
+
+aerolitctl sync baseline --bundle-path "$TARGET" --section collections-hub --yes
+
+cat > "$TARGET/collections-hub/ansible/conflict-block.yml" <<'EOF'
+local edited block file
+EOF
+
+aerolitctl sync "$SOURCE_TAR" --bundle-path "$TARGET" --section collections-hub --yes && {
+    echo "ERROR: conflict sync unexpectedly succeeded"
+    exit 1
+} || {
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+        echo "OK: unresolved conflict blocked sync with return code 2"
+    else
+        echo "ERROR: expected return code 2, got $rc"
+        exit 1
+    fi
+}
+
+echo
+echo "================================================================================"
+echo "TEST 34: interactive conflict review: d, k, p, u"
+echo "================================================================================"
+
+make_base_target
+
+cat > "$TARGET/collections-hub/ansible/conflict-keep.yml" <<'EOF'
+original keep file
+EOF
+cat > "$TARGET/collections-hub/ansible/conflict-preserve.yml" <<'EOF'
+original preserve file
+EOF
+cat > "$TARGET/collections-hub/ansible/conflict-use.yml" <<'EOF'
+original use file
+EOF
+
+cat > "$INCOMING/collections-hub/ansible/conflict-keep.yml" <<'EOF'
+incoming keep file
+EOF
+cat > "$INCOMING/collections-hub/ansible/conflict-preserve.yml" <<'EOF'
+incoming preserve file
+EOF
+cat > "$INCOMING/collections-hub/ansible/conflict-use.yml" <<'EOF'
+incoming use file
+EOF
+
+make_source_tar
+
+aerolitctl sync baseline --bundle-path "$TARGET" --section collections-hub --yes
+
+cat > "$TARGET/collections-hub/ansible/conflict-keep.yml" <<'EOF'
+local edited keep file
+EOF
+cat > "$TARGET/collections-hub/ansible/conflict-preserve.yml" <<'EOF'
+local edited preserve file
+EOF
+cat > "$TARGET/collections-hub/ansible/conflict-use.yml" <<'EOF'
+local edited use file
+EOF
+
+printf 'd\nk\np\nu\n' | aerolitctl sync "$SOURCE_TAR" --bundle-path "$TARGET" --section collections-hub --review-conflicts --yes
+
+echo
+echo "Conflict review result files:"
+echo "--- conflict-keep.yml"
+cat "$TARGET/collections-hub/ansible/conflict-keep.yml"
+echo "--- conflict-preserve.yml"
+cat "$TARGET/collections-hub/ansible/conflict-preserve.yml"
+echo "--- conflict-use.yml"
+cat "$TARGET/collections-hub/ansible/conflict-use.yml"
+
+echo
+echo "Preserve file contents:"
+cat "$TARGET/collections-hub/.sync-preserve"
+
+grep -q "local edited keep file" "$TARGET/collections-hub/ansible/conflict-keep.yml" \
+    && echo "OK: [k] kept local file for this run" \
+    || { echo "ERROR: [k] did not keep local file"; exit 1; }
+
+grep -q "local edited preserve file" "$TARGET/collections-hub/ansible/conflict-preserve.yml" \
+    && echo "OK: [p] kept local preserved file" \
+    || { echo "ERROR: [p] did not keep local file"; exit 1; }
+
+grep -q "incoming use file" "$TARGET/collections-hub/ansible/conflict-use.yml" \
+    && echo "OK: [u] used incoming file" \
+    || { echo "ERROR: [u] did not use incoming file"; exit 1; }
+
+grep -q "ansible/conflict-preserve.yml" "$TARGET/collections-hub/.sync-preserve" \
+    && echo "OK: [p] appended path to .sync-preserve" \
+    || { echo "ERROR: [p] did not append preserve path"; exit 1; }
+
+echo
+echo "================================================================================"
+echo "TEST 35: removal review skip all removals"
+echo "================================================================================"
+
+make_base_target
+
+cat > "$TARGET/collections-hub/ansible/remove-skip.yml" <<'EOF'
+safe remove skip file
+EOF
+
+make_source_tar
+
+aerolitctl sync baseline --bundle-path "$TARGET" --section collections-hub --yes
+
+printf 's\n' | aerolitctl sync "$SOURCE_TAR" --bundle-path "$TARGET" --section collections-hub --review-removals --yes
+
+test -f "$TARGET/collections-hub/ansible/remove-skip.yml" \
+    && echo "OK: skip all removals left file in place" \
+    || { echo "ERROR: skip all removals removed file"; exit 1; }
+
+echo
+echo "================================================================================"
+echo "TEST 36: removal review preserve selected"
+echo "================================================================================"
+
+make_base_target
+
+cat > "$TARGET/collections-hub/ansible/remove-preserve.yml" <<'EOF'
+safe remove preserve file
+EOF
+cat > "$TARGET/collections-hub/ansible/remove-other.yml" <<'EOF'
+safe remove other file
+EOF
+
+make_source_tar
+
+aerolitctl sync baseline --bundle-path "$TARGET" --section collections-hub --yes
+
+printf 'p\n1\n' | aerolitctl sync "$SOURCE_TAR" --bundle-path "$TARGET" --section collections-hub --review-removals --yes
+
+test -f "$TARGET/collections-hub/ansible/remove-preserve.yml" \
+    && echo "OK: selected preserved removal stayed" \
+    || { echo "ERROR: selected preserved removal was removed"; exit 1; }
+
+grep -q "ansible/remove-preserve.yml" "$TARGET/collections-hub/.sync-preserve" \
+    && echo "OK: selected removal was appended to .sync-preserve" \
+    || { echo "ERROR: selected removal was not appended to .sync-preserve"; exit 1; }
+
+test ! -f "$TARGET/collections-hub/ansible/remove-other.yml" \
+    && echo "OK: non-selected removal was removed" \
+    || { echo "ERROR: non-selected removal still exists"; exit 1; }
+
+echo
+echo "================================================================================"
+echo "TEST 37: removal review remove all and backup"
+echo "================================================================================"
+
+make_base_target
+
+cat > "$TARGET/collections-hub/ansible/remove-all.yml" <<'EOF'
+safe remove all file
+EOF
+
+make_source_tar
+
+aerolitctl sync baseline --bundle-path "$TARGET" --section collections-hub --yes
+
+before_backup_count="$(find /var/lib/aerolit/sync/backups -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
+
+printf 'r\n' | aerolitctl sync "$SOURCE_TAR" --bundle-path "$TARGET" --section collections-hub --review-removals --yes
+
+after_backup_count="$(find /var/lib/aerolit/sync/backups -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
+
+test ! -f "$TARGET/collections-hub/ansible/remove-all.yml" \
+    && echo "OK: remove all removed file" \
+    || { echo "ERROR: remove all did not remove file"; exit 1; }
+
+latest_backup="$(ls -1dt /var/lib/aerolit/sync/backups/* | head -1)"
+echo "Latest backup:"
+echo "  $latest_backup"
+
+find "$latest_backup" -type f | grep -q "remove-all.yml" \
+    && echo "OK: safe removal was backed up" \
+    || { echo "ERROR: removed file was not found in backup"; exit 1; }
+
+if [ "$after_backup_count" -gt "$before_backup_count" ]; then
+    echo "OK: backup directory count increased"
+else
+    echo "NOTE: backup directory count did not increase, but latest backup contained removed file"
+fi
+
+echo
+echo "================================================================================"
+echo "TEST 38: unsafe removal becomes conflict"
+echo "================================================================================"
+
+make_base_target
+
+cat > "$TARGET/collections-hub/ansible/remove-conflict.yml" <<'EOF'
+original conflict removal file
+EOF
+
+make_source_tar
+
+aerolitctl sync baseline --bundle-path "$TARGET" --section collections-hub --yes
+
+cat > "$TARGET/collections-hub/ansible/remove-conflict.yml" <<'EOF'
+local edited conflict removal file
+EOF
+
+aerolitctl sync "$SOURCE_TAR" --bundle-path "$TARGET" --section collections-hub --yes && {
+    echo "ERROR: unsafe removal unexpectedly succeeded"
+    restore_real_manifest
+    exit 1
+} || {
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+        echo "OK: unsafe removal became conflict and blocked sync"
+    else
+        echo "ERROR: expected return code 2 for unsafe removal conflict, got $rc"
+        restore_real_manifest
+        exit 1
+    fi
+}
+
+echo
+echo "================================================================================"
+echo "CLEANUP: restore real manifest"
+echo "================================================================================"
+
+restore_real_manifest
+
+echo
+echo "================================================================================"
+echo "DONE: interactive conflict/removal tests completed"
+echo "================================================================================"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 aerolitctl sync /tmp/aerolit-tar-safety/aerolit-tar-safety.tar --section collections-hub --dry-run --show-files --show-skipped
 
 latest_report="$(ls -1t /var/log/aerolit/sync/*sync-report.yml /var/log/aerolit/sync/*multi-section-sync-plan.yml 2>/dev/null | head -1)"
