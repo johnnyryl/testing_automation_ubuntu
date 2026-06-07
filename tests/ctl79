@@ -6,8 +6,11 @@ import difflib
 import errno
 import fnmatch
 import hashlib
+import json
 import os
+import shlex
 import shutil
+import subprocess
 import sys
 import tarfile
 import time
@@ -49,6 +52,13 @@ SUPPORTED_SECTIONS = (
     SECTION_EXTRACTED_ISOS,
 )
 
+MULTI_SECTION_PLAN_ORDER = (
+    SECTION_COLLECTIONS_HUB,
+    SECTION_FILES,
+    SECTION_REPOS,
+    SECTION_EXTRACTED_ISOS,
+)
+
 KNOWN_SECTIONS = (
     SECTION_COLLECTIONS_HUB,
     "files",
@@ -77,6 +87,11 @@ DEFAULT_FILES_PRESERVE_PATTERNS = (
 
 BUNDLE_MANAGED_COLLECTIONS_PATTERNS = (
     "collections/ansible_collections/**",
+)
+
+PRESERVE_SUPPORTED_SECTIONS = (
+    SECTION_COLLECTIONS_HUB,
+    SECTION_FILES,
 )
 
 
@@ -577,9 +592,264 @@ def write_preserve_file_patterns(preserve_file, patterns):
     preserve_file.write_text("\n".join(lines) + "\n")
 
 
-def add_preserve_pattern(preserve_file, pattern):
+def preserve_defaults_for_section(section):
+    """Return built-in preserve defaults for one section."""
+    if section == SECTION_FILES:
+        return DEFAULT_FILES_PRESERVE_PATTERNS
+
+    return DEFAULT_COLLECTIONS_HUB_PRESERVE_PATTERNS
+
+
+def normalize_preserve_section_name(section):
+    """Normalize preserve section name."""
+    section = str(section or "all").strip()
+
+    if section == "extracted-isos":
+        section = SECTION_EXTRACTED_ISOS
+
+    if section == "collections_hub":
+        section = SECTION_COLLECTIONS_HUB
+
+    if section == "all":
+        return None
+
+    if section in PRESERVE_SUPPORTED_SECTIONS:
+        return section
+
+    raise ValueError(
+        "Preserve rules currently support only collections-hub and files."
+    )
+
+
+def preserve_sections_for_display(args):
+    """Return preserve sections selected for display/defaults."""
+    requested = normalize_preserve_section_name(
+        getattr(args, "section", "all")
+    )
+
+    if requested:
+        return [requested]
+
+    return list(PRESERVE_SUPPORTED_SECTIONS)
+
+
+def infer_preserve_section(args, pattern=None):
+    """Infer preserve section from --section or pattern prefix."""
+    requested = normalize_preserve_section_name(
+        getattr(args, "section", "all")
+    )
+
+    if requested:
+        return requested
+
+    pattern = str(pattern or "").strip()
+
+    while pattern.startswith("./"):
+        pattern = pattern[2:]
+
+    pattern = pattern.lstrip("/")
+
+    if pattern.startswith("files/"):
+        return SECTION_FILES
+
+    return SECTION_COLLECTIONS_HUB
+
+
+def normalize_preserve_pattern_for_section(pattern, section):
+    """Normalize a preserve pattern relative to one section root."""
+    pattern = str(pattern).strip()
+
+    while pattern.startswith("./"):
+        pattern = pattern[2:]
+
+    pattern = pattern.lstrip("/")
+
+    if section == SECTION_FILES and pattern.startswith("files/"):
+        pattern = pattern[len("files/"):]
+
+    if section == SECTION_COLLECTIONS_HUB:
+        if pattern.startswith("collections-hub/"):
+            pattern = pattern[len("collections-hub/"):]
+        if pattern.startswith("collections_hub/"):
+            pattern = pattern[len("collections_hub/"):]
+
+    return pattern
+
+
+def normalize_preserve_path_for_section(path, section):
+    """Normalize a user path for preserve explain."""
+    return normalize_preserve_pattern_for_section(path, section)
+
+
+def ensure_preserve_file_exists(preserve_file):
+    """Create an empty preserve file if missing."""
+    preserve_file = Path(preserve_file)
+
+    if preserve_file.exists():
+        return
+
+    write_preserve_file_patterns(preserve_file, [])
+
+
+def validate_preserve_file(preserve_file):
+    """Validate preserve file syntax."""
+    entries = read_preserve_file_entries(preserve_file)
+    errors = []
+    warnings = []
+
+    for pattern in entries["patterns"]:
+        normalized = normalize_relative_path(pattern)
+
+        if not normalized:
+            errors.append("empty preserve pattern")
+            continue
+
+        if Path(normalized).is_absolute():
+            errors.append("absolute paths are not allowed: {}".format(pattern))
+
+        parts = Path(normalized).parts
+        if ".." in parts:
+            errors.append("parent traversal is not allowed: {}".format(pattern))
+
+        if normalized.startswith("repos/"):
+            warnings.append(
+                "repos/ preserve patterns are not currently used by sync: {}".format(
+                    pattern
+                )
+            )
+
+        if normalized.startswith("extracted_isos/") or normalized.startswith(
+            "extracted-isos/"
+        ):
+            warnings.append(
+                "extracted_isos/ preserve patterns are not currently used by sync: {}".format(
+                    pattern
+                )
+            )
+
+    return entries, errors, warnings
+
+
+def print_preserve_validation(bundle_path):
+    """Print preserve file validation results."""
+    preserve_file = sync_preserve_file(bundle_path)
+    entries, errors, warnings = validate_preserve_file(preserve_file)
+
+    print("AeroLIT sync preserve validation")
+    print("")
+    print("Preserve file:")
+    print("  {}".format(preserve_file))
+    print("")
+    print("Patterns:")
+    print("  {}".format(len(entries["patterns"])))
+
+    if warnings:
+        print("")
+        print("Warnings:")
+        for warning in warnings:
+            print("  - {}".format(warning))
+
+    if errors:
+        print("")
+        print("Errors:")
+        for error in errors:
+            print("  - {}".format(error))
+        return 1
+
+    print("")
+    print("Validation passed.")
+    return 0
+
+
+def explain_preserve_path(bundle_path, section, path):
+    """Explain whether a path is protected by preserve rules."""
+    preserve_file = sync_preserve_file(bundle_path)
+    entries = read_preserve_file_entries(preserve_file)
+    defaults = preserve_defaults_for_section(section)
+    normalized_path = normalize_preserve_path_for_section(path, section)
+
+    user_matches = []
+    default_matches = []
+
+    for pattern in entries["patterns"]:
+        normalized_pattern = normalize_preserve_pattern_for_section(
+            pattern,
+            section,
+        )
+        if path_matches_pattern(normalized_path, normalized_pattern):
+            user_matches.append(pattern)
+
+    for pattern in defaults:
+        if path_matches_pattern(normalized_path, pattern):
+            default_matches.append(pattern)
+
+    print("AeroLIT sync preserve explanation")
+    print("")
+    print("Section:")
+    print("  {}".format(section))
+    print("")
+    print("Path:")
+    print("  {}".format(path))
+    print("")
+    print("Normalized path:")
+    print("  {}".format(normalized_path))
+    print("")
+    print("Preserve file:")
+    print("  {}".format(preserve_file))
+    print("")
+
+    if user_matches or default_matches:
+        print("Result:")
+        print("  preserved")
+    else:
+        print("Result:")
+        print("  not preserved")
+
+    if user_matches:
+        print("")
+        print("Matching user/project patterns:")
+        for pattern in user_matches:
+            print("  - {}".format(pattern))
+
+    if default_matches:
+        print("")
+        print("Matching built-in default patterns:")
+        for pattern in default_matches:
+            print("  - {}".format(pattern))
+
+    if not user_matches and not default_matches:
+        print("")
+        print("No preserve patterns matched this path.")
+
+    return 0
+
+
+def edit_preserve_file(preserve_file):
+    """Open preserve file in the user's editor."""
+    ensure_preserve_file_exists(preserve_file)
+
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+
+    if not editor:
+        print("ERROR: VISUAL or EDITOR is not set.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Preserve file:")
+        print("  {}".format(preserve_file))
+        return 2
+
+    command = shlex.split(editor)
+    command.append(str(preserve_file))
+
+    try:
+        return subprocess.call(command)
+    except OSError as exc:
+        print("ERROR: Could not launch editor: {}".format(exc), file=sys.stderr)
+        return 1
+
+
+def add_preserve_pattern(preserve_file, pattern, section=SECTION_COLLECTIONS_HUB):
     """Add one preserve pattern if missing."""
-    pattern = normalize_preserve_pattern(pattern)
+    pattern = normalize_preserve_pattern_for_section(pattern, section)
 
     if not pattern:
         raise ValueError("Preserve pattern cannot be empty.")
@@ -606,9 +876,9 @@ def add_preserve_pattern(preserve_file, pattern):
     return True, pattern
 
 
-def remove_preserve_pattern(preserve_file, pattern):
+def remove_preserve_pattern(preserve_file, pattern, section=SECTION_COLLECTIONS_HUB):
     """Remove one preserve pattern if present."""
-    pattern = normalize_preserve_pattern(pattern)
+    pattern = normalize_preserve_pattern_for_section(pattern, section)
     entries = read_preserve_file_entries(preserve_file)
     patterns = list(entries["patterns"])
 
@@ -621,10 +891,11 @@ def remove_preserve_pattern(preserve_file, pattern):
     return True, pattern
 
 
-def print_preserve_patterns(bundle_path, include_defaults=False):
-    """Print preserve patterns for the active collections-hub."""
+def print_preserve_patterns(bundle_path, include_defaults=False, sections=None):
+    """Print preserve patterns for the active bundle."""
     preserve_file = sync_preserve_file(bundle_path)
     entries = read_preserve_file_entries(preserve_file)
+    sections = list(sections or [SECTION_COLLECTIONS_HUB])
 
     print("AeroLIT sync preserve rules")
     print("")
@@ -644,10 +915,11 @@ def print_preserve_patterns(bundle_path, include_defaults=False):
         print("  none")
 
     if include_defaults:
-        print("")
-        print("Built-in default preserve patterns:")
-        for pattern in DEFAULT_COLLECTIONS_HUB_PRESERVE_PATTERNS:
-            print("  - {}".format(pattern))
+        for section in sections:
+            print("")
+            print("Built-in default preserve patterns for {}:".format(section))
+            for pattern in preserve_defaults_for_section(section):
+                print("  - {}".format(pattern))
 
     return 0
 
@@ -665,6 +937,9 @@ def run_sync_preserve(args, raw_args):
         print("  aerolitctl sync preserve add ansible/group_vars/all/site.yml", file=sys.stderr)
         print("  aerolitctl sync preserve remove ansible/group_vars/all/site.yml", file=sys.stderr)
         print("  aerolitctl sync preserve defaults", file=sys.stderr)
+        print("  aerolitctl sync preserve validate", file=sys.stderr)
+        print("  aerolitctl sync preserve explain ansible/inventory/hosts.ini", file=sys.stderr)
+        print("  aerolitctl sync preserve edit", file=sys.stderr)
         return 2
 
     command = raw_args[0]
@@ -676,16 +951,34 @@ def run_sync_preserve(args, raw_args):
             or "--defaults" in raw_args
             or "--all" in raw_args
         )
+        try:
+            sections = preserve_sections_for_display(args)
+        except ValueError as exc:
+            print("ERROR: {}".format(exc), file=sys.stderr)
+            return 2
+
         return print_preserve_patterns(
             bundle_path,
             include_defaults=include_defaults,
+            sections=sections,
         )
 
     if command == "defaults":
-        added = ensure_preserve_file_defaults(
-            preserve_file,
-            DEFAULT_COLLECTIONS_HUB_PRESERVE_PATTERNS,
-        )
+        try:
+            sections = preserve_sections_for_display(args)
+        except ValueError as exc:
+            print("ERROR: {}".format(exc), file=sys.stderr)
+            return 2
+
+        added_by_section = []
+
+        for section in sections:
+            added = ensure_preserve_file_defaults(
+                preserve_file,
+                preserve_defaults_for_section(section),
+            )
+            for pattern in added:
+                added_by_section.append((section, pattern))
 
         print("AeroLIT sync preserve defaults")
         print("")
@@ -693,13 +986,13 @@ def run_sync_preserve(args, raw_args):
         print("  {}".format(preserve_file))
         print("")
 
-        if not added:
+        if not added_by_section:
             print("No changes made. Default preserve rules are already present.")
             return 0
 
         print("Added default preserve patterns:")
-        for pattern in added:
-            print("  - {}".format(pattern))
+        for section, pattern in added_by_section:
+            print("  - {}: {}".format(section, pattern))
 
         return 0
 
@@ -711,7 +1004,17 @@ def run_sync_preserve(args, raw_args):
         changed_any = False
 
         for pattern in raw_args[1:]:
-            changed, normalized = add_preserve_pattern(preserve_file, pattern)
+            try:
+                section = infer_preserve_section(args, pattern)
+            except ValueError as exc:
+                print("ERROR: {}".format(exc), file=sys.stderr)
+                return 2
+
+            changed, normalized = add_preserve_pattern(
+                preserve_file,
+                pattern,
+                section=section,
+            )
             changed_any = changed_any or changed
 
             if changed:
@@ -720,6 +1023,7 @@ def run_sync_preserve(args, raw_args):
                 print("Preserve pattern already exists:")
 
             print("  {}".format(normalized))
+            print("  section: {}".format(section))
 
         print("")
         print("Preserve file:")
@@ -735,7 +1039,17 @@ def run_sync_preserve(args, raw_args):
         changed_any = False
 
         for pattern in raw_args[1:]:
-            changed, normalized = remove_preserve_pattern(preserve_file, pattern)
+            try:
+                section = infer_preserve_section(args, pattern)
+            except ValueError as exc:
+                print("ERROR: {}".format(exc), file=sys.stderr)
+                return 2
+
+            changed, normalized = remove_preserve_pattern(
+                preserve_file,
+                pattern,
+                section=section,
+            )
             changed_any = changed_any or changed
 
             if changed:
@@ -744,12 +1058,36 @@ def run_sync_preserve(args, raw_args):
                 print("Preserve pattern not found:")
 
             print("  {}".format(normalized))
+            print("  section: {}".format(section))
 
         print("")
         print("Preserve file:")
         print("  {}".format(preserve_file))
 
         return 0 if changed_any else 1
+
+    if command == "validate":
+        return print_preserve_validation(bundle_path)
+
+    if command == "explain":
+        if len(raw_args) < 2:
+            print("ERROR: Missing path to explain.", file=sys.stderr)
+            print("Example:", file=sys.stderr)
+            print("  aerolitctl sync preserve explain ansible/inventory/hosts.ini", file=sys.stderr)
+            return 2
+
+        target_path = raw_args[1]
+
+        try:
+            section = infer_preserve_section(args, target_path)
+        except ValueError as exc:
+            print("ERROR: {}".format(exc), file=sys.stderr)
+            return 2
+
+        return explain_preserve_path(bundle_path, section, target_path)
+
+    if command == "edit":
+        return edit_preserve_file(preserve_file)
 
     print("ERROR: Unknown preserve command: {}".format(command), file=sys.stderr)
     print("", file=sys.stderr)
@@ -758,6 +1096,9 @@ def run_sync_preserve(args, raw_args):
     print("  add", file=sys.stderr)
     print("  remove", file=sys.stderr)
     print("  defaults", file=sys.stderr)
+    print("  validate", file=sys.stderr)
+    print("  explain", file=sys.stderr)
+    print("  edit", file=sys.stderr)
     return 2
 
 
@@ -1277,6 +1618,83 @@ def normalized_repo_tree_name(name):
     return str(name).strip()
 
 
+def normalized_repo_major_name(name):
+    """Return normalized repo major name like rhel8, or None."""
+    cleaned = str(name or "").strip().lower()
+    cleaned = cleaned.replace("-", "").replace("_", "").replace(".", "")
+
+    prefixes = ("rhel", "el")
+
+    for prefix in prefixes:
+        if not cleaned.startswith(prefix):
+            continue
+
+        suffix = cleaned[len(prefix):]
+        digits = []
+
+        for char in suffix:
+            if not char.isdigit():
+                break
+            digits.append(char)
+
+        if digits:
+            return "rhel{}".format("".join(digits))
+
+    return None
+
+
+def repo_major_from_relative_path(relative_path):
+    """Return normalized repo major from any component in a repo path."""
+    parts = normalize_relative_path(relative_path).split("/")
+
+    for part in parts:
+        normalized = normalized_repo_major_name(part)
+
+        if normalized:
+            return normalized
+
+    return None
+
+
+def repo_major_names_from_file_map(file_map):
+    """Return normalized repo majors detected from scanned repo files."""
+    majors = set()
+
+    for relative in file_map:
+        major = repo_major_from_relative_path(relative)
+
+        if major:
+            majors.add(major)
+
+    return sorted(majors)
+
+
+def repo_top_levels_by_major(file_map):
+    """Return mapping of normalized repo major to top-level repo trees."""
+    result = {}
+
+    for relative in file_map:
+        major = repo_major_from_relative_path(relative)
+
+        if not major:
+            continue
+
+        top_level = top_level_name(relative)
+
+        if not top_level:
+            continue
+
+        result.setdefault(major, [])
+
+        if top_level not in result[major]:
+            result[major].append(top_level)
+
+    for major in result:
+        result[major] = sorted(result[major])
+
+    return result
+
+
 def repo_metadata_file(repo_root):
     """Return repo metadata file path for one repo root."""
     return Path(repo_root) / "repodata" / "repomd.xml"
@@ -1329,9 +1747,12 @@ def repo_tree_metadata_summary(root):
 
         metadata_dirs = find_repo_metadata_dirs(child)
 
+        normalized_major = normalized_repo_major_name(child.name)
+
         summary[child.name] = {
             "tree": child.name,
             "normalized_tree": normalized_repo_tree_name(child.name),
+            "normalized_major": normalized_major,
             "path": str(child),
             "metadata_count": len(metadata_dirs),
             "metadata_dirs": [str(path) for path in metadata_dirs],
@@ -1360,8 +1781,15 @@ def build_repos_plan(source_path, target_path, manifest, force=False, mode="addi
     previous_files = manifest_section_files(manifest, SECTION_REPOS)
     previous_exists = bool(previous_files)
     incoming_top_levels = top_level_names(source_files)
+    incoming_repo_majors = repo_major_names_from_file_map(source_files)
+    incoming_top_levels_by_major = repo_top_levels_by_major(source_files)
     repo_metadata = repo_tree_metadata_summary(source_path)
+
     plan["repo_metadata"] = repo_metadata
+    plan["repo_majors"] = {
+        "incoming": incoming_repo_majors,
+        "incoming_top_levels_by_major": incoming_top_levels_by_major,
+    }
 
     if not previous_exists:
         plan["warnings"].append(
@@ -1384,6 +1812,7 @@ def build_repos_plan(source_path, target_path, manifest, force=False, mode="addi
                     ", ".join(sorted(missing_metadata))
                 )
             )
+            add_createrepo_c_repo_note(plan, missing_metadata=True)
 
         metadata_count = 0
         for tree_info in repo_metadata.values():
@@ -1399,9 +1828,24 @@ def build_repos_plan(source_path, target_path, manifest, force=False, mode="addi
             plan["warnings"].append(
                 "Incoming repos/ source does not contain any repodata/repomd.xml files."
             )
+            add_createrepo_c_repo_note(plan, missing_metadata=True)
     else:
         plan["warnings"].append(
             "Incoming repos/ source has no top-level repo trees to inspect."
+        )
+
+    if repo_metadata:
+        add_createrepo_c_repo_note(plan, missing_metadata=False)
+
+    if incoming_repo_majors:
+        plan["notes"].append(
+            "Incoming repos/ source includes normalized RHEL repo major(s): {}.".format(
+                ", ".join(incoming_repo_majors)
+            )
+        )
+    else:
+        plan["warnings"].append(
+            "Incoming repos/ source did not contain recognizable RHEL repo major names like rhel8, rhel9, or rhel10."
         )
 
     if mode == "additive":
@@ -1666,6 +2110,159 @@ def directory_size_bytes(path):
     return total
 
 
+def count_regular_files(root):
+    """Return number of regular files under root."""
+    root = Path(root)
+
+    if not root.exists():
+        return 0
+
+    if root.is_file():
+        return 1
+
+    count = 0
+
+    for current_root, dirnames, filenames in os.walk(str(root), followlinks=False):
+        current_root_path = Path(current_root)
+
+        kept_dirnames = []
+        for dirname in dirnames:
+            child = current_root_path / dirname
+            if child.is_symlink():
+                continue
+            kept_dirnames.append(dirname)
+
+        dirnames[:] = kept_dirnames
+
+        for filename in filenames:
+            item = current_root_path / filename
+
+            try:
+                if item.is_symlink() or not item.is_file():
+                    continue
+                count += 1
+            except OSError:
+                continue
+
+    return count
+
+
+def backup_metadata_file(backup_root):
+    """Return backup metadata file path."""
+    return Path(backup_root) / "aerolit-sync-backup.yml"
+
+
+def pre_sync_manifest_backup_file(backup_root):
+    """Return pre-sync manifest backup path."""
+    return Path(backup_root) / "installed-manifest.before.yml"
+
+
+def write_pre_sync_manifest_backup(backup_root, manifest):
+    """Write the pre-sync manifest into the backup root."""
+    if not backup_root:
+        return None
+
+    path = pre_sync_manifest_backup_file(backup_root)
+    write_yaml_file(path, manifest)
+    return path
+
+
+def backup_summary(backup_root):
+    """Return backup size/count summary."""
+    if not backup_root:
+        return {}
+
+    backup_root = Path(backup_root)
+    size_bytes = directory_size_bytes(backup_root)
+
+    return {
+        "path": str(backup_root),
+        "exists": backup_root.exists(),
+        "size_bytes": size_bytes,
+        "size": format_bytes(size_bytes),
+        "file_count": count_regular_files(backup_root),
+        "metadata_file": str(backup_metadata_file(backup_root)),
+        "pre_sync_manifest": (
+            str(pre_sync_manifest_backup_file(backup_root))
+            if pre_sync_manifest_backup_file(backup_root).exists()
+            else None
+        ),
+    }
+
+
+def write_backup_metadata(
+    backup_root,
+    report_path,
+    report,
+    pre_sync_manifest_path=None,
+):
+    """Write metadata describing a sync backup."""
+    if not backup_root:
+        return None
+
+    metadata_path = backup_metadata_file(backup_root)
+    plan = report.get("plan", {})
+
+    metadata = {
+        "kind": "AeroLITSyncBackup",
+        "created_utc": utc_iso(),
+        "backup_root": str(backup_root),
+        "report": str(report_path),
+        "source": report.get("source"),
+        "section": plan.get("section"),
+        "pre_sync_manifest": (
+            str(pre_sync_manifest_path) if pre_sync_manifest_path else None
+        ),
+        "summary": backup_summary(backup_root),
+    }
+
+    write_yaml_file(metadata_path, metadata)
+    return metadata_path
+
+
+def read_backup_metadata_for_report(report):
+    """Return backup metadata for a sync report, if available."""
+    backup_root = report.get("backup_root")
+
+    if not backup_root:
+        return None
+
+    metadata_path = backup_metadata_file(backup_root)
+
+    if not metadata_path.exists():
+        return None
+
+    data = read_yaml_file(metadata_path, default=None)
+
+    if not isinstance(data, dict):
+        return None
+
+    return data
+
+
+def restore_pre_sync_manifest_from_backup(report):
+    """Restore the pre-sync manifest recorded with a backup."""
+    metadata = read_backup_metadata_for_report(report)
+
+    if not metadata:
+        return None
+
+    manifest_path = metadata.get("pre_sync_manifest")
+
+    if not manifest_path:
+        return None
+
+    manifest_path = Path(manifest_path)
+
+    if not manifest_path.exists():
+        return None
+
+    sync_manifest_file().parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(manifest_path), str(sync_manifest_file()))
+
+    return manifest_path
+
+
 def filesystem_free_bytes(path):
     """Return free bytes on the filesystem containing path."""
     path = Path(path)
@@ -1702,6 +2299,67 @@ def disk_space_check_for_keep_old(source_tree, target_tree, target_root):
         "required": format_bytes(required_bytes),
         "ok": free_bytes is not None and free_bytes >= required_bytes,
     }
+
+
+def keep_old_iso_tree_requested(args):
+    """Return True when old extracted ISO trees should be archived before replacement."""
+    return bool(
+        getattr(args, "keep_old_isos", False)
+        or getattr(args, "large_backup", False)
+    )
+
+
+def add_requested_option_notes(plan, args):
+    """Add notes for optional sync flags."""
+    if getattr(args, "restart_affected", False):
+        plan["notes"].append(
+            "--restart-affected was requested. This sync command does not "
+            "restart services automatically yet; restart or redeploy affected "
+            "services after reviewing the sync result if needed."
+        )
+
+    if getattr(args, "large_backup", False):
+        if plan.get("section") == SECTION_EXTRACTED_ISOS:
+            plan["notes"].append(
+                "--large-backup is enabled for extracted_isos. Existing selected "
+                "RHEL major trees will be moved to extracted_isos/archive before replacement."
+            )
+        else:
+            plan["notes"].append(
+                "--large-backup was requested. Small-file sections already back up "
+                "changed files when backups are enabled; large backup behavior is "
+                "currently only meaningful for extracted_isos."
+            )
+
+
+def createrepo_c_available():
+    """Return createrepo_c path if available."""
+    return shutil.which("createrepo_c")
+
+
+def add_createrepo_c_repo_note(plan, missing_metadata=False):
+    """Add an optional createrepo_c note for repo metadata situations."""
+    createrepo_path = createrepo_c_available()
+
+    if missing_metadata:
+        if createrepo_path:
+            plan["notes"].append(
+                "createrepo_c is available at {}. If this repo content is intended "
+                "to be served as a yum/dnf repo, repo metadata can be regenerated "
+                "outside sync after review.".format(createrepo_path)
+            )
+        else:
+            plan["notes"].append(
+                "createrepo_c is not installed. If repo metadata must be regenerated "
+                "later, install createrepo_c and run it manually after review."
+            )
+        return
+
+    if createrepo_path:
+        plan["notes"].append(
+            "createrepo_c is available at {} if repo metadata regeneration is "
+            "needed later.".format(createrepo_path)
+        )
 
 
 def selected_rhel_tree_names(args, incoming_trees):
@@ -1750,9 +2408,10 @@ def build_extracted_isos_plan(source_path, target_path, args):
         "extracted_isos sync replaces entire RHEL major trees. It does not perform file-by-file backup."
     )
 
-    if getattr(args, "keep_old_isos", False):
+    if keep_old_iso_tree_requested(args):
         plan["notes"].append(
-            "--keep-old-isos is enabled. Existing trees will be moved to extracted_isos/archive before replacement."
+            "Large extracted ISO backup behavior is enabled. Existing selected "
+            "trees will be moved to extracted_isos/archive before replacement."
         )
 
     for name in selected_names:
@@ -1789,7 +2448,7 @@ def build_extracted_isos_plan(source_path, target_path, args):
                 )
             )
 
-        if target_tree and getattr(args, "keep_old_isos", False):
+        if target_tree and keep_old_iso_tree_requested(args):
             disk_check = disk_space_check_for_keep_old(
                 source_tree,
                 target_tree,
@@ -1820,7 +2479,7 @@ def build_extracted_isos_plan(source_path, target_path, args):
 
         if target_tree:
             item["reason"] = "replace existing extracted ISO tree"
-            item["action"] = "archive then replace" if getattr(args, "keep_old_isos", False) else "delete then replace"
+            item["action"] = "archive then replace" if keep_old_iso_tree_requested(args) else "delete then replace"
             plan["tree_replace"].append(item)
         else:
             item["reason"] = "add new extracted ISO tree"
@@ -1939,14 +2598,30 @@ def print_repo_metadata_details(plan):
     if not repo_metadata:
         return
 
+    repo_majors = plan.get("repo_majors") or {}
+    incoming_majors = repo_majors.get("incoming") or []
+    by_major = repo_majors.get("incoming_top_levels_by_major") or {}
+
+    if incoming_majors:
+        print("")
+        print("Repo RHEL majors:")
+        for major in incoming_majors:
+            top_levels = by_major.get(major, [])
+            if top_levels:
+                print("  - {}: {}".format(major, ", ".join(top_levels)))
+            else:
+                print("  - {}".format(major))
+
     print("")
     print("Repo metadata:")
 
     for tree_name, tree_info in sorted(repo_metadata.items()):
         metadata_count = tree_info.get("metadata_count", 0)
         normalized = tree_info.get("normalized_tree") or tree_name
+        normalized_major = tree_info.get("normalized_major") or "unknown"
 
         print("  - {} ({})".format(tree_name, normalized))
+        print("      normalized major: {}".format(normalized_major))
         print("      metadata locations: {}".format(metadata_count))
 
         for path in tree_info.get("metadata_dirs", [])[:5]:
@@ -2610,7 +3285,11 @@ def resolve_conflicts_interactively(plan, preserve_file):
                     break
 
                 if choice == "p":
-                    add_preserve_pattern(preserve_file, relative)
+                    add_preserve_pattern(
+                        preserve_file,
+                        relative,
+                        section=plan.get("section", SECTION_COLLECTIONS_HUB),
+                    )
                     append_unique_plan_item(
                         plan,
                         "preserve",
@@ -2686,7 +3365,11 @@ def resolve_conflicts_interactively(plan, preserve_file):
                     break
 
                 if choice == "p":
-                    add_preserve_pattern(preserve_file, relative)
+                    add_preserve_pattern(
+                        preserve_file,
+                        relative,
+                        section=plan.get("section", SECTION_COLLECTIONS_HUB),
+                    )
                     append_unique_plan_item(
                         plan,
                         "preserve",
@@ -2816,7 +3499,11 @@ def review_removals_one_by_one(plan, preserve_file, removals):
                 break
 
             if choice == "p":
-                add_preserve_pattern(preserve_file, path)
+                add_preserve_pattern(
+                    preserve_file,
+                    path,
+                    section=plan.get("section", SECTION_COLLECTIONS_HUB),
+                )
                 append_unique_plan_item(
                     plan,
                     "preserve",
@@ -2943,7 +3630,11 @@ def review_removals_interactively(plan, preserve_file):
             path = item.get("path")
 
             if index in selected_indexes:
-                add_preserve_pattern(preserve_file, path)
+                add_preserve_pattern(
+                    preserve_file,
+                    path,
+                    section=plan.get("section", SECTION_COLLECTIONS_HUB),
+                )
                 append_unique_plan_item(
                     plan,
                     "preserve",
@@ -3369,6 +4060,105 @@ def report_plan_files(plan):
     }
 
 
+def plan_output_format(args):
+    """Return requested plan output format."""
+    output = getattr(args, "output", "text") or "text"
+    output = str(output).strip().lower()
+
+    if output not in ("text", "json", "yaml"):
+        return "text"
+
+    return output
+
+
+def plan_file_format(path, requested_format):
+    """Return output format for a plan file."""
+    requested_format = requested_format or "text"
+
+    if requested_format in ("json", "yaml"):
+        return requested_format
+
+    suffix = Path(path).suffix.lower()
+
+    if suffix == ".json":
+        return "json"
+
+    return "yaml"
+
+
+def dump_machine_output(data, output_format):
+    """Return machine-readable output text."""
+    safe_data = report_safe_value(data)
+
+    if output_format == "json":
+        return json.dumps(safe_data, indent=2, sort_keys=False) + "\n"
+
+    return yaml_dump(safe_data)
+
+
+def build_plan_output_document(
+    source,
+    bundle_path,
+    detected_sections,
+    plan,
+    dry_run=True,
+    diff_mode=False,
+    source_root=None,
+    argv=None,
+):
+    """Build a machine-readable sync plan document."""
+    return {
+        "kind": "AeroLITSyncPlan",
+        "created_utc": utc_iso(),
+        "dry_run": bool(dry_run),
+        "diff_mode": bool(diff_mode),
+        "source": str(source),
+        "argv": list(argv or []),
+        "source_metadata": source_report_metadata(
+            source,
+            source_root=source_root,
+        ),
+        "bundle_path": str(bundle_path),
+        "detected_sections": sorted(detected_sections.keys()),
+        "detected_section_paths": detected_section_paths(detected_sections),
+        "manifest_file": str(sync_manifest_file()),
+        "plan": {
+            "section": plan["section"],
+            "source_path": plan.get("source_path"),
+            "target_path": plan.get("target_path"),
+            "counts": plan_counts(plan),
+            "warnings": list(plan.get("warnings", [])),
+            "notes": list(plan.get("notes", [])),
+            "conflicts": report_plan_items(plan, "conflicts"),
+            "files": report_plan_files(plan),
+            "repo_metadata": report_safe_value(plan.get("repo_metadata", {})),
+            "repo_majors": report_safe_value(plan.get("repo_majors", {})),
+            "source_version": report_safe_value(plan.get("source_version", {})),
+        },
+    }
+
+
+def write_plan_output_file(args, plan_document, requested_format):
+    """Write plan output file when requested."""
+    output_path = getattr(args, "plan_output", None)
+
+    if not output_path:
+        return None
+
+    output_path = Path(output_path)
+    output_format = plan_file_format(output_path, requested_format)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(dump_machine_output(plan_document, output_format))
+
+    return output_path
+
+
+def print_machine_plan(plan_document, output_format):
+    """Print machine-readable plan to stdout."""
+    print(dump_machine_output(plan_document, output_format), end="")
+
+
 def detected_section_paths(detected_sections):
     """Return detected section paths for reports."""
     result = {}
@@ -3465,6 +4255,179 @@ def source_bundle_metadata(source_root):
     return metadata
 
 
+def section_name_variants(section):
+    """Return possible section name variants used in bundle metadata."""
+    section = str(section)
+
+    variants = [
+        section,
+        section.replace("-", "_"),
+        section.replace("_", "-"),
+    ]
+
+    unique = []
+    for variant in variants:
+        if variant not in unique:
+            unique.append(variant)
+
+    return unique
+
+
+def section_version_from_manifest_data(data, section):
+    """Return section-specific version metadata from loaded bundle manifest data."""
+    if not isinstance(data, dict):
+        return None
+
+    variants = section_name_variants(section)
+
+    candidate_sections = []
+
+    for key in ("sections", "components", "contents"):
+        value = data.get(key)
+
+        if value:
+            candidate_sections.append(value)
+
+    for candidate in candidate_sections:
+        if isinstance(candidate, dict):
+            for variant in variants:
+                item = candidate.get(variant)
+
+                if isinstance(item, dict):
+                    return {
+                        "name": item.get("name") or variant,
+                        "version": (
+                            item.get("version")
+                            or item.get("bundle_version")
+                            or item.get("component_version")
+                        ),
+                        "raw": item,
+                    }
+
+                if isinstance(item, str):
+                    return {
+                        "name": variant,
+                        "version": item,
+                        "raw": item,
+                    }
+
+        if isinstance(candidate, list):
+            for item in candidate:
+                if not isinstance(item, dict):
+                    continue
+
+                item_name = (
+                    item.get("name")
+                    or item.get("section")
+                    or item.get("id")
+                    or item.get("component")
+                )
+
+                if item_name not in variants:
+                    continue
+
+                return {
+                    "name": item_name,
+                    "version": (
+                        item.get("version")
+                        or item.get("bundle_version")
+                        or item.get("component_version")
+                    ),
+                    "raw": item,
+                }
+
+    return None
+
+
+def source_section_version_metadata(source_root, section):
+    """Return source/bundle version metadata for one sync section."""
+    bundle_metadata = source_bundle_metadata(source_root)
+
+    result = {
+        "section": section,
+        "manifest_found": bundle_metadata.get("manifest_found", False),
+        "manifest_path": bundle_metadata.get("manifest_path"),
+        "bundle_name": bundle_metadata.get("name"),
+        "bundle_version": bundle_metadata.get("version"),
+        "bundle_created": bundle_metadata.get("created"),
+        "bundle_created_utc": bundle_metadata.get("created_utc"),
+        "section_name": None,
+        "section_version": None,
+        "version": bundle_metadata.get("version"),
+        "version_source": "bundle" if bundle_metadata.get("version") else None,
+    }
+
+    manifest_path = bundle_metadata.get("manifest_path")
+
+    if not manifest_path:
+        return result
+
+    try:
+        with Path(manifest_path).open("r") as handle:
+            data = yaml_load(handle) or {}
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+
+    section_metadata = section_version_from_manifest_data(data, section)
+
+    if section_metadata:
+        result["section_name"] = section_metadata.get("name")
+        result["section_version"] = section_metadata.get("version")
+
+        if section_metadata.get("version"):
+            result["version"] = section_metadata.get("version")
+            result["version_source"] = "section"
+
+    return result
+
+
+def add_source_version_metadata_to_plan(plan, source_root):
+    """Attach source version metadata to a sync plan."""
+    metadata = source_section_version_metadata(
+        source_root,
+        plan.get("section"),
+    )
+
+    plan["source_version"] = metadata
+
+    if metadata.get("version"):
+        plan["notes"].append(
+            "Incoming {} version detected from {} metadata: {}.".format(
+                plan.get("section"),
+                metadata.get("version_source"),
+                metadata.get("version"),
+            )
+        )
+    elif metadata.get("manifest_found"):
+        plan["notes"].append(
+            "Incoming bundle manifest was found, but no version was detected for {}.".format(
+                plan.get("section")
+            )
+        )
+
+    return metadata
+
+
+def apply_source_version_metadata_to_manifest_section(manifest, section, plan):
+    """Store source version metadata on an installed manifest section."""
+    source_version = plan.get("source_version")
+
+    if not source_version:
+        return
+
+    sections = manifest.setdefault("sections", {})
+
+    if section not in sections or not isinstance(sections[section], dict):
+        return
+
+    sections[section]["source_version"] = report_safe_value(source_version)
+
+    if source_version.get("version"):
+        sections[section]["version"] = source_version.get("version")
+        sections[section]["version_source"] = source_version.get("version_source")
+
+
 def source_report_metadata(source, source_root=None):
     """Return source metadata for reports."""
     path = Path(source).expanduser()
@@ -3548,9 +4511,15 @@ def build_report(
             "conflicts": report_plan_items(plan, "conflicts"),
             "files": report_plan_files(plan),
             "repo_metadata": report_safe_value(plan.get("repo_metadata", {})),
+            "repo_majors": report_safe_value(plan.get("repo_majors", {})),
+            "source_version": report_safe_value(plan.get("source_version", {})),
         },
         "changed": report_safe_value(changed),
         "backup_root": str(backup_root) if backup_root else None,
+        "backup_metadata": (
+            str(backup_metadata_file(backup_root)) if backup_root else None
+        ),
+        "backup_summary": backup_summary(backup_root),
     }
 
 
@@ -4110,20 +5079,31 @@ def run_sync_rollback(args, raw_args):
             no_backup=getattr(args, "no_backup", False),
         )
 
-        preserve_patterns = load_preserve_patterns(
-            sync_preserve_file(bundle_path),
-            default_patterns=DEFAULT_COLLECTIONS_HUB_PRESERVE_PATTERNS,
-        )
+        restored_manifest = restore_pre_sync_manifest_from_backup(report)
 
-        manifest = load_manifest()
-        manifest.setdefault("sections", {})
-        manifest["bundle_path"] = str(bundle_path)
-        manifest["sections"][SECTION_COLLECTIONS_HUB] = rebuild_section_manifest(
-            SECTION_COLLECTIONS_HUB,
-            collections_hub_path(bundle_path),
-            preserve_patterns,
-        )
-        save_manifest(manifest)
+        if restored_manifest:
+            changed.append(
+                {
+                    "action": "restore-manifest",
+                    "path": str(sync_manifest_file()),
+                    "source": str(restored_manifest),
+                }
+            )
+        else:
+            preserve_patterns = load_preserve_patterns(
+                sync_preserve_file(bundle_path),
+                default_patterns=DEFAULT_COLLECTIONS_HUB_PRESERVE_PATTERNS,
+            )
+
+            manifest = load_manifest()
+            manifest.setdefault("sections", {})
+            manifest["bundle_path"] = str(bundle_path)
+            manifest["sections"][SECTION_COLLECTIONS_HUB] = rebuild_section_manifest(
+                SECTION_COLLECTIONS_HUB,
+                collections_hub_path(bundle_path),
+                preserve_patterns,
+            )
+            save_manifest(manifest)
 
         rollback_report = build_rollback_report(
             report_path,
@@ -4645,6 +5625,837 @@ def resolve_bundle_path(args):
         )
 
     return Path(bundle_path).expanduser()
+
+
+def requested_section_name(args):
+    """Return normalized requested sync section name."""
+    section = getattr(args, "section", "all") or "all"
+
+    if section == "extracted-isos":
+        return SECTION_EXTRACTED_ISOS
+
+    return section
+
+
+def multi_section_requested(args):
+    """Return True when user requested all detected sections."""
+    return requested_section_name(args) == "all"
+
+
+def detected_supported_section_names(detected_sections):
+    """Return detected supported sections in safe apply/plan order."""
+    sections = []
+
+    for section in MULTI_SECTION_PLAN_ORDER:
+        if section in detected_sections:
+            sections.append(section)
+
+    return sections
+
+
+def sync_config_defaults():
+    """Return sync config defaults safely."""
+    try:
+        config = load_config()
+    except Exception:
+        config = {}
+
+    return config.get("sync", {})
+
+
+def section_files_mode(args):
+    """Return files sync mode."""
+    sync_config = sync_config_defaults()
+    return (
+        getattr(args, "files_mode", None)
+        or sync_config.get("files_mode")
+        or "additive"
+    )
+
+
+def section_repos_mode(args):
+    """Return repos sync mode."""
+    sync_config = sync_config_defaults()
+    return (
+        getattr(args, "repo_mode", None)
+        or sync_config.get("repos_mode")
+        or "additive"
+    )
+
+
+def build_sync_plan_for_section(
+    args,
+    bundle_path,
+    manifest,
+    detected_sections,
+    source_root,
+    extract_skipped,
+    section,
+):
+    """Build a sync plan for one section without applying it."""
+    if section not in detected_sections:
+        raise ValueError("Section not found in source: {}".format(section))
+
+    source_path = detected_sections[section]
+    target_path = section_target_path(bundle_path, section)
+
+    if section == SECTION_COLLECTIONS_HUB:
+        plan, _source_files = build_collections_hub_plan(
+            source_path,
+            target_path,
+            manifest,
+            force=getattr(args, "force", False),
+        )
+    elif section == SECTION_FILES:
+        plan, _source_files = build_files_plan(
+            source_path,
+            target_path,
+            manifest,
+            force=getattr(args, "force", False),
+            mode=section_files_mode(args),
+        )
+    elif section == SECTION_REPOS:
+        plan, _source_files = build_repos_plan(
+            source_path,
+            target_path,
+            manifest,
+            force=getattr(args, "force", False),
+            mode=section_repos_mode(args),
+        )
+    elif section == SECTION_EXTRACTED_ISOS:
+        plan = build_extracted_isos_plan(
+            source_path,
+            target_path,
+            args,
+        )
+    else:
+        raise ValueError("Unsupported section: {}".format(section))
+
+    if extract_skipped:
+        for item in extract_skipped_for_section(
+            extract_skipped,
+            source_root,
+            source_path,
+        ):
+            plan["skipped"].append(item)
+
+    add_requested_option_notes(plan, args)
+    add_source_version_metadata_to_plan(plan, source_root)
+    plan["_diff_lines"] = resolve_diff_line_limit(args)
+
+    return plan
+
+
+def combined_plan_counts(plans):
+    """Return combined count summary for multiple plans."""
+    totals = {}
+
+    for plan in plans:
+        counts = plan_counts(plan)
+
+        for key, value in counts.items():
+            totals[key] = totals.get(key, 0) + value
+
+    return totals
+
+
+def print_combined_sync_plan(plans, show_files=False, show_all_files=False):
+    """Print a combined multi-section sync plan."""
+    totals = combined_plan_counts(plans)
+    limit = plan_display_limit(show_all_files=show_all_files)
+
+    print("AeroLIT multi-section sync plan")
+    print("")
+    print("Sections:")
+    for plan in plans:
+        print("  - {}".format(plan["section"]))
+
+    print("")
+    print("Combined planned changes:")
+    print("  add:                    {}".format(totals.get("add", 0)))
+    print("  update:                 {}".format(totals.get("update", 0)))
+    print("  bundle-managed updates: {}".format(totals.get("bundle_managed_update", 0)))
+    print("  remove:                 {}".format(totals.get("remove", 0)))
+    print("  preserve:               {}".format(totals.get("preserve", 0)))
+    print("  possible user changes:  {}".format(totals.get("conflicts", 0)))
+    print("  unchanged:              {}".format(totals.get("unchanged", 0)))
+    print("  local untracked:        {}".format(totals.get("local_untracked", 0)))
+    print("  skipped:                {}".format(totals.get("skipped", 0)))
+    print("  tree add:               {}".format(totals.get("tree_add", 0)))
+    print("  tree replace:           {}".format(totals.get("tree_replace", 0)))
+    print("  tree keep:              {}".format(totals.get("tree_keep", 0)))
+
+    print("")
+    print("Section summaries:")
+
+    for plan in plans:
+        counts = plan_counts(plan)
+
+        print("")
+        print("  {}".format(plan["section"]))
+        print("    source: {}".format(plan.get("source_path")))
+        print("    target: {}".format(plan.get("target_path")))
+        print("    add: {}".format(counts.get("add", 0)))
+        print("    update: {}".format(counts.get("update", 0)))
+        print("    bundle-managed updates: {}".format(counts.get("bundle_managed_update", 0)))
+        print("    remove: {}".format(counts.get("remove", 0)))
+        print("    possible user changes: {}".format(counts.get("conflicts", 0)))
+        print("    local untracked: {}".format(counts.get("local_untracked", 0)))
+        print("    tree replace: {}".format(counts.get("tree_replace", 0)))
+        print("    warnings: {}".format(counts.get("warnings", 0)))
+        print("    notes: {}".format(counts.get("notes", 0)))
+
+    for plan in plans:
+        if plan.get("warnings"):
+            print("")
+            print("Warnings for {}:".format(plan["section"]))
+            for warning in plan["warnings"]:
+                print("  - {}".format(warning))
+
+    for plan in plans:
+        if plan.get("notes"):
+            print("")
+            print("Notes for {}:".format(plan["section"]))
+            for note in plan["notes"]:
+                print("  - {}".format(note))
+
+    if show_files:
+        for plan in plans:
+            print("")
+            print("File details for {}:".format(plan["section"]))
+
+            print_path_list("Add:", plan.get("add"), limit=limit)
+            print_path_list("Update:", plan.get("update"), limit=limit)
+            print_path_list(
+                "Bundle-managed updates:",
+                plan.get("bundle_managed_update"),
+                limit=limit,
+                show_details=False,
+            )
+            print_path_list("Remove:", plan.get("remove"), limit=limit)
+            print_path_list("Preserve:", plan.get("preserve"), limit=limit)
+            print_path_list(
+                "Possible user/manual changes:",
+                plan.get("conflicts"),
+                limit=limit,
+            )
+            print_path_list(
+                "Local untracked files left alone:",
+                plan.get("local_untracked"),
+                limit=limit,
+            )
+            print_path_list("Tree add:", plan.get("tree_add"), limit=limit)
+            print_path_list("Tree replace:", plan.get("tree_replace"), limit=limit)
+            print_path_list("Tree keep:", plan.get("tree_keep"), limit=limit)
+
+
+def build_multi_plan_output_document(
+    source,
+    bundle_path,
+    detected_sections,
+    plans,
+    source_root=None,
+    argv=None,
+):
+    """Build machine-readable multi-section sync plan document."""
+    plan_documents = []
+
+    for plan in plans:
+        plan_documents.append(
+            {
+                "section": plan["section"],
+                "source_path": plan.get("source_path"),
+                "target_path": plan.get("target_path"),
+                "counts": plan_counts(plan),
+                "warnings": list(plan.get("warnings", [])),
+                "notes": list(plan.get("notes", [])),
+                "conflicts": report_plan_items(plan, "conflicts"),
+                "files": report_plan_files(plan),
+                "repo_metadata": report_safe_value(plan.get("repo_metadata", {})),
+                "repo_majors": report_safe_value(plan.get("repo_majors", {})),
+                "source_version": report_safe_value(plan.get("source_version", {})),
+            }
+        )
+
+    return {
+        "kind": "AeroLITMultiSectionSyncPlan",
+        "created_utc": utc_iso(),
+        "dry_run": True,
+        "source": str(source),
+        "argv": list(argv or []),
+        "source_metadata": source_report_metadata(
+            source,
+            source_root=source_root,
+        ),
+        "bundle_path": str(bundle_path),
+        "detected_sections": sorted(detected_sections.keys()),
+        "detected_section_paths": detected_section_paths(detected_sections),
+        "manifest_file": str(sync_manifest_file()),
+        "combined_counts": combined_plan_counts(plans),
+        "plans": plan_documents,
+    }
+
+
+def write_multi_plan_report(plan_document):
+    """Write a multi-section plan report."""
+    sync_log_dir().mkdir(parents=True, exist_ok=True)
+
+    report_path = (
+        sync_log_dir()
+        / "{}-multi-section-sync-plan.yml".format(utc_stamp())
+    )
+    write_yaml_file(report_path, plan_document)
+
+    return report_path
+
+
+def write_multi_apply_report(report):
+    """Write a multi-section sync apply report."""
+    sync_log_dir().mkdir(parents=True, exist_ok=True)
+
+    report_path = (
+        sync_log_dir()
+        / "{}-multi-section-sync-report.yml".format(utc_stamp())
+    )
+    write_yaml_file(report_path, report)
+
+    return report_path
+
+
+def plans_have_conflicts(plans):
+    """Return True when any plan has unresolved conflicts."""
+    for plan in plans:
+        if plan.get("conflicts"):
+            return True
+
+    return False
+
+
+def plans_have_removals(plans):
+    """Return True when any plan has planned removals."""
+    for plan in plans:
+        if plan.get("remove"):
+            return True
+
+    return False
+
+
+def print_multi_conflict_resolution_help():
+    """Print multi-section conflict resolution guidance."""
+    print("")
+    print("How to resolve multi-section conflicts:")
+    print("  - Review the combined plan:")
+    print("      aerolitctl sync SOURCE --section all --dry-run --show-files")
+    print("  - Review conflicts interactively:")
+    print("      aerolitctl sync SOURCE --section all --review-conflicts")
+    print("  - Preserve a path:")
+    print("      aerolitctl sync preserve add PATH")
+    print("  - Replace differing files after review:")
+    print("      aerolitctl sync SOURCE --section all --force")
+    print("")
+    print("Use --force only after confirming local changes can be replaced.")
+
+
+def review_multi_section_conflicts(plans, preserve_file):
+    """Interactively review conflicts across all plans."""
+    for plan in plans:
+        if not plan.get("conflicts"):
+            continue
+
+        print("")
+        print("Conflict review for section:")
+        print("  {}".format(plan.get("section")))
+
+        resolved = resolve_conflicts_interactively(plan, preserve_file)
+
+        if not resolved:
+            return False
+
+    return True
+
+
+def review_multi_section_removals(plans, preserve_file):
+    """Interactively review removals across all plans."""
+    for plan in plans:
+        if not plan.get("remove"):
+            continue
+
+        print("")
+        print("Removal review for section:")
+        print("  {}".format(plan.get("section")))
+
+        reviewed = review_removals_interactively(plan, preserve_file)
+
+        if not reviewed:
+            return False
+
+    return True
+
+
+def apply_plan_for_section(args, bundle_path, manifest, plan, pre_sync_manifest):
+    """Apply one already-built section plan and update manifest in memory."""
+    section = plan["section"]
+    changed = []
+    backup_root = None
+    pre_sync_manifest_path = None
+
+    added_preserve_patterns = []
+
+    if section == SECTION_COLLECTIONS_HUB:
+        added_preserve_patterns = ensure_preserve_file_defaults(
+            sync_preserve_file(bundle_path),
+            DEFAULT_COLLECTIONS_HUB_PRESERVE_PATTERNS,
+        )
+
+    if section == SECTION_COLLECTIONS_HUB:
+        section_changed, backup_root = apply_collections_hub_plan(
+            plan,
+            no_backup=getattr(args, "no_backup", False),
+        )
+    elif section == SECTION_REPOS:
+        section_changed, backup_root = apply_bundle_section_plan(
+            plan,
+            section,
+            no_backup=True,
+        )
+    elif section == SECTION_EXTRACTED_ISOS:
+        section_changed, backup_root = apply_extracted_isos_plan(
+            plan,
+            keep_old=keep_old_iso_tree_requested(args),
+        )
+    else:
+        section_changed, backup_root = apply_bundle_section_plan(
+            plan,
+            section,
+            no_backup=getattr(args, "no_backup", False),
+        )
+
+    changed.extend(section_changed)
+
+    if backup_root:
+        pre_sync_manifest_path = write_pre_sync_manifest_backup(
+            backup_root,
+            pre_sync_manifest,
+        )
+
+    for pattern in added_preserve_patterns:
+        changed.append(
+            {
+                "action": "preserve-default",
+                "path": str(sync_preserve_file(bundle_path)),
+                "pattern": pattern,
+                "section": section,
+            }
+        )
+
+    preserve_patterns = section_preserve_patterns(bundle_path, section)
+
+    manifest.setdefault("sections", {})
+    manifest["bundle_path"] = str(bundle_path)
+
+    if section == SECTION_EXTRACTED_ISOS:
+        manifest["sections"][section] = rebuild_extracted_isos_manifest(
+            section_target_path(bundle_path, section),
+        )
+    else:
+        manifest["sections"][section] = rebuild_section_manifest(
+            section,
+            section_target_path(bundle_path, section),
+            preserve_patterns,
+        )
+
+    apply_source_version_metadata_to_manifest_section(
+        manifest,
+        section,
+        plan,
+    )
+
+    return {
+        "section": section,
+        "changed": changed,
+        "backup_root": backup_root,
+        "pre_sync_manifest_path": pre_sync_manifest_path,
+    }
+
+
+def build_multi_apply_report(
+    source,
+    bundle_path,
+    detected_sections,
+    plans,
+    apply_results,
+    backup_infos,
+    dry_run,
+    started_at=None,
+    source_root=None,
+    argv=None,
+):
+    """Build a multi-section sync apply report."""
+    duration_seconds = None
+
+    if started_at is not None:
+        duration_seconds = round(time.time() - started_at, 3)
+
+    changed = []
+    for result in apply_results:
+        changed.extend(result.get("changed", []))
+
+    plan_documents = []
+
+    for plan in plans:
+        plan_documents.append(
+            {
+                "section": plan["section"],
+                "source_path": plan.get("source_path"),
+                "target_path": plan.get("target_path"),
+                "counts": plan_counts(plan),
+                "warnings": list(plan.get("warnings", [])),
+                "notes": list(plan.get("notes", [])),
+                "conflicts": report_plan_items(plan, "conflicts"),
+                "files": report_plan_files(plan),
+                "repo_metadata": report_safe_value(plan.get("repo_metadata", {})),
+                "repo_majors": report_safe_value(plan.get("repo_majors", {})),
+                "source_version": report_safe_value(
+                    plan.get("source_version", {})
+                ),
+            }
+        )
+
+    backups = []
+    for info in backup_infos:
+        backup_root = info.get("backup_root")
+        backups.append(
+            {
+                "section": info.get("section"),
+                "backup_root": str(backup_root) if backup_root else None,
+                "pre_sync_manifest": (
+                    str(info.get("pre_sync_manifest_path"))
+                    if info.get("pre_sync_manifest_path")
+                    else None
+                ),
+                "summary": backup_summary(backup_root),
+            }
+        )
+
+    return {
+        "kind": "AeroLITMultiSectionSyncReport",
+        "created_utc": utc_iso(),
+        "duration_seconds": duration_seconds,
+        "dry_run": bool(dry_run),
+        "source": str(source),
+        "argv": list(argv or []),
+        "source_metadata": source_report_metadata(
+            source,
+            source_root=source_root,
+        ),
+        "bundle_path": str(bundle_path),
+        "detected_sections": sorted(detected_sections.keys()),
+        "detected_section_paths": detected_section_paths(detected_sections),
+        "manifest_file": str(sync_manifest_file()),
+        "combined_counts": combined_plan_counts(plans),
+        "plans": plan_documents,
+        "changed": report_safe_value(changed),
+        "backups": report_safe_value(backups),
+    }
+
+
+def write_multi_backup_metadata(backup_infos, report_path, report):
+    """Write backup metadata files for a multi-section sync."""
+    metadata_paths = []
+
+    for info in backup_infos:
+        backup_root = info.get("backup_root")
+
+        if not backup_root:
+            continue
+
+        fake_report = {
+            "source": report.get("source"),
+            "plan": {
+                "section": info.get("section"),
+            },
+        }
+
+        metadata_path = write_backup_metadata(
+            backup_root,
+            report_path,
+            fake_report,
+            pre_sync_manifest_path=info.get("pre_sync_manifest_path"),
+        )
+
+        if metadata_path:
+            metadata_paths.append(str(metadata_path))
+            info["backup_metadata"] = str(metadata_path)
+
+    return metadata_paths
+
+
+def record_manifest_multi_sync_report(report_path, report):
+    """Record last successful multi-section sync details in the manifest."""
+    if report.get("dry_run"):
+        return
+
+    manifest = load_manifest()
+    source_metadata = report.get("source_metadata", {})
+    plans = report.get("plans", [])
+
+    sections = []
+    for plan in plans:
+        section = plan.get("section")
+        if section:
+            sections.append(section)
+
+    entry = {
+        "created_utc": report.get("created_utc"),
+        "report": str(report_path),
+        "source": report.get("source"),
+        "source_sha256": source_metadata.get("sha256"),
+        "section": "all",
+        "sections": sections,
+    }
+
+    history = list(manifest.get("sync_history", []))
+    history.append(entry)
+
+    manifest["last_sync_report"] = str(report_path)
+    manifest["last_sync_utc"] = report.get("created_utc")
+    manifest["last_sync_source"] = report.get("source")
+    manifest["last_sync_source_sha256"] = source_metadata.get("sha256")
+    manifest["sync_history"] = history[-20:]
+
+    save_manifest(manifest)
+
+
+def run_multi_section_plan_only(
+    args,
+    source,
+    bundle_path,
+    source_root,
+    detected_sections,
+    extract_skipped,
+):
+    """Build, review, and optionally apply a multi-section sync."""
+    started_at = time.time()
+    dry_run = bool(getattr(args, "dry_run", False))
+    manifest = load_manifest()
+    pre_sync_manifest = report_safe_value(manifest)
+
+    sections = detected_supported_section_names(detected_sections)
+
+    if not sections:
+        print("ERROR: No supported sync sections were detected.", file=sys.stderr)
+        return 2
+
+    plans = []
+
+    for section in sections:
+        plans.append(
+            build_sync_plan_for_section(
+                args,
+                bundle_path,
+                manifest,
+                detected_sections,
+                source_root,
+                extract_skipped,
+                section,
+            )
+        )
+
+    output_format = plan_output_format(args)
+    plan_document = build_multi_plan_output_document(
+        source,
+        bundle_path,
+        detected_sections,
+        plans,
+        source_root=source_root,
+        argv=getattr(args, "_aerolitctl_argv", []),
+    )
+
+    plan_output_path = write_plan_output_file(
+        args,
+        plan_document,
+        output_format,
+    )
+
+    if dry_run:
+        report_path = write_multi_plan_report(plan_document)
+
+        if output_format != "text":
+            print_machine_plan(plan_document, output_format)
+            return 0
+
+        print_combined_sync_plan(
+            plans,
+            show_files=getattr(args, "show_files", False),
+            show_all_files=getattr(args, "show_all_files", False),
+        )
+
+        print("")
+        print("Multi-section plan report:")
+        print("  {}".format(report_path))
+
+        if plan_output_path:
+            print("")
+            print("Plan output:")
+            print("  {}".format(plan_output_path))
+
+        print("")
+        print("Dry run only. No files changed.")
+        return 0
+
+    if output_format != "text" or plan_output_path:
+        print(
+            "ERROR: --output json/yaml and --plan-output are plan-only features. "
+            "Use them with --dry-run.",
+            file=sys.stderr,
+        )
+        return 2
+
+    print_combined_sync_plan(
+        plans,
+        show_files=getattr(args, "show_files", False),
+        show_all_files=getattr(args, "show_all_files", False),
+    )
+
+    preserve_file = sync_preserve_file(bundle_path)
+
+    review_conflicts = (
+        getattr(args, "review", False)
+        or getattr(args, "review_conflicts", False)
+    )
+    review_removals = (
+        getattr(args, "review", False)
+        or getattr(args, "review_removals", False)
+    )
+
+    if plans_have_conflicts(plans) and review_conflicts:
+        resolved = review_multi_section_conflicts(plans, preserve_file)
+
+        if not resolved:
+            print("")
+            print("Cancelled during multi-section conflict review. No files changed.")
+            return 130
+
+        print("")
+        print("Updated multi-section sync plan after conflict review:")
+        print_combined_sync_plan(plans, show_files=True)
+
+    if plans_have_conflicts(plans):
+        print("")
+        print("Multi-section sync blocked because possible user/manual changes were found.")
+        print_multi_conflict_resolution_help()
+        return 2
+
+    if plans_have_removals(plans) and review_removals:
+        reviewed = review_multi_section_removals(plans, preserve_file)
+
+        if not reviewed:
+            print("")
+            print("Cancelled during multi-section removal review. No files changed.")
+            return 130
+
+        print("")
+        print("Updated multi-section sync plan after removal review:")
+        print_combined_sync_plan(plans, show_files=True)
+
+    if not getattr(args, "yes", False):
+        print("")
+        print("This will apply the selected sections in this order:")
+        for plan in plans:
+            print("  - {}".format(plan["section"]))
+        print("")
+        if not confirm_continue():
+            print("Cancelled. No files changed.")
+            return 130
+
+    apply_results = []
+    backup_infos = []
+
+    for plan in plans:
+        result = apply_plan_for_section(
+            args,
+            bundle_path,
+            manifest,
+            plan,
+            pre_sync_manifest,
+        )
+        apply_results.append(result)
+
+        if result.get("backup_root"):
+            backup_infos.append(
+                {
+                    "section": result.get("section"),
+                    "backup_root": result.get("backup_root"),
+                    "pre_sync_manifest_path": result.get(
+                        "pre_sync_manifest_path"
+                    ),
+                }
+            )
+
+    save_manifest(manifest)
+
+    report = build_multi_apply_report(
+        source,
+        bundle_path,
+        detected_sections,
+        plans,
+        apply_results,
+        backup_infos,
+        dry_run=False,
+        started_at=started_at,
+        source_root=source_root,
+        argv=getattr(args, "_aerolitctl_argv", []),
+    )
+    report_path = write_multi_apply_report(report)
+
+    backup_metadata_paths = write_multi_backup_metadata(
+        backup_infos,
+        report_path,
+        report,
+    )
+
+    record_manifest_multi_sync_report(report_path, report)
+
+    changed_count = 0
+    for result in apply_results:
+        changed_count += len(result.get("changed", []))
+
+    print("")
+    print("AeroLIT multi-section sync completed.")
+    print("")
+    print("Applied sections:")
+    for plan in plans:
+        print("  - {}".format(plan["section"]))
+
+    print("")
+    print("Changed items:")
+    print("  {}".format(changed_count))
+
+    if backup_infos:
+        print("")
+        print("Backups:")
+        for info in backup_infos:
+            backup_root = info.get("backup_root")
+            summary = backup_summary(backup_root)
+            print("  - {}: {}".format(info.get("section"), backup_root))
+            print("      size: {}".format(summary.get("size", "unknown")))
+            print("      files: {}".format(summary.get("file_count", 0)))
+
+    if backup_metadata_paths:
+        print("")
+        print("Backup metadata:")
+        for path in backup_metadata_paths:
+            print("  - {}".format(path))
+
+    print("")
+    print("Sync report:")
+    print("  {}".format(report_path))
+
+    print("")
+    print("Updated manifest:")
+    print("  {}".format(sync_manifest_file()))
+
+    return 0
 
 
 def selected_sections(args, detected_sections):
@@ -5234,6 +7045,509 @@ def apply_baseline_plan(plan):
     return changed
 
 
+def manifest_validation_result():
+    """Return an empty manifest validation result."""
+    return {
+        "ok": [],
+        "warnings": [],
+        "errors": [],
+    }
+
+
+def add_manifest_validation(result, level, message, section=None, path=None):
+    """Add one manifest validation finding."""
+    item = {
+        "message": message,
+    }
+
+    if section:
+        item["section"] = section
+
+    if path:
+        item["path"] = str(path)
+
+    result.setdefault(level, []).append(item)
+
+
+def validate_manifest_header(manifest, result):
+    """Validate top-level sync manifest fields."""
+    if not isinstance(manifest, dict):
+        add_manifest_validation(
+            result,
+            "errors",
+            "Sync manifest is not a YAML mapping.",
+        )
+        return
+
+    if manifest.get("kind") != MANIFEST_KIND:
+        add_manifest_validation(
+            result,
+            "warnings",
+            "Sync manifest kind is missing or unexpected: {}".format(
+                manifest.get("kind")
+            ),
+        )
+    else:
+        add_manifest_validation(
+            result,
+            "ok",
+            "Sync manifest kind is valid.",
+        )
+
+    if not manifest.get("version"):
+        add_manifest_validation(
+            result,
+            "warnings",
+            "Sync manifest version is missing.",
+        )
+
+    if "sections" not in manifest:
+        add_manifest_validation(
+            result,
+            "errors",
+            "Sync manifest has no sections mapping.",
+        )
+    elif not isinstance(manifest.get("sections"), dict):
+        add_manifest_validation(
+            result,
+            "errors",
+            "Sync manifest sections field is not a mapping.",
+        )
+
+
+def manifest_section_root(bundle_path, section_name, section_data):
+    """Return best known root for one manifest section."""
+    configured_root = section_data.get("root")
+
+    if configured_root:
+        return Path(configured_root)
+
+    try:
+        return section_target_path(bundle_path, section_name)
+    except ValueError:
+        return None
+
+
+def validate_manifest_file_section(
+    bundle_path,
+    section_name,
+    section_data,
+    result,
+    check_checksums=False,
+    max_findings=50,
+):
+    """Validate one file-based manifest section."""
+    files = section_data.get("files", {})
+
+    if not isinstance(files, dict):
+        add_manifest_validation(
+            result,
+            "errors",
+            "Section files field is not a mapping.",
+            section=section_name,
+        )
+        return
+
+    root = manifest_section_root(bundle_path, section_name, section_data)
+
+    if not root:
+        add_manifest_validation(
+            result,
+            "errors",
+            "Cannot determine section root.",
+            section=section_name,
+        )
+        return
+
+    if not root.exists():
+        add_manifest_validation(
+            result,
+            "errors",
+            "Section root does not exist.",
+            section=section_name,
+            path=root,
+        )
+        return
+
+    add_manifest_validation(
+        result,
+        "ok",
+        "Section root exists.",
+        section=section_name,
+        path=root,
+    )
+
+    missing_count = 0
+    changed_count = 0
+    checked_count = 0
+    limited = False
+
+    for relative, meta in sorted(files.items()):
+        path = root / relative
+        checked_count += 1
+
+        if not path.exists():
+            missing_count += 1
+
+            if missing_count <= max_findings:
+                add_manifest_validation(
+                    result,
+                    "errors",
+                    "Tracked file is missing.",
+                    section=section_name,
+                    path=relative,
+                )
+            else:
+                limited = True
+
+            continue
+
+        if not path.is_file():
+            add_manifest_validation(
+                result,
+                "errors",
+                "Tracked path is not a regular file.",
+                section=section_name,
+                path=relative,
+            )
+            continue
+
+        if not check_checksums:
+            continue
+
+        expected_checksum = None
+
+        if isinstance(meta, dict):
+            expected_checksum = meta.get("checksum")
+
+        if not expected_checksum:
+            continue
+
+        try:
+            actual_checksum = sha256_file(path)
+        except OSError as exc:
+            add_manifest_validation(
+                result,
+                "warnings",
+                "Could not checksum tracked file: {}".format(exc),
+                section=section_name,
+                path=relative,
+            )
+            continue
+
+        if actual_checksum != expected_checksum:
+            changed_count += 1
+
+            if changed_count <= max_findings:
+                add_manifest_validation(
+                    result,
+                    "warnings",
+                    "Tracked file checksum differs from manifest.",
+                    section=section_name,
+                    path=relative,
+                )
+            else:
+                limited = True
+
+    add_manifest_validation(
+        result,
+        "ok",
+        "Checked {} tracked file(s).".format(checked_count),
+        section=section_name,
+    )
+
+    if limited:
+        add_manifest_validation(
+            result,
+            "warnings",
+            "Additional findings were hidden after {} listed items.".format(
+                max_findings
+            ),
+            section=section_name,
+        )
+
+
+def validate_manifest_extracted_isos_section(
+    bundle_path,
+    section_name,
+    section_data,
+    result,
+):
+    """Validate extracted_isos manifest section."""
+    root = manifest_section_root(bundle_path, section_name, section_data)
+
+    if not root:
+        add_manifest_validation(
+            result,
+            "errors",
+            "Cannot determine extracted_isos root.",
+            section=section_name,
+        )
+        return
+
+    if not root.exists():
+        add_manifest_validation(
+            result,
+            "errors",
+            "Extracted ISOs root does not exist.",
+            section=section_name,
+            path=root,
+        )
+        return
+
+    trees = section_data.get("trees", {})
+
+    if not isinstance(trees, dict):
+        add_manifest_validation(
+            result,
+            "errors",
+            "Extracted ISOs trees field is not a mapping.",
+            section=section_name,
+        )
+        return
+
+    if not trees:
+        add_manifest_validation(
+            result,
+            "warnings",
+            "Extracted ISOs section has no tracked trees.",
+            section=section_name,
+            path=root,
+        )
+        return
+
+    for tree_name, tree_data in sorted(trees.items()):
+        tree_path = None
+
+        if isinstance(tree_data, dict):
+            tree_path = tree_data.get("path")
+
+        if tree_path:
+            tree_path = Path(tree_path)
+        else:
+            tree_path = root / tree_name
+
+        if tree_path.exists() and tree_path.is_dir():
+            add_manifest_validation(
+                result,
+                "ok",
+                "Tracked extracted ISO tree exists.",
+                section=section_name,
+                path=tree_path,
+            )
+        else:
+            add_manifest_validation(
+                result,
+                "errors",
+                "Tracked extracted ISO tree is missing.",
+                section=section_name,
+                path=tree_path,
+            )
+
+
+def validate_installed_manifest(bundle_path, check_checksums=False):
+    """Validate installed sync manifest against the current bundle."""
+    manifest = load_manifest()
+    result = manifest_validation_result()
+
+    validate_manifest_header(manifest, result)
+
+    sections = manifest.get("sections", {})
+
+    if not isinstance(sections, dict):
+        return result
+
+    if not sections:
+        add_manifest_validation(
+            result,
+            "warnings",
+            "No sections are currently tracked in the sync manifest.",
+        )
+        return result
+
+    for section_name, section_data in sorted(sections.items()):
+        if section_name not in SUPPORTED_SECTIONS:
+            add_manifest_validation(
+                result,
+                "warnings",
+                "Manifest tracks an unknown section.",
+                section=section_name,
+            )
+            continue
+
+        if not isinstance(section_data, dict):
+            add_manifest_validation(
+                result,
+                "errors",
+                "Section manifest data is not a mapping.",
+                section=section_name,
+            )
+            continue
+
+        if section_name == SECTION_EXTRACTED_ISOS:
+            validate_manifest_extracted_isos_section(
+                bundle_path,
+                section_name,
+                section_data,
+                result,
+            )
+        else:
+            validate_manifest_file_section(
+                bundle_path,
+                section_name,
+                section_data,
+                result,
+                check_checksums=check_checksums,
+            )
+
+    return result
+
+
+def print_manifest_validation_result(result):
+    """Print manifest validation result."""
+    print("AeroLIT sync manifest validation")
+    print("")
+    print("Manifest:")
+    print("  {}".format(sync_manifest_file()))
+    print("")
+
+    for item in result.get("ok", []):
+        message = item.get("message")
+        section = item.get("section")
+        path = item.get("path")
+
+        if section and path:
+            print("[OK] {}: {} ({})".format(section, message, path))
+        elif section:
+            print("[OK] {}: {}".format(section, message))
+        else:
+            print("[OK] {}".format(message))
+
+    for item in result.get("warnings", []):
+        message = item.get("message")
+        section = item.get("section")
+        path = item.get("path")
+
+        if section and path:
+            print("[WARN] {}: {} ({})".format(section, message, path))
+        elif section:
+            print("[WARN] {}: {}".format(section, message))
+        else:
+            print("[WARN] {}".format(message))
+
+    for item in result.get("errors", []):
+        message = item.get("message")
+        section = item.get("section")
+        path = item.get("path")
+
+        if section and path:
+            print("[FAIL] {}: {} ({})".format(section, message, path))
+        elif section:
+            print("[FAIL] {}: {}".format(section, message))
+        else:
+            print("[FAIL] {}".format(message))
+
+    print("")
+    print("Summary:")
+    print("  OK: {}".format(len(result.get("ok", []))))
+    print("  Warnings: {}".format(len(result.get("warnings", []))))
+    print("  Failures: {}".format(len(result.get("errors", []))))
+
+    return 1 if result.get("errors") else 0
+
+
+def print_manifest_repair_plan(plan):
+    """Print manifest repair plan."""
+    print("AeroLIT sync manifest repair plan")
+    print("")
+    print("Bundle path:")
+    print("  {}".format(plan["bundle_path"]))
+    print("")
+    print("Sections:")
+
+    for item in plan.get("sections", []):
+        print("  - {}".format(item["section"]))
+        print("      target: {}".format(item["target"]))
+        print("      action: rebuild manifest section from current installed content")
+
+    if plan.get("warnings"):
+        print("")
+        print("Warnings:")
+        for warning in plan["warnings"]:
+            print("  - {}".format(warning))
+
+
+def run_sync_manifest(args, raw_args):
+    """Run aerolitctl sync manifest commands."""
+    ensure_sync_directories()
+
+    if not raw_args:
+        print("ERROR: Missing manifest command.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Valid commands:", file=sys.stderr)
+        print("  validate", file=sys.stderr)
+        print("  repair", file=sys.stderr)
+        return 2
+
+    command = raw_args[0]
+    bundle_path = resolve_bundle_path(args)
+
+    if command == "validate":
+        result = validate_installed_manifest(
+            bundle_path,
+            check_checksums=getattr(args, "verbose", False),
+        )
+
+        if not getattr(args, "verbose", False):
+            print("Note: run with --verbose to also checksum tracked files.")
+            print("")
+
+        return print_manifest_validation_result(result)
+
+    if command == "repair":
+        try:
+            plan = build_baseline_plan(args)
+        except ValueError as exc:
+            print("ERROR: {}".format(exc), file=sys.stderr)
+            return 2
+
+        print_manifest_repair_plan(plan)
+
+        if getattr(args, "dry_run", False):
+            print("")
+            print("Dry run only. No manifest changed.")
+            return 0
+
+        if not getattr(args, "yes", False):
+            print("")
+            print("This will rebuild the sync manifest from the current installed bundle.")
+            print("No bundle files will be changed.")
+            print("")
+            if not confirm_continue():
+                print("Cancelled. No files changed.")
+                return 130
+
+        changed = apply_baseline_plan(plan)
+
+        print("")
+        print("AeroLIT sync manifest repair completed.")
+        print("")
+        print("Updated manifest:")
+        print("  {}".format(sync_manifest_file()))
+        print("")
+        print("Sections repaired:")
+        print("  {}".format(len(changed)))
+
+        return 0
+
+    print("ERROR: Unknown manifest command: {}".format(command), file=sys.stderr)
+    print("", file=sys.stderr)
+    print("Valid commands:", file=sys.stderr)
+    print("  validate", file=sys.stderr)
+    print("  repair", file=sys.stderr)
+    return 2
+
+
 def run_sync_baseline(args, raw_args):
     """Run aerolitctl sync baseline."""
     ensure_sync_directories()
@@ -5316,6 +7630,12 @@ def run_sync_status(args):
         print("    updated: {}".format(section.get("updated_utc") or "unknown"))
         print("    root: {}".format(section.get("root") or "unknown"))
 
+        if section.get("version"):
+            print("    version: {}".format(section.get("version")))
+
+        if section.get("version_source"):
+            print("    version source: {}".format(section.get("version_source")))
+
         if trees:
             print("    trees: {}".format(len(trees)))
             for tree_name in sorted(trees):
@@ -5367,10 +7687,23 @@ def run_sync_apply_or_diff(args, source, diff_mode=False):
             print("  {}".format(source), file=sys.stderr)
             return 1
 
-        print_detected_sections(
-            detected_sections,
-            show_paths=getattr(args, "verbose", False),
-        )
+        output_format = plan_output_format(args)
+
+        if output_format == "text":
+            print_detected_sections(
+                detected_sections,
+                show_paths=getattr(args, "verbose", False),
+            )
+
+        if multi_section_requested(args):
+            return run_multi_section_plan_only(
+                args,
+                source,
+                bundle_path,
+                source_root,
+                detected_sections,
+                extract_skipped,
+            )
 
         selected = selected_sections(args, detected_sections)
 
@@ -5476,6 +7809,9 @@ def run_sync_apply_or_diff(args, source, diff_mode=False):
             ):
                 plan["skipped"].append(item)
 
+        add_requested_option_notes(plan, args)
+        add_source_version_metadata_to_plan(plan, source_root)
+
         plan["_diff_lines"] = resolve_diff_line_limit(args)
 
         diff_path = getattr(args, "path", None)
@@ -5494,12 +7830,49 @@ def run_sync_apply_or_diff(args, source, diff_mode=False):
             )
             plan = filter_plan_to_path(plan, diff_path)
 
+        dry_run = bool(getattr(args, "dry_run", False) or diff_mode)
+        plan_output_requested = bool(getattr(args, "plan_output", None))
+
+        if (output_format != "text" or plan_output_requested) and not dry_run:
+            print(
+                "ERROR: --output json/yaml and --plan-output are plan-only features. "
+                "Use them with --dry-run or 'aerolitctl sync diff'.",
+                file=sys.stderr,
+            )
+            return 2
+
+        plan_document = build_plan_output_document(
+            source,
+            bundle_path,
+            detected_sections,
+            plan,
+            dry_run=dry_run,
+            diff_mode=diff_mode,
+            source_root=source_root,
+            argv=getattr(args, "_aerolitctl_argv", []),
+        )
+
+        plan_output_path = write_plan_output_file(
+            args,
+            plan_document,
+            output_format,
+        )
+
+        if output_format != "text":
+            print_machine_plan(plan_document, output_format)
+            return 0
+
         print_plan(
             plan,
             show_files=getattr(args, "show_files", False) or diff_mode,
             show_all_files=getattr(args, "show_all_files", False),
             show_skipped=getattr(args, "show_skipped", False),
         )
+
+        if plan_output_path:
+            print("")
+            print("Plan output:")
+            print("  {}".format(plan_output_path))
 
         if diff_mode and diff_path:
             show_diff_for_path(
@@ -5508,7 +7881,6 @@ def run_sync_apply_or_diff(args, source, diff_mode=False):
                 max_lines=plan.get("_diff_lines", DEFAULT_DIFF_LINE_LIMIT),
             )
 
-        dry_run = bool(getattr(args, "dry_run", False) or diff_mode)
         preserve_file = sync_preserve_file(bundle_path)
 
         review_conflicts = (
@@ -5599,13 +7971,21 @@ def run_sync_apply_or_diff(args, source, diff_mode=False):
         elif active_section == SECTION_EXTRACTED_ISOS:
             changed, backup_root = apply_extracted_isos_plan(
                 plan,
-                keep_old=getattr(args, "keep_old_isos", False),
+                keep_old=keep_old_iso_tree_requested(args),
             )
         else:
             changed, backup_root = apply_bundle_section_plan(
                 plan,
                 active_section,
                 no_backup=getattr(args, "no_backup", False),
+            )
+
+        pre_sync_manifest_path = None
+
+        if backup_root:
+            pre_sync_manifest_path = write_pre_sync_manifest_backup(
+                backup_root,
+                manifest,
             )
 
         for pattern in added_preserve_patterns:
@@ -5633,6 +8013,12 @@ def run_sync_apply_or_diff(args, source, diff_mode=False):
                 preserve_patterns,
             )
 
+        apply_source_version_metadata_to_manifest_section(
+            manifest,
+            active_section,
+            plan,
+        )
+
         save_manifest(manifest)
 
         report = build_report(
@@ -5648,6 +8034,12 @@ def run_sync_apply_or_diff(args, source, diff_mode=False):
             argv=getattr(args, "_aerolitctl_argv", []),
         )
         report_path = write_report(report)
+        backup_metadata_path = write_backup_metadata(
+            backup_root,
+            report_path,
+            report,
+            pre_sync_manifest_path=pre_sync_manifest_path,
+        )
         record_manifest_sync_report(report_path, report)
 
         print("")
@@ -5660,6 +8052,15 @@ def run_sync_apply_or_diff(args, source, diff_mode=False):
             print("")
             print("Backup:")
             print("  {}".format(backup_root))
+
+            summary = backup_summary(backup_root)
+            print("  size: {}".format(summary.get("size", "unknown")))
+            print("  files: {}".format(summary.get("file_count", 0)))
+
+            if backup_metadata_path:
+                print("")
+                print("Backup metadata:")
+                print("  {}".format(backup_metadata_path))
 
         print("")
         print("Updated manifest:")
@@ -5699,6 +8100,22 @@ def usage_error():
     print("  aerolitctl sync baseline --section all --dry-run", file=sys.stderr)
     print("  aerolitctl sync diff /path/to/collections-hub.tar --diff-lines 80", file=sys.stderr)
     print("  aerolitctl sync diff /path/to/collections-hub.tar --path ansible/site.yml", file=sys.stderr)
+    print("  aerolitctl sync SOURCE --dry-run --output json", file=sys.stderr)
+    print("  aerolitctl sync SOURCE --dry-run --output yaml", file=sys.stderr)
+    print("  aerolitctl sync SOURCE --dry-run --plan-output /tmp/aerolit-sync-plan.yml", file=sys.stderr)
+    print("  aerolitctl sync preserve validate", file=sys.stderr)
+    print("  aerolitctl sync preserve explain ansible/inventory/hosts.ini", file=sys.stderr)
+    print("  aerolitctl sync --section files preserve explain custom/my-file.tar", file=sys.stderr)
+    print("  aerolitctl sync preserve edit", file=sys.stderr)
+    print("  aerolitctl sync manifest validate", file=sys.stderr)
+    print("  aerolitctl sync manifest validate --verbose", file=sys.stderr)
+    print("  aerolitctl sync manifest repair --dry-run", file=sys.stderr)
+    print("  aerolitctl sync manifest repair --yes", file=sys.stderr)
+    print("  aerolitctl sync SOURCE --section extracted-isos --rhel-major 8 --large-backup --dry-run", file=sys.stderr)
+    print("  aerolitctl sync SOURCE --restart-affected --dry-run", file=sys.stderr)
+    print("  aerolitctl sync SOURCE --section all --dry-run", file=sys.stderr)
+    print("  aerolitctl sync SOURCE --section all --dry-run --show-files", file=sys.stderr)
+    print("  aerolitctl sync SOURCE --section all --dry-run --output json", file=sys.stderr)
     return 2
 
 
@@ -5719,6 +8136,9 @@ def run_sync(args):
 
     if command == "preserve":
         return run_sync_preserve(args, raw_args[1:])
+
+    if command == "manifest":
+        return run_sync_manifest(args, raw_args[1:])
 
     if command == "rollback":
         return run_sync_rollback(args, raw_args[1:])
