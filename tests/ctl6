@@ -1,3 +1,15 @@
+aerolitctl sync /tmp/aerolit-tar-safety/aerolit-tar-safety.tar --section collections-hub --dry-run --show-files --show-skipped
+
+latest_report="$(ls -1t /var/log/aerolit/sync/*sync-report.yml /var/log/aerolit/sync/*multi-section-sync-plan.yml 2>/dev/null | head -1)"
+echo "$latest_report"
+grep -nE "unsafe path|link member|special tar member|bad-symlink|bad-hardlink|bad-fifo|aerolit-evil" "$latest_report" || true
+
+
+
+
+
+
+
 SRC="/aerolit_rhel8_standard-1.13.0.tar.gz"
 
 echo
