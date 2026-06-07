@@ -33,6 +33,7 @@ from .paths import (
 
 MANIFEST_KIND = "AeroLITSyncManifest"
 REPORT_KIND = "AeroLITSyncReport"
+DEFAULT_FILE_LIST_LIMIT = 25
 
 SECTION_COLLECTIONS_HUB = "collections-hub"
 SECTION_FILES = "files"
@@ -938,7 +939,8 @@ def build_collections_hub_plan(source_path, target_path, manifest, force=False):
         plan["warnings"].append(
             "No installed collections-hub sync manifest exists yet. "
             "Existing changed files will be treated carefully. "
-            "Use --force to replace differing files after reviewing the plan."
+            "If the current collections-hub is trusted, run: "
+            "aerolitctl sync baseline --section collections-hub"
         )
 
     for relative in sorted(source_files):
@@ -1089,7 +1091,8 @@ def build_files_plan(source_path, target_path, manifest, force=False, mode="addi
         plan["warnings"].append(
             "No installed files/ sync manifest exists yet. "
             "Existing differing files will be treated carefully. "
-            "Use --force only after reviewing the plan."
+            "If the current files/ directory is trusted, run: "
+            "aerolitctl sync baseline --section files"
         )
 
     if mode == "mirror":
@@ -1254,7 +1257,8 @@ def build_repos_plan(source_path, target_path, manifest, force=False, mode="addi
         plan["warnings"].append(
             "No installed repos/ sync manifest exists yet. "
             "Existing differing repo files will be treated carefully. "
-            "Use --force only after reviewing the plan."
+            "If the current repos/ directory is trusted, run: "
+            "aerolitctl sync baseline --section repos"
         )
 
     if mode == "additive":
@@ -1584,7 +1588,35 @@ def plan_counts(plan):
     }
 
 
-def print_path_list(title, items, limit=None):
+def plan_display_limit(show_all_files=False):
+    """Return file-list display limit for terminal output."""
+    if show_all_files:
+        return None
+
+    return DEFAULT_FILE_LIST_LIMIT
+
+
+def important_skipped_count(plan):
+    """Return count of skipped entries, mostly for terminal summary."""
+    return len(plan.get("skipped", []))
+
+
+def print_skipped_summary(plan):
+    """Print a short skipped summary without flooding the terminal."""
+    skipped = important_skipped_count(plan)
+
+    if not skipped:
+        return
+
+    print("")
+    print("Skipped entries:")
+    print("  {}".format(skipped))
+    print("  Mostly symlinks, link members, preserved directories, or non-regular files.")
+    print("  Use --show-files --show-skipped to list them.")
+    print("  Full skipped details are written to the sync report.")
+
+
+def print_path_list(title, items, limit=None, show_details=True, intro=None):
     """Print list of planned paths."""
     items = list(items or [])
 
@@ -1594,12 +1626,16 @@ def print_path_list(title, items, limit=None):
     print("")
     print(title)
 
+    if intro:
+        print("  {}".format(intro))
+
     count = 0
     for item in items:
         count += 1
 
         if limit and count > limit:
             print("  ... {} more".format(len(items) - limit))
+            print("  Use --show-all-files to show the full list.")
             break
 
         if isinstance(item, dict):
@@ -1607,9 +1643,9 @@ def print_path_list(title, items, limit=None):
             reason = item.get("reason")
             action = item.get("action")
 
-            if reason and action:
+            if show_details and reason and action:
                 print("  - {} ({}, {})".format(path, reason, action))
-            elif reason:
+            elif show_details and reason:
                 print("  - {} ({})".format(path, reason))
             else:
                 print("  - {}".format(path))
@@ -1617,9 +1653,15 @@ def print_path_list(title, items, limit=None):
             print("  - {}".format(item))
 
 
-def print_plan(plan, show_files=False):
+def print_plan(
+    plan,
+    show_files=False,
+    show_all_files=False,
+    show_skipped=False,
+):
     """Print a sync plan."""
     counts = plan_counts(plan)
+    limit = plan_display_limit(show_all_files=show_all_files)
 
     print("AeroLIT sync plan")
     print("")
@@ -1639,9 +1681,9 @@ def print_plan(plan, show_files=False):
     print("  remove:                 {}".format(counts["remove"]))
     print("  preserve:               {}".format(counts["preserve"]))
     print("  possible user changes:  {}".format(counts["conflicts"]))
-    print("  unchanged:       {}".format(counts["unchanged"]))
-    print("  local untracked: {}".format(counts["local_untracked"]))
-    print("  skipped:         {}".format(counts["skipped"]))
+    print("  unchanged:              {}".format(counts["unchanged"]))
+    print("  local untracked:        {}".format(counts["local_untracked"]))
+    print("  skipped:                {}".format(counts["skipped"]))
 
     if (
         counts.get("tree_add")
@@ -1649,10 +1691,10 @@ def print_plan(plan, show_files=False):
         or counts.get("tree_keep")
         or counts.get("tree_skipped")
     ):
-        print("  tree add:        {}".format(counts["tree_add"]))
-        print("  tree replace:    {}".format(counts["tree_replace"]))
-        print("  tree keep:       {}".format(counts["tree_keep"]))
-        print("  tree skipped:    {}".format(counts["tree_skipped"]))
+        print("  tree add:               {}".format(counts["tree_add"]))
+        print("  tree replace:           {}".format(counts["tree_replace"]))
+        print("  tree keep:              {}".format(counts["tree_keep"]))
+        print("  tree skipped:           {}".format(counts["tree_skipped"]))
 
     if plan.get("warnings"):
         print("")
@@ -1660,22 +1702,71 @@ def print_plan(plan, show_files=False):
         for warning in plan["warnings"]:
             print("  - {}".format(warning))
 
+    if counts["bundle_managed_update"]:
+        print("")
+        print("Bundle-managed update note:")
+        print(
+            "  These are normal bundle-owned collection files that differ from "
+            "the incoming bundle."
+        )
+        print(
+            "  They are separated from possible user changes so the plan is easier "
+            "to review."
+        )
+
+    if counts["conflicts"]:
+        print("")
+        print("Possible user/manual changes note:")
+        print(
+            "  These need review because AeroLIT cannot safely prove they are only "
+            "old bundle-owned files."
+        )
+
+    if counts["skipped"] and not show_skipped:
+        print_skipped_summary(plan)
+
     if show_files:
-        print_path_list("Add:", plan.get("add"))
-        print_path_list("Update:", plan.get("update"))
+        print_path_list("Add:", plan.get("add"), limit=limit)
+        print_path_list("Update:", plan.get("update"), limit=limit)
+
         print_path_list(
             "Bundle-managed updates:",
             plan.get("bundle_managed_update"),
+            limit=limit,
+            show_details=False,
+            intro=(
+                "Normal vendored collection content that would be refreshed "
+                "from the incoming bundle."
+            ),
         )
-        print_path_list("Remove:", plan.get("remove"))
-        print_path_list("Preserve:", plan.get("preserve"))
-        print_path_list("Possible user/manual changes:", plan.get("conflicts"))
-        print_path_list("Local untracked files left alone:", plan.get("local_untracked"))
-        print_path_list("Skipped:", plan.get("skipped"))
-        print_path_list("Tree add:", plan.get("tree_add"))
-        print_path_list("Tree replace:", plan.get("tree_replace"))
-        print_path_list("Tree keep:", plan.get("tree_keep"))
-        print_path_list("Tree skipped:", plan.get("tree_skipped"))
+
+        print_path_list("Remove:", plan.get("remove"), limit=limit)
+        print_path_list("Preserve:", plan.get("preserve"), limit=limit)
+
+        print_path_list(
+            "Possible user/manual changes:",
+            plan.get("conflicts"),
+            limit=limit,
+        )
+
+        print_path_list(
+            "Local untracked files left alone:",
+            plan.get("local_untracked"),
+            limit=limit,
+        )
+
+        if show_skipped:
+            print_path_list(
+                "Skipped:",
+                plan.get("skipped"),
+                limit=limit,
+                show_details=True,
+            )
+
+        print_path_list("Tree add:", plan.get("tree_add"), limit=limit)
+        print_path_list("Tree replace:", plan.get("tree_replace"), limit=limit)
+        print_path_list("Tree keep:", plan.get("tree_keep"), limit=limit)
+        print_path_list("Tree skipped:", plan.get("tree_skipped"), limit=limit)
     else:
         print_path_list(
             "Possible user/manual changes:",
@@ -4033,7 +4124,12 @@ def run_sync_apply_or_diff(args, source, diff_mode=False):
             ):
                 plan["skipped"].append(item)
 
-        print_plan(plan, show_files=getattr(args, "show_files", False) or diff_mode)
+        print_plan(
+            plan,
+            show_files=getattr(args, "show_files", False) or diff_mode,
+            show_all_files=getattr(args, "show_all_files", False),
+            show_skipped=getattr(args, "show_skipped", False),
+        )
 
         dry_run = bool(getattr(args, "dry_run", False) or diff_mode)
         preserve_file = sync_preserve_file(bundle_path)
@@ -4213,6 +4309,9 @@ def usage_error():
     print("  aerolitctl sync cleanup --dry-run", file=sys.stderr)
     print("  aerolitctl sync cleanup --keep 5 --days 30", file=sys.stderr)
     print("  aerolitctl sync /path/to/collections-hub.tar --dry-run", file=sys.stderr)
+    print("  aerolitctl sync SOURCE --dry-run --show-files", file=sys.stderr)
+    print("  aerolitctl sync SOURCE --dry-run --show-files --show-all-files", file=sys.stderr)
+    print("  aerolitctl sync SOURCE --dry-run --show-files --show-skipped", file=sys.stderr)
     print("  aerolitctl sync /path/to/files-update.tar --section files --dry-run", file=sys.stderr)
     print("  aerolitctl sync /path/to/repos-update.tar --section repos --dry-run", file=sys.stderr)
     print("  aerolitctl sync /path/to/rhel-update.tar --section extracted-isos --dry-run", file=sys.stderr)
