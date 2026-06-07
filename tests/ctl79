@@ -11,6 +11,7 @@ import shutil
 import sys
 import tarfile
 import time
+import warnings
 from datetime import datetime
 from pathlib import Path
 
@@ -66,10 +67,13 @@ DEFAULT_COLLECTIONS_HUB_PRESERVE_PATTERNS = (
     "ansible/*local*.yml",
 )
 
-
 DEFAULT_FILES_PRESERVE_PATTERNS = (
     "custom/**",
     "site-overrides/**",
+)
+
+BUNDLE_MANAGED_COLLECTIONS_PATTERNS = (
+    "collections/ansible_collections/**",
 )
 
 
@@ -189,7 +193,9 @@ def safe_extract_tar(archive_path, destination):
                 )
                 continue
 
-            tar.extract(member, str(destination))
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                tar.extract(member, str(destination))
 
     return skipped
 
@@ -341,6 +347,38 @@ def detect_sections(source_root):
                 detected["extracted_isos"] = extracted_isos
 
     return detected
+
+
+def skipped_entry_name(item):
+    """Return normalized skipped entry name."""
+    if not isinstance(item, dict):
+        return normalize_relative_path(str(item))
+
+    return normalize_relative_path(
+        item.get("path") or item.get("name") or ""
+    )
+
+
+def extract_skipped_for_section(extract_skipped, source_root, section_source_path):
+    """Return skipped archive entries that belong to the active section."""
+    if not extract_skipped:
+        return []
+
+    try:
+        section_prefix = relpath(section_source_path, source_root)
+    except ValueError:
+        return list(extract_skipped)
+
+    section_prefix = normalize_relative_path(section_prefix).rstrip("/")
+    filtered = []
+
+    for item in extract_skipped:
+        name = skipped_entry_name(item)
+
+        if name == section_prefix or name.startswith(section_prefix + "/"):
+            filtered.append(item)
+
+    return filtered
 
 
 def load_manifest():
@@ -743,6 +781,15 @@ def is_preserved(relative_path, patterns):
     return False
 
 
+def is_bundle_managed_collections_path(relative_path):
+    """Return True when a collections-hub path is normal bundle-managed content."""
+    for pattern in BUNDLE_MANAGED_COLLECTIONS_PATTERNS:
+        if path_matches_pattern(relative_path, pattern):
+            return True
+
+    return False
+
+
 def scan_files(root, preserve_patterns=None):
     """Scan regular files under root and return metadata by relative path."""
     root = Path(root)
@@ -849,6 +896,7 @@ def empty_plan(section, source_path, target_path):
         "target_path": str(target_path),
         "add": [],
         "update": [],
+        "bundle_managed_update": [],
         "remove": [],
         "preserve": [],
         "conflicts": [],
@@ -931,10 +979,36 @@ def build_collections_hub_plan(source_path, target_path, manifest, force=False):
             continue
 
         if not previous_checksum and not force:
+            if is_bundle_managed_collections_path(relative):
+                plan["bundle_managed_update"].append(
+                    {
+                        "path": relative,
+                        "reason": (
+                            "bundle-managed collection content; no previous "
+                            "sync baseline exists yet"
+                        ),
+                        "action": "would update from incoming source",
+                    }
+                )
+                continue
+
             plan["conflicts"].append(
                 {
                     "path": relative,
-                    "reason": "existing file differs and no previous sync checksum is available",
+                    "reason": (
+                        "existing file differs and no previous sync checksum "
+                        "is available"
+                    ),
+                    "action": "would update from incoming source",
+                }
+            )
+            continue
+
+        if is_bundle_managed_collections_path(relative):
+            plan["bundle_managed_update"].append(
+                {
+                    "path": relative,
+                    "reason": "bundle-managed collection content",
                     "action": "would update from incoming source",
                 }
             )
@@ -1296,14 +1370,20 @@ def build_repos_plan(source_path, target_path, manifest, force=False, mode="addi
 
 def normalized_rhel_tree_name(name):
     """Return normalized rhelN tree name, or None when not recognized."""
-    name = str(name).strip().lower().replace("-", "").replace("_", "")
+    cleaned = str(name).strip().lower()
+    cleaned = cleaned.replace("-", "").replace("_", "")
 
-    if name.startswith("rhel"):
-        suffix = name[len("rhel"):]
-    elif name.startswith("el"):
-        suffix = name[len("el"):]
+    if cleaned.startswith("rhel"):
+        suffix = cleaned[len("rhel"):]
+    elif cleaned.startswith("el"):
+        suffix = cleaned[len("el"):]
     else:
         return None
+
+    if suffix.endswith("isos"):
+        suffix = suffix[:-4]
+    elif suffix.endswith("iso"):
+        suffix = suffix[:-3]
 
     if not suffix.isdigit():
         return None
@@ -1446,10 +1526,15 @@ def build_extracted_isos_plan(source_path, target_path, args):
         source_tree = incoming_trees[name]
         target_tree = current_trees.get(name)
 
+        if target_tree:
+            planned_target = target_tree
+        else:
+            planned_target = target_path / source_tree.name
+
         item = {
             "path": name,
             "source": str(source_tree),
-            "target": str(target_path / name),
+            "target": str(planned_target),
             "incoming": extracted_iso_tree_info(source_tree),
             "current": extracted_iso_tree_info(target_tree) if target_tree else None,
         }
@@ -1484,6 +1569,7 @@ def plan_counts(plan):
     return {
         "add": len(plan.get("add", [])),
         "update": len(plan.get("update", [])),
+        "bundle_managed_update": len(plan.get("bundle_managed_update", [])),
         "remove": len(plan.get("remove", [])),
         "preserve": len(plan.get("preserve", [])),
         "conflicts": len(plan.get("conflicts", [])),
@@ -1547,11 +1633,12 @@ def print_plan(plan, show_files=False):
     print("  {}".format(plan["target_path"]))
     print("")
     print("Planned changes:")
-    print("  add:             {}".format(counts["add"]))
-    print("  update:          {}".format(counts["update"]))
-    print("  remove:          {}".format(counts["remove"]))
-    print("  preserve:        {}".format(counts["preserve"]))
-    print("  conflicts:       {}".format(counts["conflicts"]))
+    print("  add:                    {}".format(counts["add"]))
+    print("  update:                 {}".format(counts["update"]))
+    print("  bundle-managed updates: {}".format(counts["bundle_managed_update"]))
+    print("  remove:                 {}".format(counts["remove"]))
+    print("  preserve:               {}".format(counts["preserve"]))
+    print("  possible user changes:  {}".format(counts["conflicts"]))
     print("  unchanged:       {}".format(counts["unchanged"]))
     print("  local untracked: {}".format(counts["local_untracked"]))
     print("  skipped:         {}".format(counts["skipped"]))
@@ -1576,9 +1663,13 @@ def print_plan(plan, show_files=False):
     if show_files:
         print_path_list("Add:", plan.get("add"))
         print_path_list("Update:", plan.get("update"))
+        print_path_list(
+            "Bundle-managed updates:",
+            plan.get("bundle_managed_update"),
+        )
         print_path_list("Remove:", plan.get("remove"))
         print_path_list("Preserve:", plan.get("preserve"))
-        print_path_list("Conflicts:", plan.get("conflicts"))
+        print_path_list("Possible user/manual changes:", plan.get("conflicts"))
         print_path_list("Local untracked files left alone:", plan.get("local_untracked"))
         print_path_list("Skipped:", plan.get("skipped"))
         print_path_list("Tree add:", plan.get("tree_add"))
@@ -1586,7 +1677,11 @@ def print_plan(plan, show_files=False):
         print_path_list("Tree keep:", plan.get("tree_keep"))
         print_path_list("Tree skipped:", plan.get("tree_skipped"))
     else:
-        print_path_list("Conflicts:", plan.get("conflicts"), limit=20)
+        print_path_list(
+            "Possible user/manual changes:",
+            plan.get("conflicts"),
+            limit=20,
+        )
 
 
 def confirm_continue():
@@ -2013,7 +2108,11 @@ def apply_collections_hub_plan(plan, no_backup=False):
     changed = []
 
     backup_root = None
-    if not no_backup and (plan.get("update") or plan.get("remove")):
+    if not no_backup and (
+        plan.get("update")
+        or plan.get("bundle_managed_update")
+        or plan.get("remove")
+    ):
         backup_root = sync_backup_dir() / utc_stamp()
         backup_root.mkdir(parents=True, exist_ok=True)
 
@@ -2022,14 +2121,24 @@ def apply_collections_hub_plan(plan, no_backup=False):
         copy_incoming_file(source_root, target_root, relative)
         changed.append({"action": "add", "path": relative})
 
-    for item in plan.get("update", []):
+    update_items = []
+    update_items.extend(plan.get("update", []))
+    update_items.extend(plan.get("bundle_managed_update", []))
+
+    for item in update_items:
         relative = item["path"]
 
         if backup_root:
             backup_target_file(target_root, relative, backup_root)
 
         copy_incoming_file(source_root, target_root, relative)
-        changed.append({"action": "update", "path": relative})
+
+        if item in plan.get("bundle_managed_update", []):
+            action = "bundle-managed-update"
+        else:
+            action = "update"
+
+        changed.append({"action": action, "path": relative})
 
     for item in plan.get("remove", []):
         relative = item["path"]
@@ -2064,7 +2173,11 @@ def apply_bundle_section_plan(plan, section, no_backup=False):
     changed = []
 
     backup_root = None
-    if not no_backup and (plan.get("update") or plan.get("remove")):
+    if not no_backup and (
+        plan.get("update")
+        or plan.get("bundle_managed_update")
+        or plan.get("remove")
+    ):
         backup_root = sync_backup_dir() / utc_stamp()
         backup_root.mkdir(parents=True, exist_ok=True)
 
@@ -2286,6 +2399,10 @@ def report_plan_files(plan):
     return {
         "add": report_plan_items(plan, "add"),
         "update": report_plan_items(plan, "update"),
+        "bundle_managed_update": report_plan_items(
+            plan,
+            "bundle_managed_update",
+        ),
         "remove": report_plan_items(plan, "remove"),
         "preserve": report_plan_items(plan, "preserve"),
         "conflicts": report_plan_items(plan, "conflicts"),
@@ -2415,7 +2532,12 @@ def report_is_rollback_candidate(report):
         return False
 
     for item in report.get("changed", []):
-        if item.get("action") in ("add", "update", "remove"):
+        if item.get("action") in (
+            "add",
+            "update",
+            "bundle-managed-update",
+            "remove",
+        ):
             return True
 
     return False
@@ -2616,7 +2738,7 @@ def build_rollback_plan(report_path, report, bundle_path, force=False):
             )
             continue
 
-        if action in ("update", "remove"):
+        if action in ("update", "bundle-managed-update", "remove"):
             if not backup_root_path:
                 plan["conflicts"].append(
                     {
@@ -2637,7 +2759,7 @@ def build_rollback_plan(report_path, report, bundle_path, force=False):
                 )
                 continue
 
-            if action == "update":
+            if action in ("update", "bundle-managed-update"):
                 if target.exists() and not force and not current_matches_manifest(
                     target_root,
                     relative,
@@ -3579,6 +3701,154 @@ def choose_active_section(args, selected, detected_sections):
     return None
 
 
+def selected_baseline_sections(args):
+    """Return sections selected for baseline."""
+    requested = getattr(args, "section", "all")
+
+    if requested == "extracted-isos":
+        requested = SECTION_EXTRACTED_ISOS
+
+    if requested == "all":
+        return list(SUPPORTED_SECTIONS)
+
+    if requested not in SUPPORTED_SECTIONS:
+        raise ValueError("Unsupported baseline section: {}".format(requested))
+
+    return [requested]
+
+
+def build_baseline_plan(args):
+    """Build baseline plan for current installed bundle."""
+    bundle_path = resolve_bundle_path(args)
+    sections = selected_baseline_sections(args)
+
+    plan = {
+        "bundle_path": str(bundle_path),
+        "sections": [],
+        "warnings": [],
+    }
+
+    for section in sections:
+        target = section_target_path(bundle_path, section)
+
+        item = {
+            "section": section,
+            "target": str(target),
+            "exists": target.exists(),
+            "action": "baseline current installed content",
+        }
+
+        if not target.exists():
+            item["action"] = "skip missing section"
+            plan["warnings"].append(
+                "Skipping missing section {}: {}".format(section, target)
+            )
+
+        plan["sections"].append(item)
+
+    return plan
+
+
+def print_baseline_plan(plan):
+    """Print baseline plan."""
+    print("AeroLIT sync baseline plan")
+    print("")
+    print("Bundle path:")
+    print("  {}".format(plan["bundle_path"]))
+    print("")
+    print("Sections:")
+
+    for item in plan.get("sections", []):
+        print("  - {}".format(item["section"]))
+        print("      target: {}".format(item["target"]))
+        print("      action: {}".format(item["action"]))
+
+    if plan.get("warnings"):
+        print("")
+        print("Warnings:")
+        for warning in plan["warnings"]:
+            print("  - {}".format(warning))
+
+
+def apply_baseline_plan(plan):
+    """Apply baseline plan by rebuilding manifest sections from current bundle."""
+    manifest = load_manifest()
+    bundle_path = Path(plan["bundle_path"])
+
+    manifest.setdefault("sections", {})
+    manifest["bundle_path"] = str(bundle_path)
+
+    changed = []
+
+    for item in plan.get("sections", []):
+        if not item.get("exists"):
+            continue
+
+        section = item["section"]
+        target = section_target_path(bundle_path, section)
+
+        if section == SECTION_EXTRACTED_ISOS:
+            manifest["sections"][section] = rebuild_extracted_isos_manifest(target)
+        else:
+            preserve_patterns = section_preserve_patterns(bundle_path, section)
+            manifest["sections"][section] = rebuild_section_manifest(
+                section,
+                target,
+                preserve_patterns,
+            )
+
+        changed.append(
+            {
+                "action": "baseline",
+                "section": section,
+                "target": str(target),
+            }
+        )
+
+    save_manifest(manifest)
+    return changed
+
+
+def run_sync_baseline(args, raw_args):
+    """Run aerolitctl sync baseline."""
+    ensure_sync_directories()
+
+    try:
+        plan = build_baseline_plan(args)
+    except ValueError as exc:
+        print("ERROR: {}".format(exc), file=sys.stderr)
+        return 2
+
+    print_baseline_plan(plan)
+
+    if getattr(args, "dry_run", False):
+        print("")
+        print("Dry run only. No manifest changed.")
+        return 0
+
+    if not getattr(args, "yes", False):
+        print("")
+        print("This will trust the current installed bundle content as the sync baseline.")
+        print("No bundle files will be changed.")
+        print("")
+        if not confirm_continue():
+            print("Cancelled. No files changed.")
+            return 130
+
+    changed = apply_baseline_plan(plan)
+
+    print("")
+    print("AeroLIT sync baseline completed.")
+    print("")
+    print("Updated manifest:")
+    print("  {}".format(sync_manifest_file()))
+    print("")
+    print("Sections baselined:")
+    print("  {}".format(len(changed)))
+
+    return 0
+
+
 def run_sync_status(args):
     """Run aerolitctl sync status."""
     bundle_path = resolve_bundle_path(args)
@@ -3756,7 +4026,11 @@ def run_sync_apply_or_diff(args, source, diff_mode=False):
             return 2
 
         if extract_skipped:
-            for item in extract_skipped:
+            for item in extract_skipped_for_section(
+                extract_skipped,
+                source_root,
+                detected_sections[active_section],
+            ):
                 plan["skipped"].append(item)
 
         print_plan(plan, show_files=getattr(args, "show_files", False) or diff_mode)
@@ -3943,6 +4217,8 @@ def usage_error():
     print("  aerolitctl sync /path/to/repos-update.tar --section repos --dry-run", file=sys.stderr)
     print("  aerolitctl sync /path/to/rhel-update.tar --section extracted-isos --dry-run", file=sys.stderr)
     print("  aerolitctl sync diff /path/to/collections-hub.tar", file=sys.stderr)
+    print("  aerolitctl sync baseline --section collections-hub", file=sys.stderr)
+    print("  aerolitctl sync baseline --section all --dry-run", file=sys.stderr)
     return 2
 
 
@@ -3957,6 +4233,9 @@ def run_sync(args):
 
     if command == "status":
         return run_sync_status(args)
+
+    if command == "baseline":
+        return run_sync_baseline(args, raw_args[1:])
 
     if command == "preserve":
         return run_sync_preserve(args, raw_args[1:])
