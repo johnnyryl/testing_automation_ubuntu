@@ -1,3 +1,322 @@
+Yes — run these in this order. Replace the tar path if needed:
+
+```bash
+/aerolit_rhel8_standard-1.13.0.tar.gz
+```
+
+## 0. Basic syntax check
+
+```bash
+python3 -m compileall src
+```
+
+## 1. Check disk space before staging anything big
+
+```bash
+df -h /
+df -h /var
+df -h /var/lib/aerolit 2>/dev/null || true
+du -sh /var/lib/aerolit/sync 2>/dev/null || true
+```
+
+Do **not** run a real ISO sync if `/` is still low on space.
+
+## 2. Current sync status and preserve rules
+
+```bash
+aerolitctl sync status
+aerolitctl sync preserve list --defaults
+```
+
+## 3. Baseline test
+
+Dry-run first:
+
+```bash
+aerolitctl sync baseline --section collections-hub --dry-run
+```
+
+Then create the baseline:
+
+```bash
+aerolitctl sync baseline --section collections-hub --yes
+```
+
+Then check status again:
+
+```bash
+aerolitctl sync status
+```
+
+## 4. Collections-hub dry-run after baseline
+
+This is the big one. We want to see fewer scary conflicts and more normal bundle-managed updates.
+
+```bash
+aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --dry-run --show-files
+```
+
+Also run explicitly:
+
+```bash
+aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section collections-hub --dry-run --show-files
+```
+
+Expected good sign:
+
+```text
+bundle-managed updates: lots
+possible user changes: low or 0
+```
+
+## 5. Files section dry-run
+
+```bash
+aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section files --dry-run --show-files
+```
+
+Explicit additive mode:
+
+```bash
+aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section files --files-mode additive --dry-run --show-files
+```
+
+Mirror mode dry-run only:
+
+```bash
+aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section files --files-mode mirror --dry-run --show-files
+```
+
+## 6. Repos section dry-run
+
+Additive mode:
+
+```bash
+aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section repos --repo-mode additive --dry-run --show-files
+```
+
+Mirror mode dry-run only:
+
+```bash
+aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section repos --repo-mode mirror --dry-run --show-files
+```
+
+Expected good sign: mirror mode should **not** remove unrelated repo trees.
+
+## 7. Extracted ISO dry-runs
+
+General:
+
+```bash
+aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section extracted-isos --dry-run --show-files
+```
+
+RHEL 8 specifically:
+
+```bash
+aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section extracted-isos --rhel-major 8 --dry-run --show-files
+```
+
+RHEL 8 with keep-old behavior:
+
+```bash
+aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section extracted-isos --rhel-major 8 --keep-old-isos --dry-run --show-files
+```
+
+Expected good sign: it should recognize `rhel8iso` and should **not** say:
+
+```text
+Incoming extracted_isos source does not contain rhel8
+No recognized extracted ISO trees were found
+```
+
+## 8. Diff mode
+
+```bash
+aerolitctl sync diff /aerolit_rhel8_standard-1.13.0.tar.gz
+```
+
+Explicit collections-hub diff:
+
+```bash
+aerolitctl sync diff /aerolit_rhel8_standard-1.13.0.tar.gz --section collections-hub
+```
+
+## 9. Cleanup dry-run
+
+```bash
+aerolitctl sync cleanup --dry-run --show-files
+```
+
+With explicit retention:
+
+```bash
+aerolitctl sync cleanup --keep 5 --days 30 --dry-run --show-files
+```
+
+Do not run cleanup real yet unless the dry-run looks safe.
+
+## 10. Rollback list
+
+```bash
+aerolitctl sync rollback list
+```
+
+It may say no rollback-capable reports exist if you have not done a real sync yet. That is fine.
+
+## 11. Report inspection
+
+After the dry-runs, list reports:
+
+```bash
+ls -ltr /var/log/aerolit/sync
+```
+
+Show the newest report:
+
+```bash
+latest_report="$(ls -1t /var/log/aerolit/sync/*-sync-report.yml | head -1)"
+echo "$latest_report"
+sed -n '1,220p' "$latest_report"
+```
+
+## 12. Optional: verify no staging junk is left
+
+```bash
+find /var/lib/aerolit/sync/staging -maxdepth 2 -mindepth 1 -print 2>/dev/null
+```
+
+If this shows old staging directories after dry-runs, run cleanup dry-run again:
+
+```bash
+aerolitctl sync cleanup --dry-run --show-files
+```
+
+Send me screenshots/output for the collections-hub dry-run after baseline, the extracted-isos RHEL 8 dry-run, and the files/repos dry-runs.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 """Config creation and YAML helpers for aerolitctl."""
 
 import shutil
