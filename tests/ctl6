@@ -1,3 +1,235 @@
+SRC="/aerolit_rhel8_standard-1.13.0.tar.gz"
+
+echo
+echo "================================================================================"
+echo "TEST 1: compile"
+echo "================================================================================"
+python3 -m compileall src
+
+echo
+echo "================================================================================"
+echo "TEST 2: source exists"
+echo "================================================================================"
+ls -lh "$SRC"
+
+echo
+echo "================================================================================"
+echo "TEST 3: sync status"
+echo "================================================================================"
+aerolitctl sync status
+
+echo
+echo "================================================================================"
+echo "TEST 4: preserve defaults"
+echo "================================================================================"
+aerolitctl sync preserve defaults
+
+echo
+echo "================================================================================"
+echo "TEST 5: preserve add"
+echo "================================================================================"
+aerolitctl sync preserve add ansible/group_vars/all/site.yml
+
+echo
+echo "================================================================================"
+echo "TEST 6: preserve explain added pattern"
+echo "================================================================================"
+aerolitctl sync preserve explain ansible/group_vars/all/site.yml
+
+echo
+echo "================================================================================"
+echo "TEST 7: preserve remove"
+echo "================================================================================"
+aerolitctl sync preserve remove ansible/group_vars/all/site.yml
+
+echo
+echo "================================================================================"
+echo "TEST 8: preserve validate"
+echo "================================================================================"
+aerolitctl sync preserve validate
+
+echo
+echo "================================================================================"
+echo "TEST 9: manifest validate"
+echo "================================================================================"
+aerolitctl sync manifest validate
+
+echo
+echo "================================================================================"
+echo "TEST 10: collections-hub dry-run"
+echo "================================================================================"
+aerolitctl sync "$SRC" --section collections-hub --dry-run
+
+echo
+echo "================================================================================"
+echo "TEST 11: collections-hub dry-run with files"
+echo "================================================================================"
+aerolitctl sync "$SRC" --section collections-hub --dry-run --show-files
+
+echo
+echo "================================================================================"
+echo "TEST 12: files dry-run"
+echo "================================================================================"
+aerolitctl sync "$SRC" --section files --dry-run --show-files
+
+echo
+echo "================================================================================"
+echo "TEST 13: repos dry-run additive"
+echo "================================================================================"
+aerolitctl sync "$SRC" --section repos --repo-mode additive --dry-run --show-files
+
+echo
+echo "================================================================================"
+echo "TEST 14: extracted_isos dry-run for RHEL 8"
+echo "================================================================================"
+aerolitctl sync "$SRC" --section extracted-isos --rhel-major 8 --dry-run --show-files
+
+echo
+echo "================================================================================"
+echo "TEST 15: extracted_isos large-backup dry-run for RHEL 8"
+echo "================================================================================"
+aerolitctl sync "$SRC" --section extracted-isos --rhel-major 8 --large-backup --dry-run
+
+echo
+echo "================================================================================"
+echo "TEST 16: multi-section all dry-run"
+echo "================================================================================"
+aerolitctl sync "$SRC" --section all --dry-run
+
+echo
+echo "================================================================================"
+echo "TEST 17: multi-section all dry-run with files"
+echo "================================================================================"
+aerolitctl sync "$SRC" --section all --dry-run --show-files
+
+echo
+echo "================================================================================"
+echo "TEST 18: JSON output validation"
+echo "================================================================================"
+aerolitctl sync "$SRC" --section all --dry-run --output json | python3 -m json.tool >/dev/null && echo "JSON OK"
+
+echo
+echo "================================================================================"
+echo "TEST 19: plan output file"
+echo "================================================================================"
+aerolitctl sync "$SRC" --section all --dry-run --plan-output /tmp/aerolit-sync-plan.yml
+sed -n '1,120p' /tmp/aerolit-sync-plan.yml
+
+echo
+echo "================================================================================"
+echo "TEST 20: newest sync reports"
+echo "================================================================================"
+ls -1t /var/log/aerolit/sync | head -10
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section collections-hub --dry-run
 
 aerolitctl sync /aerolit_rhel8_standard-1.13.0.tar.gz --section collections-hub --dry-run --show-files
