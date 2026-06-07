@@ -415,6 +415,14 @@ def extract_skipped_for_section(extract_skipped, source_root, section_source_pat
 
     for item in extract_skipped:
         name = skipped_entry_name(item)
+        reason = ""
+
+        if isinstance(item, dict):
+            reason = str(item.get("reason") or "")
+
+        if reason == "unsafe path":
+            filtered.append(item)
+            continue
 
         if name == section_prefix or name.startswith(section_prefix + "/"):
             filtered.append(item)
