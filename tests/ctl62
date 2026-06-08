@@ -224,6 +224,114 @@ def cmd_deploy_server(args):
     )
 
 
+ROOT_COMMAND_GROUPS = (
+    (
+        "Core workflow",
+        (
+            ("configure", "Configure AeroLIT answers and generated inputs"),
+            ("generate", "Generate playbooks and PXE/Kickstart input files"),
+            ("deploy", "Apply saved AeroLIT configuration"),
+            ("provision", "Run ansible-playbook from the active AeroLIT bundle"),
+        ),
+    ),
+    (
+        "Bundle management",
+        (
+            ("path", "Show or update the configured AeroLIT bundle path"),
+            ("bundle", "Show or validate the configured AeroLIT bundle"),
+            ("sync", "Safely sync bundle updates into the active AeroLIT bundle"),
+        ),
+    ),
+    (
+        "Status and troubleshooting",
+        (
+            ("doctor", "Run AeroLIT health checks"),
+            ("status", "Show AeroLIT configuration and deployment readiness"),
+            ("logs", "Show AeroLIT logs"),
+        ),
+    ),
+    (
+        "Saved state",
+        (
+            ("settings", "Show, export, or import saved AeroLIT settings"),
+            ("backup", "Back up AeroLIT files"),
+        ),
+    ),
+    (
+        "Shell integration",
+        (
+            ("shell", "Show shell helpers and completion setup"),
+        ),
+    ),
+    (
+        "Other",
+        (
+            ("version", "Show aerolitctl version"),
+        ),
+    ),
+)
+
+
+ROOT_EXAMPLES = (
+    "configure init",
+    "configure server",
+    "deploy server",
+    "doctor",
+    "provision list",
+    "<command> --help",
+)
+
+
+def _format_root_command_groups():
+    """Return grouped top-level command help for aerolitctl."""
+    lines = []
+
+    for title, commands in ROOT_COMMAND_GROUPS:
+        lines.append("{}:".format(title))
+
+        for name, summary in commands:
+            lines.append("  {0:<12} {1}".format(name, summary))
+
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+def _format_root_examples(prog):
+    """Return root help examples."""
+    return "\n".join("  {0} {1}".format(prog, example) for example in ROOT_EXAMPLES)
+
+
+def _format_root_help(prog):
+    """Return polished root help without the giant argparse command list."""
+    return """usage: {0} [GLOBAL_OPTIONS] <command> [COMMAND_OPTIONS]
+
+Command and control interface for AeroLIT bundles.
+
+{1}
+
+Global options:
+  -h, --help   Show this help message and exit
+  --verbose    Show more detailed output
+
+Examples:
+{2}
+
+Run '{0} <command> --help' for command-specific help.
+""".format(
+        prog,
+        _format_root_command_groups(),
+        _format_root_examples(prog),
+    )
+
+
+class AeroLITRootArgumentParser(argparse.ArgumentParser):
+    """Custom top-level help while keeping argparse for command parsing."""
+
+    def format_help(self):
+        return _format_root_help(self.prog)
+
+
 def add_command_verbose(parser):
     """Allow --verbose after a leaf command.
 
@@ -1525,8 +1633,9 @@ def add_deploy_parser(subparsers):
 
 def build_parser():
     """Build command-line parser."""
-    parser = argparse.ArgumentParser(
+    parser = AeroLITRootArgumentParser(
         prog="aerolitctl",
+        usage="%(prog)s [GLOBAL_OPTIONS] <command> [COMMAND_OPTIONS]",
         description="Command and control interface for AeroLIT bundles.",
     )
 
@@ -1536,7 +1645,10 @@ def build_parser():
         help="Show more detailed output.",
     )
 
-    subparsers = parser.add_subparsers(dest="command")
+    subparsers = parser.add_subparsers(
+        dest="command",
+        metavar="<command>",
+    )
 
     version_parser = subparsers.add_parser(
         "version",
