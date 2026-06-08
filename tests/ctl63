@@ -735,6 +735,89 @@ def managed_repo_state_paths(args):
     ]
 
 
+def generate_state_paths(args):
+    """Return generated command test files that should be snapshotted/restored."""
+    return [
+        Path(args.generate_playbook_path),
+        Path(args.generate_nonmanaged_playbook_path),
+        Path(args.generate_pxe_profile_path),
+        Path(args.generate_pxe_template_path),
+    ]
+
+
+def generate_collection_fixture_root(args):
+    """Create and return an extra collection root for generate playbook tests."""
+    root = Path(args.log_dir) / "fixtures" / "ansible_collections"
+
+    fixtures = [
+        (
+            "aerolit",
+            "pxe_content",
+            "pxe_content",
+            "# PXE content role\n\nBuilds and serves PXE content.\n",
+            "---\n- name: pxe content fixture\n  ansible.builtin.debug:\n    msg: pxe-content\n",
+        ),
+        (
+            "aerolit",
+            "pxe_content",
+            "pxe_dnsmasq",
+            "# PXE dnsmasq role\n\nConfigures dnsmasq for PXE services.\n",
+            "---\n- name: pxe dnsmasq fixture\n  ansible.builtin.debug:\n    msg: pxe-dnsmasq\n",
+        ),
+        (
+            "hardened",
+            "lmco",
+            "os_hardening",
+            "# OS hardening role\n\nApplies baseline hardening settings.\n",
+            "---\n- name: hardening fixture\n  ansible.builtin.debug:\n    msg: hardening\n",
+        ),
+    ]
+
+    for namespace, collection, role, readme, tasks in fixtures:
+        role_dir = root / namespace / collection / "roles" / role
+        write_text(role_dir / "README.md", readme)
+        write_text(role_dir / "tasks" / "main.yml", tasks)
+
+    # Module/plugin-only collection. It should not appear in generate role lists.
+    write_text(
+        root / "community" / "general" / "plugins" / "modules" / "fixture.py",
+        "# module-only fixture\n",
+    )
+
+    return root
+
+
+def generate_template_fixture_root(args):
+    """Create and return a pxe-content template root for generate kickstart tests."""
+    root = Path(args.log_dir) / "fixtures" / "pxe-content-templates"
+
+    write_text(
+        root / "ks" / "rhel9-workstation.ks.j2",
+        "# RHEL 9 workstation Kickstart fixture\n"
+        "lang en_US.UTF-8\n"
+        "keyboard us\n"
+        "timezone UTC --utc\n",
+    )
+    write_text(
+        root / "partials" / "storage" / "lvm.ks.j2",
+        "# Storage fixture\n"
+        "clearpart --all --initlabel\n"
+        "autopart --type=lvm\n",
+    )
+    write_text(
+        root / "partials" / "network" / "dhcp.ks.j2",
+        "# Network fixture\n"
+        "network --bootproto=dhcp --activate\n",
+    )
+    write_text(
+        root / "partials" / "post" / "reboot.ks.j2",
+        "# Post fixture\n"
+        "reboot\n",
+    )
+
+    return root
+
+
 def assert_bundle_manifest_content(args):
     """Assert the bundle manifest exists and contains expected v1 fields."""
     manifest = bundle_manifest_path(args)
@@ -2933,6 +3016,7 @@ def test_bundle_manifest_lifecycle(args):
         bundle_path / "collections-hub" / ".gitlab-ci.yml",
         Path(args.generated_vars_path),
         *managed_pxe_state_paths(args),
+        *generate_state_paths(args),
     ]
 
     before_dry_run = sha256_paths(tracked_paths)
@@ -3034,6 +3118,403 @@ def test_bundle_manifest_lifecycle(args):
         after_second_init,
         "configure-init-manifest-idempotent",
     )
+
+
+def test_generate_help_and_parser(args):
+    """Confirm generate command parser, dynamic discovery, and guards work."""
+    collection_root = generate_collection_fixture_root(args)
+    template_root = generate_template_fixture_root(args)
+
+    generate_help = run_cmd(["aerolitctl", "generate", "--help"])
+    assert_contains(generate_help, "playbook", "generate help")
+    assert_contains(generate_help, "kickstart", "generate help")
+    assert_contains(generate_help, "without applying system changes", "generate help")
+
+    playbook_help = run_cmd(["aerolitctl", "generate", "playbook", "--help"])
+    assert_contains(playbook_help, "--guided", "generate playbook help")
+    assert_contains(playbook_help, "--guided-show-role-details", "generate playbook help")
+    assert_contains(playbook_help, "--list-playbook-roles", "generate playbook help")
+    assert_contains(playbook_help, "--collection-root", "generate playbook help")
+    assert_contains(playbook_help, "--role", "generate playbook help")
+    assert_contains(playbook_help, "--role-order", "generate playbook help")
+    assert_contains(playbook_help, "--skip-role-order-review", "generate playbook help")
+    assert_contains(playbook_help, "Roles are written to the playbook in the order provided", "generate playbook help")
+
+    kickstart_help = run_cmd(["aerolitctl", "generate", "kickstart", "--help"])
+    assert_contains(kickstart_help, "--guided", "generate kickstart help")
+    assert_contains(kickstart_help, "--guided-show-details", "generate kickstart help")
+    assert_contains(kickstart_help, "--list-kickstart-options", "generate kickstart help")
+    assert_contains(kickstart_help, "--template-source", "generate kickstart help")
+    assert_contains(kickstart_help, "--pxe-content-container", "generate kickstart help")
+    assert_contains(kickstart_help, "--container-engine", "generate kickstart help")
+    assert_contains(kickstart_help, "--template-option", "generate kickstart help")
+    assert_contains(kickstart_help, "--partial", "generate kickstart help")
+    assert_contains(kickstart_help, "--copy-template", "generate kickstart help")
+    assert_contains(kickstart_help, "--no-refresh-generated-vars", "generate kickstart help")
+
+    playbook_roles = run_cmd(
+        [
+            "aerolitctl",
+            "generate",
+            "playbook",
+            "--list-playbook-roles",
+            "--collection-root",
+            str(collection_root),
+        ]
+    )
+    assert_contains(playbook_roles, "AeroLIT playbook role options", "generate role list")
+    assert_contains(playbook_roles, str(collection_root), "generate role list")
+    assert_contains(playbook_roles, "aerolit.pxe_content", "generate role list")
+    assert_contains(playbook_roles, "aerolit.pxe_content.pxe_content", "generate role list")
+    assert_contains(playbook_roles, "aerolit.pxe_content.pxe_dnsmasq", "generate role list")
+    assert_contains(playbook_roles, "hardened.lmco.os_hardening", "generate role list")
+    assert_not_contains(playbook_roles, "community.general", "module-only collection guard")
+    assert_contains(playbook_roles, "roles run top-to-bottom", "generate role list")
+
+    kickstart_options = run_cmd(
+        [
+            "aerolitctl",
+            "generate",
+            "kickstart",
+            "--list-kickstart-options",
+            "--template-source",
+            "host",
+            "--template-root",
+            str(template_root),
+        ]
+    )
+    assert_contains(kickstart_options, "AeroLIT Kickstart generation options", "generate kickstart options")
+    assert_contains(kickstart_options, str(template_root), "generate kickstart options")
+    assert_contains(kickstart_options, "ks/rhel9-workstation.ks.j2", "generate kickstart options")
+    assert_contains(kickstart_options, "partials/storage/lvm.ks.j2", "generate kickstart options")
+    assert_contains(kickstart_options, "partials/network/dhcp.ks.j2", "generate kickstart options")
+
+
+def test_generate_dry_run_read_only(args, hash_paths):
+    """Confirm generate dry-run/list paths are useful and read-only."""
+    collection_root = generate_collection_fixture_root(args)
+    template_root = generate_template_fixture_root(args)
+    before = sha256_paths(hash_paths)
+    playbook_existed_before = Path(args.generate_playbook_path).exists()
+
+    playbook_output = run_cmd(
+        [
+            "aerolitctl",
+            "generate",
+            "playbook",
+            "aerolitctl_merge_generate_roles",
+            "--bundle-path",
+            args.bundle_path,
+            "--collection-root",
+            str(collection_root),
+            "--hosts",
+            "pxe_server",
+            "--role",
+            "aerolit.pxe_dnsmasq.pxe_dnsmasq",
+            "--role",
+            "aerolit.pxe_content.pxe_content",
+            "--role-order",
+            "aerolit.pxe_content.pxe_content,aerolit.pxe_dnsmasq.pxe_dnsmasq",
+            "--output",
+            Path(args.generate_playbook_path).name,
+            "--dry-run",
+        ]
+    )
+    assert_contains(playbook_output, "AeroLIT generate playbook plan", "generate playbook dry-run")
+    assert_contains(playbook_output, "Dry run:", "generate playbook dry-run")
+    assert_contains(playbook_output, "Role order", "generate playbook dry-run")
+    assert_contains(playbook_output, "top-to-bottom as shown below", "generate playbook dry-run")
+    assert_regex(
+        playbook_output,
+        r"1\.\s+aerolit\.pxe_content\.pxe_content",
+        "generate playbook dry-run role order",
+    )
+    assert_regex(
+        playbook_output,
+        r"2\.\s+aerolit\.pxe_dnsmasq\.pxe_dnsmasq",
+        "generate playbook dry-run role order",
+    )
+    assert_contains(playbook_output, "Dry run complete. No files were changed.", "generate playbook dry-run")
+    if not playbook_existed_before:
+        assert_path_missing(args.generate_playbook_path, "generate playbook dry-run output")
+
+    duplicate_output = run_cmd(
+        [
+            "aerolitctl",
+            "generate",
+            "playbook",
+            "duplicate_role_guard",
+            "--role",
+            "aerolit.pxe_dnsmasq.pxe_dnsmasq",
+            "--role",
+            "aerolit.pxe_dnsmasq.pxe_dnsmasq",
+            "--dry-run",
+        ],
+        expected_rc=2,
+    )
+    assert_contains(duplicate_output, "Duplicate role", "generate duplicate role guard")
+
+    role_order_guard = run_cmd(
+        [
+            "aerolitctl",
+            "generate",
+            "playbook",
+            "role_order_guard",
+            "--role",
+            "aerolit.pxe_dnsmasq.pxe_dnsmasq",
+            "--role",
+            "aerolit.pxe_content.pxe_content",
+            "--role-order",
+            "aerolit.pxe_content.pxe_content",
+            "--dry-run",
+        ],
+        expected_rc=2,
+    )
+    assert_contains(
+        role_order_guard,
+        "--role-order must contain the same roles as --role",
+        "generate role-order guard",
+    )
+
+    missing_playbook_name = run_cmd(
+        ["aerolitctl", "generate", "playbook", "--dry-run"],
+        expected_rc=2,
+    )
+    assert_contains(missing_playbook_name, "PLAYBOOK_NAME is required", "generate playbook missing name")
+
+    playbook_guided_guard = run_cmd(
+        [
+            "bash",
+            "-lc",
+            "aerolitctl generate playbook --guided --dry-run </dev/null",
+        ],
+        expected_rc=2,
+        log_path=Path(args.log_dir) / "generate-playbook-guided-noninteractive.log",
+    )
+    assert_contains(playbook_guided_guard, "--guided requires an interactive terminal", "generate playbook guided guard")
+
+    kickstart_guided_guard = run_cmd(
+        [
+            "bash",
+            "-lc",
+            "aerolitctl generate kickstart --guided --dry-run </dev/null",
+        ],
+        expected_rc=2,
+        log_path=Path(args.log_dir) / "generate-kickstart-guided-noninteractive.log",
+    )
+    assert_contains(kickstart_guided_guard, "--guided requires an interactive terminal", "generate kickstart guided guard")
+
+    template_option_output = run_cmd(
+        [
+            "aerolitctl",
+            "generate",
+            "kickstart",
+            "aerolitctl_merge_generate_profile",
+            "--bundle-path",
+            args.bundle_path,
+            "--template-source",
+            "host",
+            "--template-root",
+            str(template_root),
+            "--template-option",
+            "ks/rhel9-workstation.ks.j2",
+            "--os",
+            "rhel9",
+            "--label",
+            "AeroLIT Merge Generate",
+            "--force",
+            "--dry-run",
+            "--no-refresh-generated-vars",
+        ]
+    )
+    assert_contains(template_option_output, "AeroLIT generate kickstart plan", "generate kickstart template-option dry-run")
+    assert_contains(template_option_output, "ks/rhel9-workstation.ks.j2", "generate kickstart template-option dry-run")
+    assert_contains(template_option_output, "Dry run complete. No files were changed.", "generate kickstart template-option dry-run")
+
+    partial_output = run_cmd(
+        [
+            "aerolitctl",
+            "generate",
+            "kickstart",
+            "aerolitctl_merge_generate_profile",
+            "--bundle-path",
+            args.bundle_path,
+            "--template-source",
+            "host",
+            "--template-root",
+            str(template_root),
+            "--partial",
+            "partials/storage/lvm.ks.j2",
+            "--partial",
+            "partials/network/dhcp.ks.j2",
+            "--os",
+            "rhel9",
+            "--label",
+            "AeroLIT Merge Generate",
+            "--force",
+            "--dry-run",
+            "--no-refresh-generated-vars",
+        ]
+    )
+    assert_contains(partial_output, "AeroLIT generate kickstart plan", "generate kickstart partial dry-run")
+    assert_contains(partial_output, "PXE composed template override", "generate kickstart partial dry-run")
+    assert_contains(partial_output, "Dry run complete. No files were changed.", "generate kickstart partial dry-run")
+
+    missing_profile_output = run_cmd(
+        [
+            "aerolitctl",
+            "generate",
+            "kickstart",
+            "--template-source",
+            "host",
+            "--template-root",
+            str(template_root),
+            "--partial",
+            "partials/storage/lvm.ks.j2",
+            "--os",
+            "rhel9",
+            "--dry-run",
+        ],
+        expected_rc=2,
+    )
+    assert_contains(missing_profile_output, "PROFILE is required unless --guided is used", "generate kickstart missing profile")
+
+    invalid_template_output = run_cmd(
+        [
+            "aerolitctl",
+            "generate",
+            "kickstart",
+            "aerolitctl_merge_generate_profile",
+            "--bundle-path",
+            args.bundle_path,
+            "--template-source",
+            "host",
+            "--template-root",
+            str(template_root),
+            "--template-option",
+            "ks/does-not-exist.ks.j2",
+            "--os",
+            "rhel9",
+            "--dry-run",
+        ],
+        expected_rc=2,
+    )
+    assert_contains(
+        invalid_template_output,
+        "was not found in discovered pxe-content template options",
+        "generate kickstart invalid template option",
+    )
+
+    after = sha256_paths(hash_paths)
+    assert_hashes_same(before, after, "generate-dry-run-read-only")
+
+
+def test_real_generate_writes(args):
+    """Run real generate writes and verify managed output/overwrite safety."""
+    template_root = generate_template_fixture_root(args)
+    playbook_path = Path(args.generate_playbook_path)
+    nonmanaged_playbook_path = Path(args.generate_nonmanaged_playbook_path)
+    profile_path = Path(args.generate_pxe_profile_path)
+    template_path = Path(args.generate_pxe_template_path)
+
+    output = run_cmd(
+        [
+            "aerolitctl",
+            "generate",
+            "playbook",
+            "aerolitctl_merge_generate_roles",
+            "--bundle-path",
+            args.bundle_path,
+            "--hosts",
+            "pxe_server",
+            "--role",
+            "aerolit.pxe_dnsmasq.pxe_dnsmasq",
+            "--role",
+            "aerolit.pxe_content.pxe_content",
+            "--role-order",
+            "aerolit.pxe_content.pxe_content,aerolit.pxe_dnsmasq.pxe_dnsmasq",
+            "--output",
+            playbook_path.name,
+            "--force",
+            "--no-backup",
+        ]
+    )
+    assert_contains(output, "Generated playbook saved:", "generate playbook write")
+    assert_path_exists(playbook_path, "generated playbook")
+    playbook_text = read_text(playbook_path)
+    assert_contains(playbook_text, "# Generated AeroLIT playbook", "generated playbook")
+    assert_regex(
+        playbook_text,
+        r"roles:\n\s+- role: 'aerolit\.pxe_content\.pxe_content'\n\s+- role: 'aerolit\.pxe_dnsmasq\.pxe_dnsmasq'",
+        "generated playbook role order",
+    )
+
+    write_text(
+        nonmanaged_playbook_path,
+        "---\n- name: non-managed guard fixture\n  hosts: all\n  tasks: []\n",
+    )
+    guard_output = run_cmd(
+        [
+            "aerolitctl",
+            "generate",
+            "playbook",
+            "nonmanaged_guard",
+            "--bundle-path",
+            args.bundle_path,
+            "--hosts",
+            "all",
+            "--role",
+            "aerolit.pxe_content.pxe_content",
+            "--output",
+            nonmanaged_playbook_path.name,
+        ],
+        expected_rc=2,
+    )
+    assert_contains(
+        guard_output,
+        "does not look like an aerolitctl-generated file",
+        "generate playbook overwrite guard",
+    )
+
+    kickstart_output = run_cmd(
+        [
+            "aerolitctl",
+            "generate",
+            "kickstart",
+            "aerolitctl_merge_generate_profile",
+            "--bundle-path",
+            args.bundle_path,
+            "--template-source",
+            "host",
+            "--template-root",
+            str(template_root),
+            "--partial",
+            "partials/storage/lvm.ks.j2",
+            "--partial",
+            "partials/network/dhcp.ks.j2",
+            "--os",
+            "rhel9",
+            "--label",
+            "AeroLIT Merge Generate",
+            "--force",
+            "--no-backup",
+        ]
+    )
+    assert_contains(kickstart_output, "Generated PXE/Kickstart profile input saved.", "generate kickstart write")
+    assert_path_exists(profile_path, "generated PXE profile")
+    assert_path_exists(template_path, "generated PXE composed template")
+
+    profile_text = read_text(profile_path)
+    assert_contains(profile_text, "# Generated AeroLIT PXE profile override", "generated PXE profile")
+    assert_contains(profile_text, "profile_id: 'aerolitctl_merge_generate_profile'", "generated PXE profile")
+    assert_contains(profile_text, "install_label: 'AeroLIT Merge Generate'", "generated PXE profile")
+    assert_contains(profile_text, "kickstart_template: 'ks/aerolitctl-merge-generate-profile.ks.j2'", "generated PXE profile")
+    assert_contains(profile_text, "- 'rhel9'", "generated PXE profile")
+
+    template_text = read_text(template_path)
+    assert_contains(template_text, "# Generated AeroLIT PXE template override", "generated PXE composed template")
+    assert_contains(template_text, "{% include 'partials/storage/lvm.ks.j2' %}", "generated PXE composed template")
+    assert_contains(template_text, "{% include 'partials/network/dhcp.ks.j2' %}", "generated PXE composed template")
 
 
 def test_path_bundle_doctor(args):
@@ -3302,6 +3783,26 @@ def main():
     args.pxe_overrides_dir = "/etc/aerolit/overrides/pxe"
     args.pxe_profile_overrides_dir = "/etc/aerolit/overrides/pxe/profiles"
     args.pxe_template_overrides_dir = "/etc/aerolit/overrides/pxe/templates"
+    args.generate_playbook_path = str(
+        Path(args.bundle_path)
+        / "collections-hub"
+        / "ansible"
+        / "aerolitctl_merge_generate_roles.yml"
+    )
+    args.generate_nonmanaged_playbook_path = str(
+        Path(args.bundle_path)
+        / "collections-hub"
+        / "ansible"
+        / "aerolitctl_merge_nonmanaged.yml"
+    )
+    args.generate_pxe_profile_path = (
+        "/etc/aerolit/overrides/pxe/profiles/"
+        "aerolitctl_merge_generate_profile.yml"
+    )
+    args.generate_pxe_template_path = (
+        "/etc/aerolit/overrides/pxe/templates/ks/"
+        "aerolitctl-merge-generate-profile.ks.j2"
+    )
     args.log_dir = args.log_dir or "/tmp/aerolitctl-merge-test-{}".format(timestamp())
     args.require_firewalld = not args.no_require_firewalld
 
@@ -3334,6 +3835,7 @@ def main():
         *managed_repo_state_paths(args),
         *managed_ansible_state_paths(args),
         *managed_pxe_state_paths(args),
+        *generate_state_paths(args),
     ]
 
     state_snapshot = None
@@ -3356,6 +3858,9 @@ def main():
     print("PXE gen vars       : {}".format(args.pxe_generated_vars_path))
     print("PXE overrides      : {}".format(args.pxe_overrides_dir))
     print("PXE profiles       : {}".format(args.pxe_profile_overrides_dir))
+    print("Generate playbook  : {}".format(args.generate_playbook_path))
+    print("Generate profile   : {}".format(args.generate_pxe_profile_path))
+    print("Generate template  : {}".format(args.generate_pxe_template_path))
     print("Log dir            : {}".format(args.log_dir))
     print("Full run log       : {}".format(RUN_LOG_PATH))
     print("Command logs       : {}".format(Path(args.log_dir) / "commands"))
@@ -3381,6 +3886,7 @@ def main():
         ("environment preflight", lambda: test_environment_preflight(args)),
         ("basic repo/code sanity", lambda: test_basic_repo_sanity(args)),
         ("CLI help and parser", lambda: test_cli_help_and_parser(args)),
+        ("generate help and parser", lambda: test_generate_help_and_parser(args)),
         ("logs command behavior", lambda: test_logs_command_behavior(args)),
         ("command logging behavior", lambda: test_command_logging_behavior(args)),
         ("backup config command behavior", lambda: test_backup_config_command_behavior(args, hash_paths)),
@@ -3397,6 +3903,7 @@ def main():
         ("configure ansible sensitive var guard", lambda: test_configure_ansible_sensitive_var_guard(args)),
         ("configure pxe option guard", lambda: test_configure_pxe_option_guard(args)),
         ("configure pxe dry-run read-only", lambda: test_configure_pxe_dry_run_read_only(args, hash_paths)),
+        ("generate dry-run read-only", lambda: test_generate_dry_run_read_only(args, hash_paths)),
     ]
 
     if not args.skip_write_tests:
@@ -3408,6 +3915,7 @@ def main():
                 ("real configure ansible managed writes", lambda: test_real_configure_ansible_writes(args)),
                 ("real configure server mode writes", lambda: test_real_configure_modes(args)),
                 ("real configure pxe managed writes/status/doctor", lambda: test_real_configure_pxe_writes(args)),
+                ("real generate managed writes/guards", lambda: test_real_generate_writes(args)),
                 ("deploy server mode dry-run matrix", lambda: test_deploy_mode_matrix(args)),
                 ("deploy server skip flags", lambda: test_deploy_skip_flags(args)),
                 ("deploy skip-firewall generated vars toggle", lambda: test_deploy_skip_firewall_generated_vars_toggle(args)),
