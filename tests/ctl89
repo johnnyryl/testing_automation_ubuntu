@@ -1,0 +1,2278 @@
+.TH AEROLITCTL-BACKUP 1 "June 2026" "aerolitctl 0.1.0" "User Commands"
+.SH NAME
+aerolitctl-backup \- back up AeroLIT configuration footprint
+.SH SYNOPSIS
+.B aerolitctl backup config
+[\fB--output-dir\fR \fIDIR\fR] [\fB--dry-run\fR] [\fB--list-files\fR]
+[\fB--include-rendered\fR] [\fB--no-state\fR] [\fB--no-bundle-generated\fR]
+[\fB--verbose\fR]
+.SH DESCRIPTION
+.B aerolitctl backup config
+creates a compressed archive of AeroLIT-owned configuration and generated input
+files. It backs up the configuration footprint, not the full bundle, RPM repos,
+ISOs, or extracted ISO content.
+.SH OPTIONS
+.TP
+.BI --output-dir " DIR"
+Directory where the backup archive should be written. The default is under
+.IR /var/lib/aerolit/backups/config .
+.TP
+.B --dry-run
+Show what would be backed up without creating an archive.
+.TP
+.B --list-files
+List files included in the backup plan.
+.TP
+.B --include-rendered
+Include files under
+.IR /var/lib/aerolit/rendered .
+.TP
+.B --no-state
+Do not include
+.IR /var/lib/aerolit/state.yml .
+.TP
+.B --no-bundle-generated
+Do not include AeroLIT-managed generated files from the active
+.I collections-hub
+bundle.
+.TP
+.B --verbose
+Show more detailed output.
+.SH EXAMPLES
+.nf
+aerolitctl backup config --dry-run --list-files
+sudo aerolitctl backup config
+sudo aerolitctl backup config --output-dir /var/lib/aerolit/backups/config
+.fi
+.SH FILES
+.TP
+.I /etc/aerolit/aerolitctl.yml
+Main config file included when present.
+.TP
+.I /etc/aerolit/overrides
+Override files included when present.
+.TP
+.I /var/lib/aerolit/state.yml
+State file included unless
+.B --no-state
+is supplied.
+.TP
+.I /var/lib/aerolit/rendered
+Rendered files included only with
+.BR --include-rendered .
+.TP
+.I <bundle>/collections-hub/ansible/group_vars/all/aerolitctl_*_generated.yml
+Generated vars included unless
+.B --no-bundle-generated
+is supplied.
+.SH SEE ALSO
+.BR aerolitctl (1),
+.BR aerolitctl-settings (1),
+.BR aerolitctl-sync (1)
+
+
+
+
+
+
+
+
+.TH AEROLITCTL-BUNDLE 1 "June 2026" "aerolitctl 0.1.0" "User Commands"
+.SH NAME
+aerolitctl-bundle \- show and validate the AeroLIT offline bundle
+.SH SYNOPSIS
+.B aerolitctl bundle show
+[\fB--path\fR \fIPATH\fR] [\fB--verbose\fR]
+.br
+.B aerolitctl bundle validate
+[\fB--path\fR \fIPATH\fR] [\fB--verbose\fR]
+.SH DESCRIPTION
+.B aerolitctl bundle
+inspects the configured AeroLIT bundle or a path supplied on the command line.
+It is read-only.
+.SH SUBCOMMANDS
+.TP
+.B show
+Print important bundle-derived paths and whether common locations are present.
+.TP
+.B validate
+Validate required and expected bundle layout. The validator checks the bundle
+root, manifest, 
+.IR collections-hub ,
+.IR collections-hub/ansible ,
+.IR collections-hub/templates ,
+.IR repos ,
+.IR files ,
+.IR extracted_isos ,
+Ansible template directories, GitLab CI templates, active Ansible files, and
+aerolitctl generated server variables where applicable.
+.SH OPTIONS
+.TP
+.BI --path " PATH"
+Inspect or validate
+.I PATH
+without changing
+.IR /etc/aerolit/aerolitctl.yml .
+.TP
+.B --verbose
+Show more detailed output.
+.SH EXAMPLES
+.nf
+aerolitctl bundle show
+aerolitctl bundle validate
+aerolitctl bundle validate --path /opt/aerolit/aerolit-bundle
+.fi
+.SH FILES
+.TP
+.I /etc/aerolit/aerolitctl.yml
+Read when
+.B --path
+is not supplied.
+.TP
+.I <bundle>/aerolit-bundle.yml
+Bundle manifest, validated when present.
+.TP
+.I <bundle>/collections-hub
+Required bundle content root.
+.TP
+.I <bundle>/repos
+Required repository content root.
+.TP
+.I <bundle>/files
+Required file payload root.
+.TP
+.I <bundle>/extracted_isos
+Required extracted ISO root.
+.SH EXIT STATUS
+.B validate
+returns non-zero when required checks fail.
+.SH SEE ALSO
+.BR aerolitctl (1),
+.BR aerolitctl-path (1),
+.BR aerolitctl-doctor (1)
+
+
+
+
+
+
+
+
+
+.TH AEROLITCTL-CONFIGURE 1 "June 2026" "aerolitctl 0.1.0" "User Commands"
+.SH NAME
+aerolitctl-configure \- capture AeroLIT configuration answers and generated inputs
+.SH SYNOPSIS
+.B aerolitctl configure init
+[\fB--bundle\fR \fIPATH\fR] [\fB--force\fR] [\fB--dry-run\fR] [\fB--non-interactive\fR] [\fB--no-backup\fR]
+.br
+.B aerolitctl configure all
+[\fB--guided\fR|\fB--show\fR|\fB--validate\fR|\fB--dry-run\fR|\fB--non-interactive\fR] [\fIOPTIONS\fR]
+.br
+.B aerolitctl configure server
+[\fB--guided\fR|\fB--show\fR|\fB--dry-run\fR] [\fIOPTIONS\fR]
+.br
+.B aerolitctl configure ansible
+[\fB--show\fR|\fB--guided\fR|\fB--dry-run\fR|\fB--validate\fR] [\fIOPTIONS\fR]
+.br
+.B aerolitctl configure repos
+[\fB--guided\fR|\fB--show\fR|\fB--validate\fR|\fB--refresh\fR|\fB--dry-run\fR] [\fIOPTIONS\fR]
+.br
+.B aerolitctl configure pxe
+[\fB--show\fR|\fB--guided\fR|\fB--dry-run\fR|\fB--validate\fR] [\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B aerolitctl configure
+writes saved answers and AeroLIT-managed generated inputs. It is the configuration
+capture layer, not the deployment layer. It does not run deployment playbooks,
+restart services, open firewall ports, or export NFS paths; those actions belong
+to
+.BR "aerolitctl deploy server" .
+.SH SUBCOMMANDS
+.TP
+.B init
+Create or refresh AeroLIT control directories and active bundle Ansible files
+from templates. It can create
+.IR collections-hub/.sync-preserve ,
+.IR collections-hub/.gitlab-ci.yml ,
+and active
+.IR ansible.cfg ,
+.IR inventory ,
+and
+.IR group_vars
+content.
+.TP
+.B all
+Coordinate the implemented configure sections:
+.BR init ,
+.BR server ,
+.BR repos ,
+.BR ansible ,
+and
+.BR pxe .
+Without show, validation, dry-run, or non-interactive mode, guided mode is the
+normal behavior.
+.TP
+.B server
+Store server mode, PXE network, DHCP, interface intent, NFS intent, PXE HTTP,
+and firewall-management intent for later deploy.
+.TP
+.B ansible
+Manage aerolitctl-owned inventory and generated vars under the active bundle's
+.IR collections-hub/ansible
+area.
+.TP
+.B repos
+Discover or record server and provisioning repository sources, refresh generated
+repo variables, optionally write a server bootstrap repo file, and optionally
+install server prerequisite packages.
+.TP
+.B pxe
+Manage aerolitctl-owned PXE profile overrides and pxe-content generator settings.
+.SH COMMON OPTIONS
+.TP
+.BI --bundle " PATH"
+Bundle path for
+.B configure init
+and
+.BR "configure all" .
+.TP
+.BI --bundle-path " PATH"
+Bundle path for
+.BR "configure ansible" ,
+.BR "configure repos" ,
+and
+.BR "configure pxe" .
+.TP
+.B --guided
+Prompt interactively for common settings.
+.TP
+.B --show
+Show saved or planned settings without writing.
+.TP
+.B --validate
+Run read-only validation where implemented.
+.TP
+.B --dry-run
+Preview changes without writing files.
+.TP
+.B --force
+Allow replacement of existing non-aerolitctl-managed output files where supported.
+.TP
+.B --no-backup
+Do not create timestamped backups before changing managed files.
+.TP
+.B --verbose
+Show more detailed output.
+.SH SERVER OPTIONS
+.TP
+.BI --mode " full|pxe|controller"
+Store server mode.
+.TP
+.BI --interface " IFACE"
+Provisioning/PXE interface.
+.TP
+.BI --server-ip " ADDRESS"
+AeroLIT server IP on the provisioning network.
+.TP
+.BI --network " CIDR"
+Provisioning network, for example
+.IR 192.168.98.0/24 .
+.TP
+.BI --prefix " N"
+CIDR prefix length.
+.TP
+.BI --gateway " ADDRESS|none"
+PXE gateway.
+.TP
+.BI --dns " LIST"
+Comma-separated DNS servers.
+.TP
+.BI --dhcp-start " ADDRESS"
+PXE DHCP range start.
+.TP
+.BI --dhcp-end " ADDRESS"
+PXE DHCP range end.
+.TP
+.BI --pxe-http-port " PORT"
+PXE HTTP content port.
+.TP
+.BI --pxe-http-bind-address " ADDRESS"
+PXE HTTP bind address.
+.TP
+.B --configure-interface
+Store intent for deploy to configure the selected interface.
+.TP
+.B --no-configure-interface
+Store intent for deploy not to configure the selected interface.
+.TP
+.B --nfs-enabled
+Enable controller/NFS generated settings.
+.TP
+.B --no-nfs
+Disable controller/NFS generated settings.
+.TP
+.BI --nfs-export-path " PATH"
+NFS export path to store for deploy.
+.TP
+.BI --nfs-allow-clients " CLIENTS"
+Allowed NFS clients. Alias:
+.BR --nfs-allowed-clients .
+.TP
+.B --nfs-allow-all-clients
+Store intent to allow all clients.
+.TP
+.B --no-nfs-allow-all-clients
+Store intent not to allow all clients.
+.TP
+.B --nfs-create-export-path
+Store intent for deploy to create the export path.
+.TP
+.B --no-nfs-create-export-path
+Store intent not to create the export path.
+.TP
+.BI --nfs-exports-file " PATH"
+NFS exports file path for later deploy.
+.TP
+.BI --target-mount-path " PATH"
+Client-visible mount path.
+.TP
+.BI --mount-mode " MODE"
+Mode for generated NFS mount variables.
+.TP
+.BI --mount-owner " USER"
+Owner for generated NFS mount variables.
+.TP
+.BI --mount-group " GROUP"
+Group for generated NFS mount variables.
+.TP
+.B --firewall-manage
+Store intent for deploy/roles to manage required firewall rules.
+.TP
+.B --no-firewall-manage
+Store intent not to manage firewall rules.
+.SH ANSIBLE OPTIONS
+.TP
+.B --ensure-standard-groups
+Ensure standard AeroLIT groups exist.
+.TP
+.B --local-controller
+Add localhost to
+.B ansible_controller
+and
+.B pxe_server
+with local connection.
+.TP
+.BI --add-group " GROUP"
+Add or ensure a managed group. Repeatable.
+.TP
+.BI --remove-group " GROUP"
+Remove a managed group.
+.TP
+.BI --add-child-group " PARENT CHILD"
+Add a managed child-group relationship.
+.TP
+.BI --remove-child-group " PARENT CHILD"
+Remove a managed child-group relationship.
+.TP
+.BI --add-host " HOST"
+Add or ensure a managed host. Repeatable.
+.TP
+.BI --remove-host " HOST"
+Remove a managed host from aerolitctl-managed groups.
+.TP
+.BI --remove-host-from-group " HOST GROUP"
+Remove a managed host from one managed group.
+.TP
+.BI --group " GROUP"
+Group for added hosts or host ranges.
+.TP
+.BI --ansible-host " ADDRESS"
+Set
+.B ansible_host
+for added hosts. Alias:
+.BR --ip .
+.TP
+.BI --ansible-user " USER"
+Set
+.BR ansible_user .
+.TP
+.BI --ansible-port " PORT"
+Set
+.BR ansible_port .
+.TP
+.BI --ssh-key " PATH"
+Set
+.B ansible_ssh_private_key_file
+for added hosts. Alias:
+.BR --private-key .
+.TP
+.BI --connection " TYPE"
+Set
+.B ansible_connection
+for added hosts.
+.TP
+.BI --python-interpreter " PATH"
+Set
+.BR ansible_python_interpreter .
+.TP
+.B --become
+Set
+.B ansible_become=true
+for added hosts.
+.TP
+.B --no-become
+Set
+.B ansible_become=false
+for added hosts.
+.TP
+.BI --host-var " KEY=VALUE"
+Set an extra variable for added hosts.
+.TP
+.BI --set-host-var " HOST KEY=VALUE"
+Set a variable on an existing managed host.
+.TP
+.BI --remove-host-var " HOST KEY"
+Remove a variable from an existing managed host.
+.TP
+.BI --set-global-var " KEY=VALUE"
+Set a global variable in
+.IR group_vars/all/aerolitctl_ansible_generated.yml .
+.TP
+.BI --remove-global-var " KEY"
+Remove a global generated variable.
+.TP
+.BI --set-group-var " GROUP KEY=VALUE"
+Set a group variable in
+.IR group_vars/GROUP/aerolitctl.yml .
+.TP
+.BI --remove-group-var " GROUP KEY"
+Remove a managed group variable.
+.TP
+.B --allow-sensitive-vars
+Allow sensitive-looking variable names such as password, token, or secret.
+.TP
+.BI --add-host-range " PREFIX"
+Add generated hosts using
+.I PREFIX
+and a zero-padded number.
+.TP
+.BI --range-start " N"
+Start number for
+.BR --add-host-range .
+.TP
+.BI --range-end " N"
+End number for
+.BR --add-host-range .
+.TP
+.BI --host-number-width " N"
+Zero-padding width for generated host names. Default: 3.
+.TP
+.BI --ip-start " ADDRESS"
+Starting IP address for generated host ranges.
+.SH REPOS OPTIONS
+.TP
+.BI --path-for-ansible " PATH"
+Client-visible bundle path used for provisioning repo baseurls. Defaults to
+.IR /home/unix/sysadmin .
+.TP
+.B --refresh
+Write generated repo variables from discovered bundle repos and explicit overrides.
+.TP
+.B --write-server-bootstrap
+Write
+.I /etc/yum.repos.d/zz-aerolit-server-bootstrap.repo
+from discovered current-OS BaseOS/AppStream bundle repos.
+.TP
+.BI --server-bootstrap-repo-file " PATH"
+Override the server bootstrap repo file path.
+.TP
+.B --ensure-server-prereqs
+Ensure server prerequisite packages are installed.
+.TP
+.BI --server-prereq-package " PACKAGE"
+Override prerequisite packages. Repeatable.
+.TP
+.B --server-bootstrap-only
+For prerequisite handling, skip existing enabled repos and use only
+aerolit-server-bootstrap repositories.
+.TP
+.BI --server-baseos-source " PATH_OR_URL"
+Explicit BaseOS source for server bootstrap packages.
+.TP
+.BI --server-appstream-source " PATH_OR_URL"
+Explicit AppStream source for server bootstrap packages.
+.TP
+.BI --provision-repo " OS:ID=PATH_OR_URL"
+Add an explicit provisioning repo override. Repeatable.
+.TP
+.BI --provision-extra-repo " OS:ID=PATH_OR_URL"
+Alias-style extra provisioning repo override. Repeatable.
+.TP
+.B --no-auto-discovery
+Do not automatically scan the bundle for repos. Alias:
+.BR --disable-auto-discovery .
+.SH PXE OPTIONS
+.TP
+.BI --enable-profile " PROFILE"
+Show a PXE profile in the generated boot menu. Repeatable.
+.TP
+.BI --disable-profile " PROFILE"
+Hide a PXE profile from the generated boot menu. Repeatable.
+.TP
+.BI --remove-profile " PROFILE"
+Remove a custom aerolitctl-managed PXE profile override.
+.TP
+.BI --implement-profile " PROFILE"
+Mark a profile implemented so real boot targets/Kickstarts are generated.
+.TP
+.BI --placeholder-profile " PROFILE"
+Mark a profile as a placeholder.
+.TP
+.BI --set-profile-title " PROFILE TITLE"
+Set profile display title.
+.TP
+.BI --set-profile-label " PROFILE LABEL"
+Set install label.
+.TP
+.BI --set-profile-menu-target " PROFILE TARGET"
+Set iPXE menu target.
+.TP
+.BI --set-profile-template " PROFILE TEMPLATE"
+Set Kickstart template path.
+.TP
+.BI --set-profile-os " PROFILE OS_LIST"
+Set comma-separated supported OS IDs.
+.TP
+.BI --set-profile-kernel-args " PROFILE ARGS"
+Set comma-separated extra kernel args.
+.TP
+.BI --profile-uefi " PROFILE"
+Enable UEFI menu entries.
+.TP
+.BI --no-profile-uefi " PROFILE"
+Disable UEFI menu entries.
+.TP
+.BI --profile-bios " PROFILE"
+Enable BIOS/legacy menu entries.
+.TP
+.BI --no-profile-bios " PROFILE"
+Disable BIOS/legacy menu entries.
+.TP
+.BI --watch-interval " SECONDS"
+PXE content generator watch interval.
+.TP
+.BI --generated-ks-edit-policy " preserve|overwrite"
+Policy for generated Kickstarts when manual edits are detected.
+.TP
+.BI --validation-failure-policy " warn|fail"
+PXE content validation failure policy.
+.TP
+.B --reset-standard-profiles
+Reset managed PXE profiles to AeroLIT standard defaults.
+.SH EXAMPLES
+.nf
+sudo aerolitctl configure init --bundle /opt/aerolit/aerolit-bundle
+aerolitctl configure all --guided
+aerolitctl configure server --guided
+aerolitctl configure server --mode full --interface ens160 --server-ip 192.168.98.10 --network 192.168.98.0/24
+aerolitctl configure ansible --local-controller --ensure-standard-groups
+aerolitctl configure repos --show
+sudo aerolitctl configure repos --ensure-server-prereqs
+aerolitctl configure pxe --validate
+.fi
+.SH FILES
+.TP
+.I /etc/aerolit/aerolitctl.yml
+Saved configuration read and written by configure commands.
+.TP
+.I /etc/yum.repos.d/zz-aerolit-server-bootstrap.repo
+Optional server bootstrap repo file written by
+.BR "configure repos" .
+.TP
+.I <bundle>/collections-hub/ansible/inventory/90_aerolitctl.ini
+Managed inventory fragment.
+.TP
+.I <bundle>/collections-hub/ansible/group_vars/all/aerolitctl_ansible_generated.yml
+Managed Ansible generated variables.
+.TP
+.I <bundle>/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+Managed server generated variables.
+.TP
+.I <bundle>/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml
+Managed repository generated variables.
+.TP
+.I <bundle>/collections-hub/ansible/group_vars/all/aerolitctl_pxe_generated.yml
+Managed PXE generated variables.
+.TP
+.I /etc/aerolit/overrides/pxe/profiles
+Managed PXE profile overrides.
+.SH NOTES
+Use
+.B deploy server
+after reviewing saved intent. Configuration files are inputs to deployment; they
+are not proof that services have already been changed.
+.SH SEE ALSO
+.BR aerolitctl (1),
+.BR aerolitctl-deploy (1),
+.BR aerolitctl-generate (1),
+.BR aerolitctl-settings (1)
+
+
+
+
+
+
+
+.TH AEROLITCTL-DEPLOY 1 "June 2026" "aerolitctl 0.1.0" "User Commands"
+.SH NAME
+aerolitctl-deploy \- apply saved AeroLIT server configuration
+.SH SYNOPSIS
+.B aerolitctl deploy server
+[\fB--dry-run\fR] [\fB--show\fR] [\fB--skip-interface\fR] [\fB--skip-nfs\fR]
+[\fB--skip-firewall\fR] [\fB--skip-pxe\fR] [\fB--skip-controller\fR]
+[\fB--skip-repo-prep\fR] [\fB--skip-server-prereqs\fR]
+[\fB--skip-repo-vars-refresh\fR] [\fB--server-bootstrap-only\fR] [\fB--verbose\fR]
+.SH DESCRIPTION
+.B aerolitctl deploy
+performs deployment actions from saved configuration. In this build the
+implemented target is
+.BR server .
+.PP
+.B deploy server
+builds a plan from
+.IR /etc/aerolit/aerolitctl.yml ,
+prepares repository inputs unless skipped, refreshes generated server variables,
+and invokes the configured PXE server and/or Ansible controller playbooks from
+the active bundle when enabled.
+.SH OPTIONS
+.TP
+.B --dry-run
+Show what would happen without changing files or services.
+.TP
+.B --show
+Show the saved deploy plan without changing anything.
+.TP
+.B --skip-interface
+Do not apply NetworkManager interface IP changes.
+.TP
+.B --skip-nfs
+Do not create or update NFS exports, permissions, or NFS services.
+.TP
+.B --skip-firewall
+Disable role-level firewall management for this deploy run.
+.TP
+.B --skip-pxe
+Do not run the PXE server playbook.
+.TP
+.B --skip-controller
+Do not run the Ansible controller playbook.
+.TP
+.B --skip-repo-prep
+Skip automatic repository preparation, including server prerequisite handling and
+generated provisioning repo vars refresh.
+.TP
+.B --skip-server-prereqs
+Do not automatically install missing server prerequisite packages.
+.TP
+.B --skip-repo-vars-refresh
+Do not automatically refresh
+.IR collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml .
+.TP
+.B --server-bootstrap-only
+For prerequisite handling, skip existing enabled repos and use only
+aerolit-server-bootstrap repositories.
+.TP
+.B --verbose
+Show more detailed output.
+.SH EXAMPLES
+.nf
+sudo aerolitctl deploy server --show
+sudo aerolitctl deploy server --dry-run
+sudo aerolitctl deploy server
+sudo aerolitctl deploy server --skip-interface --skip-firewall
+.fi
+.SH FILES
+.TP
+.I /etc/aerolit/aerolitctl.yml
+Saved deployment intent.
+.TP
+.I /etc/yum.repos.d/zz-aerolit-server-bootstrap.repo
+May be written or used during server prerequisite handling.
+.TP
+.I <bundle>/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+Generated server variables consumed by deployment playbooks.
+.TP
+.I <bundle>/collections-hub/ansible/group_vars/all/aerolitctl_repos_generated.yml
+Generated repository variables, unless repo refresh is skipped.
+.TP
+.I <bundle>/collections-hub/ansible/pxe_server.yml
+PXE server playbook.
+.TP
+.I <bundle>/collections-hub/ansible/ansible_controller.yml
+Ansible controller playbook.
+.SH SECURITY
+This command may require root and may invoke Ansible roles that configure
+interfaces, repositories, NFS, firewall behavior, PXE services, or controller
+state. Review
+.B --show
+or
+.B --dry-run
+output first on production systems.
+.SH SEE ALSO
+.BR aerolitctl (1),
+.BR aerolitctl-configure (1),
+.BR aerolitctl-provision (1),
+.BR aerolitctl-status (1)
+
+
+
+
+
+
+
+
+.TH AEROLITCTL-DOCTOR 1 "June 2026" "aerolitctl 0.1.0" "User Commands"
+.SH NAME
+aerolitctl-doctor \- run AeroLIT health checks
+.SH SYNOPSIS
+.B aerolitctl doctor
+[\fB--verbose\fR]
+.SH DESCRIPTION
+.B aerolitctl doctor
+runs read-oriented health checks for the local AeroLIT control environment. It
+checks Python and YAML support, current privileges, configured bundle path,
+important bundle directories and templates, Ansible files, playbooks, generated
+server vars, PXE state, SELinux status, firewalld status, command availability
+where relevant, and saved deployment readiness.
+.SH OPTIONS
+.TP
+.B --verbose
+Show more detailed output.
+.SH EXAMPLES
+.nf
+aerolitctl doctor
+sudo aerolitctl doctor --verbose
+.fi
+.SH FILES
+.TP
+.I /etc/aerolit/aerolitctl.yml
+Saved configuration checked by doctor.
+.TP
+.I /var/lib/aerolit/state.yml
+State file checked when present.
+.TP
+.I <bundle>/collections-hub/ansible
+Ansible directory checked by doctor.
+.TP
+.I <bundle>/collections-hub/ansible/group_vars/all
+Generated variables checked by doctor.
+.TP
+.I /etc/aerolit/overrides/pxe
+PXE override state checked by doctor.
+.SH NOTES
+Doctor is intended as a safe diagnostic command. It reports findings and returns
+non-zero when blocking failures are found.
+.SH SEE ALSO
+.BR aerolitctl (1),
+.BR aerolitctl-status (1),
+.BR aerolitctl-bundle (1)
+
+
+
+
+
+.TH AEROLITCTL-GENERATE 1 "June 2026" "aerolitctl 0.1.0" "User Commands"
+.SH NAME
+aerolitctl-generate \- generate AeroLIT-managed playbooks and PXE/Kickstart inputs
+.SH SYNOPSIS
+.B aerolitctl generate playbook
+[\fINAME\fR] [\fB--role\fR \fIROLE\fR...] [\fIOPTIONS\fR]
+.br
+.B aerolitctl generate kickstart
+[\fIPROFILE\fR] [\fIOPTIONS\fR]
+.br
+.B aerolitctl generate pxe-profile
+[\fIPROFILE\fR] [\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B aerolitctl generate
+creates AeroLIT-managed input files. It does not run Ansible, deploy services,
+restart containers, render final boot menus, configure NFS, or change firewall
+rules.
+.PP
+.B playbook
+writes generated Ansible playbooks under the active bundle's
+.IR collections-hub/ansible
+directory.
+.B kickstart
+and its alias
+.B pxe-profile
+write PXE profile and Kickstart template override inputs consumed later by the
+pxe-content generator.
+.SH PLAYBOOK OPTIONS
+.TP
+.I NAME
+Safe generated playbook name. Optional with
+.B --guided
+or
+.BR --list-playbook-roles .
+.TP
+.B --guided
+Interactively discover bundle collection roles and build a playbook.
+.TP
+.B --guided-show-role-details
+Show role README/meta/tasks details during guided selection.
+.TP
+.B --list-playbook-roles
+List discovered role-capable collections and roles, then exit.
+.TP
+.BI --collection-root " PATH"
+Extra Ansible collection root to scan. Repeatable.
+.TP
+.BI --role " ROLE"
+Role name or fully qualified collection role name. Repeatable or comma-separated.
+Required unless guided mode or role listing is used.
+.TP
+.BI --role-order " ROLE_LIST"
+Explicit final role execution order. It must contain exactly the same roles as
+.BR --role .
+.TP
+.B --skip-role-order-review
+In guided mode, skip the final role order review prompt.
+.TP
+.BI --hosts " PATTERN"
+Ansible hosts pattern. Default:
+.BR all .
+.TP
+.BI --title " TITLE"
+Human-readable play name.
+.TP
+.BI --var " KEY=VALUE"
+Play-level variable. Repeatable.
+.TP
+.BI --output " FILE"
+Generated playbook filename relative to
+.IR collections-hub/ansible .
+.TP
+.BI --bundle-path " PATH"
+Bundle path. Defaults to configured bundle path or
+.IR /opt/aerolit/aerolit-bundle .
+.TP
+.B --no-become
+Write
+.BR "become: false" .
+Default is true.
+.TP
+.B --no-gather-facts
+Write
+.BR "gather_facts: false" .
+Default is true.
+.TP
+.B --force
+Allow replacement of an existing non-aerolitctl-generated playbook.
+.TP
+.B --no-backup
+Do not create timestamped backups before changing files.
+.TP
+.B --dry-run
+Preview output without writing files.
+.SH KICKSTART OPTIONS
+.TP
+.I PROFILE
+PXE profile id. Optional with
+.BR --guided .
+.TP
+.B --guided
+Interactively build a PXE/Kickstart profile.
+.TP
+.B --guided-show-details
+Show template or partial contents during guided choices.
+.TP
+.B --list-kickstart-options
+List discovered profiles, Kickstart templates, and partials.
+.TP
+.BI --template-root " PATH"
+Extra host-visible pxe-content template root to scan. Repeatable.
+.TP
+.BI --template-source " auto|host|container"
+Choose host/container discovery mode. Default:
+.BR auto .
+.TP
+.BI --pxe-content-container " NAME_OR_ID"
+Specific running pxe-content container to inspect.
+.TP
+.BI --container-engine " auto|podman|docker"
+Container engine for live pxe-content discovery. Default:
+.BR auto .
+.TP
+.BI --container-template-root " PATH"
+Container-side template/profile directory to copy from. Repeatable.
+.TP
+.BI --template-option " TEMPLATE"
+Use a discovered Kickstart template id.
+.TP
+.BI --partial " TEMPLATE"
+Compose a new override template from a discovered partial/template id.
+.TP
+.BI --from-profile " PROFILE"
+Profile to clone when creating a new profile. Default:
+.BR minimal .
+.TP
+.B --reset-from-profile
+Rebuild an existing generated profile from
+.B --from-profile
+before applying options.
+.TP
+.BI --title " TITLE"
+PXE profile title/menu section.
+.TP
+.BI --label " LABEL"
+Alias for
+.BR --install-label .
+.TP
+.BI --install-label " LABEL"
+Install label used for generated boot entries.
+.TP
+.BI --menu-target " TARGET"
+iPXE menu target. Defaults to the profile id.
+.TP
+.BI --os " OS"
+Supported OS id. Repeatable or comma-separated.
+.TP
+.BI --kickstart-template " TEMPLATE"
+Relative Kickstart template path consumed by pxe-content.
+.TP
+.BI --copy-template " PATH"
+Copy a local Kickstart template into
+.IR /etc/aerolit/overrides/pxe/templates .
+.TP
+.BI --kernel-arg " ARG"
+Append one kernel argument. Repeatable or comma-separated.
+.TP
+.BI --set-kernel-args " ARGS"
+Replace kernel args with this comma-separated list.
+.TP
+.B --clear-kernel-args
+Write an empty kernel argument list before appending values.
+.TP
+.B --uefi
+Enable UEFI boot entries.
+.TP
+.B --no-uefi
+Disable UEFI boot entries.
+.TP
+.B --bios
+Enable legacy BIOS boot entries.
+.TP
+.B --no-bios
+Disable legacy BIOS boot entries.
+.TP
+.B --implemented
+Mark the profile implemented so real boot targets/Kickstarts are generated.
+.TP
+.B --placeholder
+Mark the profile as visible and non-bootable.
+.TP
+.B --enabled
+Show the profile in the generated main PXE menu.
+.TP
+.B --disabled
+Hide the profile from the generated main PXE menu.
+.TP
+.B --show-in-main-menu
+Explicitly show the profile in the main menu.
+.TP
+.B --hide-from-main-menu
+Hide the profile from the main menu.
+.TP
+.B --no-refresh-generated-vars
+Do not refresh
+.IR group_vars/all/aerolitctl_pxe_generated.yml .
+.TP
+.B --validate
+Validate managed PXE state after generation.
+.TP
+.BI --bundle-path " PATH"
+Bundle path.
+.TP
+.B --force
+Allow replacement of existing non-aerolitctl-managed output files.
+.TP
+.B --no-backup
+Do not create timestamped backups before changing files.
+.TP
+.B --dry-run
+Preview output without writing files.
+.SH EXAMPLES
+.nf
+aerolitctl generate playbook deploy_pxe_content --hosts pxe_server --role aerolit.pxe_content.pxe_content
+aerolitctl generate playbook controller_setup --role namespace.collection.prereq --role namespace.collection.configure
+aerolitctl generate playbook --guided
+aerolitctl generate playbook --list-playbook-roles
+aerolitctl generate kickstart rhel9_workstation --from-profile minimal --os rhel9 --label "RHEL 9 Workstation"
+aerolitctl generate kickstart --guided
+aerolitctl generate pxe-profile small_disk_lab --from-profile small_disk --os rhel9,rhel8 --kernel-arg inst.sshd
+.fi
+.SH FILES
+.TP
+.I <bundle>/collections-hub/ansible/*.yml
+Generated playbooks.
+.TP
+.I <bundle>/collections-hub/ansible/group_vars/all/aerolitctl_pxe_generated.yml
+Generated PXE variables refreshed by Kickstart generation unless disabled.
+.TP
+.I /etc/aerolit/overrides/pxe/profiles/PROFILE.yml
+Generated PXE profile override.
+.TP
+.I /etc/aerolit/overrides/pxe/templates
+Copied or composed Kickstart template overrides.
+.SH NOTES
+Generated files include AeroLIT markers. Existing files without the expected
+marker are not overwritten unless
+.B --force
+is supplied.
+.SH SEE ALSO
+.BR aerolitctl (1),
+.BR aerolitctl-configure (1),
+.BR aerolitctl-deploy (1)
+
+
+
+
+
+
+
+
+
+
+
+.TH AEROLITCTL-LOGS 1 "June 2026" "aerolitctl 0.1.0" "User Commands"
+.SH NAME
+aerolitctl-logs \- list and tail AeroLIT command logs
+.SH SYNOPSIS
+.B aerolitctl logs
+[\fB--list\fR] [\fB--limit\fR \fIN\fR] [\fB--tail\fR \fIN\fR] [\fB--follow\fR]
+[\fB--dir\fR] [\fB--path\fR \fIPATH\fR] [\fB--log-dir\fR \fIDIR\fR]
+[\fB--pattern\fR \fIGLOB\fR] [\fB--verbose\fR]
+.SH DESCRIPTION
+.B aerolitctl logs
+lists or tails AeroLIT command logs. By default it uses the command log
+directory, normally
+.IR /var/log/aerolit .
+For tests or controlled environments,
+.B AEROLITCTL_LOG_DIR
+can override the command log directory.
+.SH OPTIONS
+.TP
+.B --list
+List known log files, newest first.
+.TP
+.BI --limit " N"
+Limit listed log files.
+.TP
+.BI --tail " N"
+Print the last
+.I N
+lines. The value must be zero or greater.
+.TP
+.B --follow
+Continue following the selected log file.
+.TP
+.B --dir
+Print the resolved log directory and exit.
+.TP
+.BI --path " PATH"
+Read a specific log file. Relative paths are first resolved from the current
+directory, then from the AeroLIT log directory.
+.TP
+.BI --log-dir " DIR"
+Use an explicit log directory.
+.TP
+.BI --pattern " GLOB"
+Filter log files by filename or relative path glob.
+.TP
+.B --verbose
+Show more detailed output.
+.SH EXAMPLES
+.nf
+aerolitctl logs --dir
+aerolitctl logs --list --limit 20
+aerolitctl logs --tail 100
+aerolitctl logs --follow --pattern '*deploy*'
+aerolitctl logs --path aerolitctl-20260608-120000-1234-doctor.log
+.fi
+.SH FILES
+.TP
+.I /var/log/aerolit
+Default command log directory.
+.TP
+.I /var/log/aerolit/sync
+Sync log directory.
+.SH ENVIRONMENT
+.TP
+.B AEROLITCTL_LOG_DIR
+Override command log directory. This is mainly useful for tests.
+.SH SEE ALSO
+.BR aerolitctl (1),
+.BR aerolitctl-doctor (1),
+.BR aerolitctl-sync (1)
+
+
+
+
+
+
+
+
+
+
+
+.TH AEROLITCTL-PATH 1 "June 2026" "aerolitctl 0.1.0" "User Commands"
+.SH NAME
+aerolitctl-path \- show or set the active AeroLIT bundle path
+.SH SYNOPSIS
+.B aerolitctl path show
+[\fB--verbose\fR]
+.br
+.B aerolitctl path set
+[\fB--no-backup\fR] [\fB--verbose\fR]
+.I PATH
+.SH DESCRIPTION
+.B aerolitctl path
+manages the bundle path saved in
+.IR /etc/aerolit/aerolitctl.yml .
+Other commands use this path to locate
+.IR collections-hub ,
+.IR collections-hub/ansible ,
+.IR repos ,
+.IR files ,
+and
+.IR extracted_isos .
+.SH SUBCOMMANDS
+.TP
+.B show
+Print the configured bundle path.
+.TP
+.B set PATH
+Save
+.I PATH
+as the active AeroLIT bundle path. The path does not have to exist yet; the
+command warns if it is missing.
+.SH OPTIONS
+.TP
+.B --no-backup
+Do not back up
+.I /etc/aerolit/aerolitctl.yml
+before updating it.
+.TP
+.B --verbose
+Show more detailed output.
+.SH EXAMPLES
+.nf
+aerolitctl path show
+sudo aerolitctl path set /opt/aerolit/aerolit-bundle
+sudo aerolitctl path set /srv/aerolit/aerolit-bundle --no-backup
+.fi
+.SH FILES
+.TP
+.I /etc/aerolit/aerolitctl.yml
+Configuration file read by
+.B show
+and written by
+.BR set .
+.TP
+.I /opt/aerolit/aerolit-bundle
+Default expected bundle path.
+.SH NOTES
+Setting the path only updates saved configuration. It does not initialize the
+bundle, validate content, or deploy services.
+.SH SEE ALSO
+.BR aerolitctl (1),
+.BR aerolitctl-bundle (1),
+.BR aerolitctl-configure (1)
+
+
+
+
+
+
+
+
+
+
+
+
+.TH AEROLITCTL-PROVISION 1 "June 2026" "aerolitctl 0.1.0" "User Commands"
+.SH NAME
+aerolitctl-provision \- run Ansible playbooks from the active AeroLIT bundle
+.SH SYNOPSIS
+.B aerolitctl provision
+[\fB--install-ansible-core\fR] [\fB--verbose\fR]
+.I PLAYBOOK
+[\fIANSIBLE_PLAYBOOK_ARGS...\fR]
+.br
+.B aerolitctl provision list
+.br
+.B aerolitctl provision check
+.SH DESCRIPTION
+.B aerolitctl provision
+wraps
+.B ansible-playbook
+from the active bundle's
+.IR collections-hub/ansible
+directory. If the user does not provide an inventory option, the command adds
+.BR "-i inventory" .
+If
+.I ansible.cfg
+exists in that directory, it is exported as
+.BR ANSIBLE_CONFIG .
+.PP
+The special playbook names
+.B list
+and
+.B check
+are local helper modes and do not accept extra Ansible arguments.
+.SH OPTIONS
+.TP
+.B --install-ansible-core
+If
+.B ansible-playbook
+is missing, try to install
+.B ansible-core
+with
+.BR dnf .
+This requires root and working repositories.
+.TP
+.B --verbose
+Show the resolved bundle path, Ansible directory, ANSIBLE_CONFIG, and command.
+.TP
+.I PLAYBOOK
+Top-level playbook name or path passed to
+.BR ansible-playbook .
+.TP
+.I ANSIBLE_PLAYBOOK_ARGS
+Additional arguments passed through to
+.BR ansible-playbook .
+.SH EXAMPLES
+.nf
+aerolitctl provision list
+aerolitctl provision check
+aerolitctl provision pxe_server.yml -l localhost
+aerolitctl provision ansible_controller.yml --check
+sudo aerolitctl provision --install-ansible-core pxe_server.yml
+.fi
+.SH FILES
+.TP
+.I /etc/aerolit/aerolitctl.yml
+Read to resolve the active bundle path.
+.TP
+.I <bundle>/collections-hub/ansible
+Working directory for
+.BR ansible-playbook .
+.TP
+.I <bundle>/collections-hub/ansible/inventory
+Default inventory directory when no inventory argument is supplied.
+.TP
+.I <bundle>/collections-hub/ansible/ansible.cfg
+Used as
+.B ANSIBLE_CONFIG
+when present.
+.SH SECURITY
+This command can modify local or remote hosts exactly as the invoked playbook
+does. The wrapper does not make a playbook read-only.
+.SH EXIT STATUS
+For playbook runs, the exit status is the exit status returned by
+.BR ansible-playbook .
+.SH SEE ALSO
+.BR aerolitctl (1),
+.BR aerolitctl-deploy (1),
+.BR ansible-playbook (1)
+
+
+
+
+
+
+
+.TH AEROLITCTL-SETTINGS 1 "June 2026" "aerolitctl 0.1.0" "User Commands"
+.SH NAME
+aerolitctl-settings \- show, export, or import saved AeroLIT settings
+.SH SYNOPSIS
+.B aerolitctl settings show
+[\fB--no-redact\fR] [\fB--verbose\fR]
+.br
+.B aerolitctl settings export
+[\fB--output\fR \fIFILE\fR|\fB-o\fR \fIFILE\fR] [\fB--force\fR] [\fB--redact\fR] [\fB--verbose\fR]
+.br
+.B aerolitctl settings import
+[\fB--dry-run\fR] [\fB--merge\fR] [\fB--no-backup\fR] [\fB--no-redact-diff\fR] [\fB--verbose\fR]
+.I FILE
+.SH DESCRIPTION
+.B aerolitctl settings
+manages the saved YAML settings in
+.IR /etc/aerolit/aerolitctl.yml .
+It is useful for review, backup, migration, and controlled import of settings.
+.SH SUBCOMMANDS
+.TP
+.B show
+Print the current settings. Sensitive-looking keys are redacted by default.
+.TP
+.B export
+Write the current settings to stdout or a file.
+.TP
+.B import FILE
+Validate and import settings from a YAML file. Imports containing literal
+.B REDACTED
+placeholder values are refused.
+.SH OPTIONS
+.TP
+.B --no-redact
+For
+.B show ,
+print sensitive-looking values.
+.TP
+.BI --output " FILE", -o " FILE"
+For
+.B export ,
+write to
+.I FILE
+instead of stdout.
+.TP
+.B --force
+For
+.B export ,
+overwrite an existing output file.
+.TP
+.B --redact
+For
+.B export ,
+redact sensitive-looking values in the exported file.
+.TP
+.B --dry-run
+For
+.B import ,
+show a diff without changing files.
+.TP
+.B --merge
+Deep-merge imported settings into the current config instead of replacing it.
+.TP
+.B --no-backup
+For
+.B import ,
+do not create a full config backup before writing.
+.TP
+.B --no-redact-diff
+For
+.B import --dry-run ,
+show sensitive-looking values in the diff.
+.TP
+.B --verbose
+Show more detailed output.
+.SH EXAMPLES
+.nf
+aerolitctl settings show
+aerolitctl settings export --redact -o aerolitctl-settings-redacted.yml
+aerolitctl settings import --dry-run aerolitctl-settings.yml
+sudo aerolitctl settings import --merge aerolitctl-settings.yml
+.fi
+.SH FILES
+.TP
+.I /etc/aerolit/aerolitctl.yml
+Saved settings file.
+.TP
+.I /var/lib/aerolit/backups/config
+Default backup area used before non-dry-run imports unless
+.B --no-backup
+is supplied.
+.SH SECURITY
+Redaction is based on sensitive-looking key names such as password, token,
+secret, credential, private_key, ssh_key, api_key, auth_token, and bearer.
+.SH SEE ALSO
+.BR aerolitctl (1),
+.BR aerolitctl-backup (1),
+.BR aerolitctl-configure (1)
+
+
+
+
+
+
+
+
+
+
+.TH AEROLITCTL-SHELL 1 "June 2026" "aerolitctl 0.1.0" "User Commands"
+.SH NAME
+aerolitctl-shell \- show shell integration and completion information
+.SH SYNOPSIS
+.B aerolitctl shell
+.br
+.B aerolitctl shell info
+.br
+.B aerolitctl shell completion
+.SH DESCRIPTION
+.B aerolitctl shell
+prints terminal integration information. It does not deploy anything or modify
+shell startup files.
+.SH SUBCOMMANDS
+.TP
+.B info
+Show detected shell, likely shell rc file, bash completion status, and bundle
+path helper commands. This is the default action for
+.BR "aerolitctl shell" .
+.TP
+.B completion
+Show bash completion installation and development-source instructions.
+.SH EXAMPLES
+.nf
+aerolitctl shell
+aerolitctl shell info
+aerolitctl shell completion
+source completions/aerolitctl.bash
+.fi
+.SH FILES
+.TP
+.I /usr/share/bash-completion/completions/aerolitctl
+RPM-installed bash completion path.
+.TP
+.I completions/aerolitctl.bash
+Development/source-tree completion script.
+.TP
+.I /etc/aerolit/aerolitctl.yml
+Normal AeroLIT settings file referenced by shell information.
+.SH SEE ALSO
+.BR aerolitctl (1)
+
+
+
+
+
+
+
+
+
+
+.TH AEROLITCTL-STATUS 1 "June 2026" "aerolitctl 0.1.0" "User Commands"
+.SH NAME
+aerolitctl-status \- show AeroLIT configuration and deployment readiness
+.SH SYNOPSIS
+.B aerolitctl status
+[\fB--verbose\fR]
+.SH DESCRIPTION
+.B aerolitctl status
+prints a read-only summary of saved configuration and readiness. It checks
+whether the config file exists, whether a bundle path is set, whether important
+bundle paths and playbooks are present, whether generated server variables look
+current, and whether PXE/controller/NFS configuration appears enabled.
+.SH OPTIONS
+.TP
+.B --verbose
+Show more detailed output.
+.SH EXAMPLES
+.nf
+aerolitctl status
+aerolitctl status --verbose
+.fi
+.SH FILES
+.TP
+.I /etc/aerolit/aerolitctl.yml
+Saved configuration inspected by status.
+.TP
+.I <bundle>/collections-hub
+Bundle content root inspected by status.
+.TP
+.I <bundle>/collections-hub/ansible/pxe_server.yml
+PXE server playbook checked when PXE is enabled.
+.TP
+.I <bundle>/collections-hub/ansible/ansible_controller.yml
+Controller playbook checked when controller/NFS is enabled.
+.TP
+.I <bundle>/collections-hub/ansible/group_vars/all/aerolitctl_server_generated.yml
+Generated server variables checked for currency.
+.SH SEE ALSO
+.BR aerolitctl (1),
+.BR aerolitctl-doctor (1),
+.BR aerolitctl-configure (1)
+
+
+
+
+
+
+
+
+
+.TH AEROLITCTL-SYNC 1 "June 2026" "aerolitctl 0.1.0" "User Commands"
+.SH NAME
+aerolitctl-sync \- safely sync offline bundle updates
+.SH SYNOPSIS
+.B aerolitctl sync
+[\fISYNC_ACTION_OR_SOURCE\fR ...] [\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B aerolitctl sync
+plans, reviews, applies, and reports updates to active bundle sections. The
+implemented sections are
+.BR all ,
+.BR collections-hub ,
+.BR files ,
+.BR repos ,
+and
+.BR extracted_isos
+(also accepted as
+.BR extracted-isos ).
+.PP
+The command maintains sync state under
+.IR /var/lib/aerolit/sync ,
+including an installed manifest, staging area, lock file, backups, and sync logs.
+.SH OPTIONS
+.TP
+.BI --bundle-path " PATH"
+Target bundle path. Defaults to the configured bundle path.
+.TP
+.BI --section " SECTION"
+Limit the operation to one section:
+.BR all ,
+.BR collections-hub ,
+.BR files ,
+.BR repos ,
+.BR extracted_isos ,
+or
+.BR extracted-isos .
+.TP
+.BI --files-mode " additive|mirror"
+Mode for files sync.
+.TP
+.BI --repo-mode " additive|mirror"
+Mode for repository sync.
+.TP
+.BI --rhel-major " 7|8|9|10|11"
+Limit
+.B extracted_isos
+or
+.B repos
+sync to one RHEL major version.
+.TP
+.B --keep-old-isos
+For extracted ISOs, move the existing RHEL major tree to
+.I extracted_isos/archive
+instead of deleting it before replacement.
+.TP
+.B --large-backup
+For extracted ISOs, behave like
+.B --keep-old-isos
+for the selected RHEL major tree.
+.TP
+.B --restart-affected
+Restart affected services where the sync implementation supports it.
+.TP
+.BI --to " PATH"
+Destination path for export-style operations.
+.TP
+.BI --keep " COUNT"
+Retention count for cleanup-style operations.
+.TP
+.BI --days " DAYS"
+Retention age for cleanup-style operations.
+.TP
+.B --dry-run
+Preview the sync plan without writing.
+.TP
+.B --yes, -y
+Answer yes to confirmation prompts.
+.TP
+.B --force
+Allow operations that otherwise require extra confirmation.
+.TP
+.B --show-files
+Show changed files.
+.TP
+.B --show-all-files
+Show all files considered by the plan.
+.TP
+.B --show-skipped
+Show skipped files.
+.TP
+.BI --diff-lines " N"
+Limit diff output lines.
+.TP
+.BI --path " PATH"
+Limit diff/review output to a path.
+.TP
+.BI --output " text|json|yaml"
+Choose output format for supported status/report actions.
+.TP
+.BI --plan-output " PATH"
+Write the generated plan to a file.
+.TP
+.B --no-backup
+Do not back up overwritten or removed
+.I collections-hub
+files.
+.TP
+.B --review
+Review planned changes.
+.TP
+.B --review-conflicts
+Review conflicts.
+.TP
+.B --review-removals
+Review removals.
+.TP
+.B --defaults
+Use default behavior for supported actions.
+.TP
+.B --all
+Apply to all supported items for supported actions.
+.TP
+.B --verbose
+Show more detailed output.
+.SH EXAMPLES
+.nf
+aerolitctl sync /mnt/update/collections-hub.tar --dry-run
+aerolitctl sync /mnt/update/collections-hub.tar --review
+sudo aerolitctl sync /mnt/update/collections-hub.tar --yes
+aerolitctl sync diff /mnt/update/collections-hub.tar --diff-lines 80
+aerolitctl sync baseline --section collections-hub
+aerolitctl sync status --output yaml
+.fi
+.SH FILES
+.TP
+.I <bundle>/collections-hub
+Bundle collection and Ansible content.
+.TP
+.I <bundle>/files
+Bundle file payload content.
+.TP
+.I <bundle>/repos
+Bundle repository content.
+.TP
+.I <bundle>/extracted_isos
+Extracted ISO content.
+.TP
+.I <bundle>/collections-hub/.sync-preserve
+Preserve patterns for collections-hub sync.
+.TP
+.I /var/lib/aerolit/sync/installed-manifest.yml
+Installed sync manifest.
+.TP
+.I /var/lib/aerolit/sync/staging
+Sync staging area.
+.TP
+.I /var/lib/aerolit/sync/backups
+Sync backups.
+.TP
+.I /var/lib/aerolit/sync/sync.lock
+Sync lock file.
+.TP
+.I /var/log/aerolit/sync
+Sync logs.
+.SH NOTES
+Mirror-style sync can remove or replace bundle content. Use
+.B --dry-run
+and review output before applying updates to a production bundle.
+.SH SEE ALSO
+.BR aerolitctl (1),
+.BR aerolitctl-bundle (1),
+.BR aerolitctl-backup (1)
+
+
+
+
+
+
+
+
+
+
+.TH AEROLITCTL-VERSION 1 "June 2026" "aerolitctl 0.1.0" "User Commands"
+.SH NAME
+aerolitctl-version \- print the aerolitctl version
+.SH SYNOPSIS
+.B aerolitctl version
+[\fB--verbose\fR]
+.SH DESCRIPTION
+.B aerolitctl version
+prints the installed aerolitctl version and exits.
+.SH OPTIONS
+.TP
+.B --verbose
+Accepted for consistency with other commands.
+.SH EXAMPLES
+.nf
+aerolitctl version
+.fi
+.SH SEE ALSO
+.BR aerolitctl (1)
+
+
+
+
+
+
+
+.TH AEROLITCTL 1 "June 2026" "aerolitctl 0.1.0" "User Commands"
+.SH NAME
+aerolitctl \- command and control interface for offline AeroLIT bundles
+.SH SYNOPSIS
+.B aerolitctl
+[\fB--verbose\fR]
+.I COMMAND
+[\fIARGS...\fR]
+.br
+.B aerolitctl
+\fB--help\fR
+.br
+.B aerolitctl
+.I COMMAND
+\fB--help\fR
+.SH DESCRIPTION
+.B aerolitctl
+coordinates an AeroLIT automation bundle on RHEL 8, RHEL 9, and RHEL 10 systems.
+It records local configuration intent, validates the offline bundle layout,
+generates AeroLIT-owned Ansible and PXE/Kickstart inputs, runs deployment
+workflows, invokes provisioning playbooks, synchronizes bundle updates, and
+reports status and diagnostics.
+.PP
+The configured bundle path is stored in
+.IR /etc/aerolit/aerolitctl.yml .
+When no bundle path has been saved, commands that need a bundle normally fall
+back to
+.IR /opt/aerolit/aerolit-bundle
+or ask the user to run
+.BR "aerolitctl path set" .
+.PP
+.B configure
+commands write saved answers and generated input files. They do not deploy
+services by themselves.
+.B generate
+commands create playbooks and PXE/Kickstart generator inputs. They do not run
+Ansible.
+.B deploy
+and
+.B provision
+commands may change local system state or remote hosts by invoking system setup
+logic or Ansible.
+.SH COMMANDS
+.TP
+.B path
+Show or update the configured AeroLIT bundle path.
+.TP
+.B bundle
+Show or validate the configured AeroLIT bundle layout.
+.TP
+.B configure
+Capture AeroLIT answers and write AeroLIT-managed configuration inputs.
+.TP
+.B generate
+Generate AeroLIT-managed Ansible playbooks and PXE/Kickstart profile inputs.
+.TP
+.B deploy
+Apply saved AeroLIT server, network, NFS, PXE, controller, and repo-prep intent.
+.TP
+.B provision
+Run
+.B ansible-playbook
+from the active bundle's
+.I collections-hub/ansible
+directory.
+.TP
+.B sync
+Safely sync bundle updates into sections such as
+.IR collections-hub ,
+.IR files ,
+.IR repos ,
+and
+.IR extracted_isos .
+.TP
+.B doctor
+Run health checks for the host, config file, bundle, Ansible inputs, and PXE state.
+.TP
+.B status
+Show saved configuration and deployment readiness.
+.TP
+.B logs
+Show command logs under the AeroLIT log directory.
+.TP
+.B settings
+Show, export, or import saved AeroLIT settings.
+.TP
+.B backup
+Back up AeroLIT config, state, override, and generated input files.
+.TP
+.B shell
+Show shell integration and bash completion setup information.
+.TP
+.B version
+Print the aerolitctl version.
+.SH OPTIONS
+.TP
+.B \-h, --help
+Show help and exit.
+.TP
+.B --verbose
+Show more detailed output. Leaf commands also accept
+.B --verbose
+where implemented.
+.SH WORKFLOW
+A common first-run workflow is:
+.PP
+.nf
+aerolitctl path set /opt/aerolit/aerolit-bundle
+aerolitctl bundle validate
+aerolitctl configure init
+aerolitctl configure all --guided
+aerolitctl generate playbook deploy_pxe_content --role aerolit.example.role
+aerolitctl generate kickstart --guided
+sudo aerolitctl deploy server
+aerolitctl provision check
+aerolitctl doctor
+.fi
+.PP
+Use
+.B configure all
+to coordinate configuration capture. Use
+.B deploy server
+to apply saved server-side intent. These commands are intentionally not the
+same operation.
+.SH FILES
+.TP
+.I /etc/aerolit/aerolitctl.yml
+Main saved aerolitctl configuration.
+.TP
+.I /etc/aerolit/overrides/pxe/profiles
+Host-side aerolitctl-managed PXE profile override files.
+.TP
+.I /etc/aerolit/overrides/pxe/templates
+Host-side PXE template override files copied or composed by generation commands.
+.TP
+.I /opt/aerolit/aerolit-bundle
+Default AeroLIT bundle path.
+.TP
+.I <bundle>/collections-hub/ansible
+Active Ansible working directory used by generated playbooks and provisioning.
+.TP
+.I <bundle>/collections-hub/ansible/group_vars/all
+Location for aerolitctl-generated Ansible input files.
+.TP
+.I <bundle>/collections-hub/.sync-preserve
+Preserve rules used by bundle sync.
+.TP
+.I <bundle>/repos
+Bundle repository content.
+.TP
+.I <bundle>/files
+Bundle file payload content.
+.TP
+.I <bundle>/extracted_isos
+Extracted RHEL ISO content used by offline workflows.
+.TP
+.I /var/lib/aerolit
+State, backups, rendered files, and sync metadata.
+.TP
+.I /var/log/aerolit
+Default command log directory.
+.SH SECURITY
+Commands that only show status, help, logs, settings, or bundle information can
+usually be run as an unprivileged user if the files are readable.
+Commands that write
+.IR /etc/aerolit ,
+.IR /etc/yum.repos.d ,
+sync state under
+.IR /var/lib/aerolit ,
+or run deployment/provisioning actions may require root.
+.PP
+Command logs redact values for sensitive-looking CLI option names such as
+password, token, secret, credential, and private-key.
+.SH EXIT STATUS
+.TP
+.B 0
+The command completed successfully.
+.TP
+.B 1
+The command found a failure, validation error, missing required state, or runtime error.
+.TP
+.B 2
+Command-line usage was invalid or a required command argument was missing.
+.TP
+.B 127
+An external command required by the selected workflow was not found.
+.TP
+.B 130
+The command was interrupted.
+.SH NOTES
+This build has no top-level repository-management or UI command. Repository
+setup is handled by
+.BR "aerolitctl configure repos" .
+.SH SEE ALSO
+.BR aerolitctl-path (1),
+.BR aerolitctl-bundle (1),
+.BR aerolitctl-configure (1),
+.BR aerolitctl-generate (1),
+.BR aerolitctl-deploy (1),
+.BR aerolitctl-provision (1),
+.BR aerolitctl-sync (1),
+.BR aerolitctl-doctor (1),
+.BR aerolitctl-status (1),
+.BR aerolitctl-logs (1),
+.BR aerolitctl-settings (1),
+.BR aerolitctl-backup (1),
+.BR aerolitctl-shell (1)
+
+
+
+
+
+
+Name:           aerolitctl
+Version:        0.1.0
+Release:        1%{?dist}
+Summary:        Command and control interface for AeroLIT bundles
+
+License:        Proprietary
+URL:            https://gitlab.example.com/lit/aerolitctl
+Source0:        %{name}-%{version}.tar.gz
+
+BuildArch:      noarch
+
+BuildRequires:  python3-devel
+BuildRequires:  python3-rpm-macros
+BuildRequires:  python3-setuptools
+BuildRequires:  python3-wheel
+
+Requires:       python3
+Requires:       python3dist(pyyaml)
+
+Recommends:     bash-completion
+
+%description
+aerolitctl is the command and control interface for AeroLIT bundles.
+
+%prep
+%autosetup
+
+%build
+%py3_build
+
+%install
+%py3_install
+
+install -d -m 0755 %{buildroot}%{_sysconfdir}/aerolit
+install -d -m 0755 %{buildroot}%{_localstatedir}/log/aerolit
+install -d -m 0755 %{buildroot}%{_localstatedir}/lib/aerolit
+
+install -m 0644 packaging/etc/aerolit/aerolitctl.yml \
+  %{buildroot}%{_sysconfdir}/aerolit/aerolitctl.yml
+
+install -m 0644 packaging/etc/aerolit/aerolitctl.yml.example \
+  %{buildroot}%{_sysconfdir}/aerolit/aerolitctl.yml.example
+
+install -Dm0644 completions/aerolitctl.bash \
+  %{buildroot}%{_datadir}/bash-completion/completions/aerolitctl
+
+install -d -m 0755 %{buildroot}%{_mandir}/man1
+install -m 0644 man/man1/*.1 %{buildroot}%{_mandir}/man1/
+
+%files
+%license LICENSE
+%doc README.md
+
+%{_bindir}/aerolitctl
+%{python3_sitelib}/aerolitctl*
+%{_mandir}/man1/aerolitctl*.1*
+
+%dir %{_sysconfdir}/aerolit
+%config(noreplace) %{_sysconfdir}/aerolit/aerolitctl.yml
+%config(noreplace) %{_sysconfdir}/aerolit/aerolitctl.yml.example
+
+%dir %{_localstatedir}/log/aerolit
+%dir %{_localstatedir}/lib/aerolit
+
+%dir %{_datadir}/bash-completion
+%dir %{_datadir}/bash-completion/completions
+%{_datadir}/bash-completion/completions/aerolitctl
+
+%changelog
+* Sat Jun 06 2026 David Oxenreiter <david.m.oxenreiter@lmco.com> - 0.1.0-1
+- Initial aerolitctl RPM packaging
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aerolitctl"
+version = "0.1.0"
+description = "Command and control interface for AeroLIT bundles."
+readme = "README.md"
+requires-python = ">=3.6"
+
+[project.scripts]
+aerolitctl = "aerolitctl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/man/man1" = [
+  "man/man1/aerolitctl.1",
+  "man/man1/aerolitctl-backup.1",
+  "man/man1/aerolitctl-bundle.1",
+  "man/man1/aerolitctl-configure.1",
+  "man/man1/aerolitctl-deploy.1",
+  "man/man1/aerolitctl-doctor.1",
+  "man/man1/aerolitctl-generate.1",
+  "man/man1/aerolitctl-logs.1",
+  "man/man1/aerolitctl-path.1",
+  "man/man1/aerolitctl-provision.1",
+  "man/man1/aerolitctl-settings.1",
+  "man/man1/aerolitctl-shell.1",
+  "man/man1/aerolitctl-status.1",
+  "man/man1/aerolitctl-sync.1",
+  "man/man1/aerolitctl-version.1",
+]
+
+
+
+
+
+
+
+
+
+from setuptools import setup, find_packages
+
+setup(
+    name="aerolitctl",
+    version="0.1.0",
+    description="Command and control interface for AeroLIT bundles.",
+    packages=find_packages(where="src"),
+    package_dir={"": "src"},
+    data_files=[
+        (
+            "share/man/man1",
+            [
+                "man/man1/aerolitctl.1",
+                "man/man1/aerolitctl-backup.1",
+                "man/man1/aerolitctl-bundle.1",
+                "man/man1/aerolitctl-configure.1",
+                "man/man1/aerolitctl-deploy.1",
+                "man/man1/aerolitctl-doctor.1",
+                "man/man1/aerolitctl-generate.1",
+                "man/man1/aerolitctl-logs.1",
+                "man/man1/aerolitctl-path.1",
+                "man/man1/aerolitctl-provision.1",
+                "man/man1/aerolitctl-settings.1",
+                "man/man1/aerolitctl-shell.1",
+                "man/man1/aerolitctl-status.1",
+                "man/man1/aerolitctl-sync.1",
+                "man/man1/aerolitctl-version.1",
+            ],
+        ),
+    ],
+    entry_points={
+        "console_scripts": [
+            "aerolitctl=aerolitctl.cli:main",
+        ],
+    },
+    python_requires=">=3.6",
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#!/usr/bin/env python3
+"""Validate aerolitctl section-1 man pages without requiring groff/mandoc."""
+
+from __future__ import print_function
+
+import argparse
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+REQUIRED_PAGES = (
+    "aerolitctl.1",
+    "aerolitctl-backup.1",
+    "aerolitctl-bundle.1",
+    "aerolitctl-configure.1",
+    "aerolitctl-deploy.1",
+    "aerolitctl-doctor.1",
+    "aerolitctl-generate.1",
+    "aerolitctl-logs.1",
+    "aerolitctl-path.1",
+    "aerolitctl-provision.1",
+    "aerolitctl-settings.1",
+    "aerolitctl-shell.1",
+    "aerolitctl-status.1",
+    "aerolitctl-sync.1",
+    "aerolitctl-version.1",
+)
+
+REQUIRED_SECTIONS = ("NAME", "SYNOPSIS", "DESCRIPTION", "SEE ALSO")
+
+IMPLEMENTED_TOP_COMMANDS = (
+    "backup",
+    "bundle",
+    "configure",
+    "deploy",
+    "doctor",
+    "generate",
+    "logs",
+    "path",
+    "provision",
+    "settings",
+    "shell",
+    "status",
+    "sync",
+    "version",
+)
+
+PLACEHOLDER_PATTERNS = (
+    "TODO",
+    "FIXME",
+    "TBD",
+    "placeholder text",
+)
+
+
+def read_text(path):
+    return path.read_text(encoding="utf-8")
+
+
+def section_names(text):
+    return set(re.findall(r"^\.SH\s+(.+?)\s*$", text, flags=re.MULTILINE))
+
+
+def validate_pages(man_dir):
+    errors = []
+
+    for name in REQUIRED_PAGES:
+        path = man_dir / name
+        if not path.exists():
+            errors.append("missing required man page: {}".format(path))
+            continue
+
+        text = read_text(path)
+        if not text.strip():
+            errors.append("empty man page: {}".format(path))
+            continue
+
+        if not text.startswith(".TH "):
+            errors.append("missing .TH header: {}".format(path))
+
+        sections = section_names(text)
+        for section in REQUIRED_SECTIONS:
+            if section not in sections:
+                errors.append("{} missing section {}".format(path, section))
+
+        lowered = text.lower()
+        for pattern in PLACEHOLDER_PATTERNS:
+            if pattern.lower() in lowered:
+                errors.append("{} contains placeholder or stale text: {}".format(path, pattern))
+
+        for command in ("repo", "ui"):
+            if re.search(r"\baerolitctl\s+{}\b".format(command), text):
+                errors.append("{} documents unimplemented top command: {}".format(path, command))
+
+    extra_pages = sorted(path.name for path in man_dir.glob("*.1") if path.name not in REQUIRED_PAGES)
+    for name in extra_pages:
+        errors.append("unexpected man page: {}".format(man_dir / name))
+
+    return errors
+
+
+def run_optional_linter(command, pages):
+    binary = shutil.which(command)
+    if not binary:
+        print("{} not found; skipping optional roff lint.".format(command))
+        return 0
+
+    failures = 0
+    for page in pages:
+        if command == "mandoc":
+            cmd = [binary, "-Tlint", str(page)]
+        else:
+            cmd = [binary, "-man", "-Tascii", str(page)]
+
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            failures += 1
+            print("{} failed for {}".format(command, page))
+            output = (result.stdout or "") + (result.stderr or "")
+            if output.strip():
+                print(output.strip())
+
+    return 1 if failures else 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Validate aerolitctl man pages.")
+    parser.add_argument("--root", default=".", help="Repository root. Default: current directory.")
+    parser.add_argument("--lint", action="store_true", help="Run mandoc or groff if available.")
+    args = parser.parse_args(argv)
+
+    root = Path(args.root)
+    man_dir = root / "man" / "man1"
+    errors = validate_pages(man_dir)
+
+    if errors:
+        print("Man page validation failed:")
+        for error in errors:
+            print("  - {}".format(error))
+        return 1
+
+    print("Man page structure checks passed: {}".format(man_dir))
+
+    if args.lint:
+        pages = [man_dir / name for name in REQUIRED_PAGES]
+        if shutil.which("mandoc"):
+            return run_optional_linter("mandoc", pages)
+        return run_optional_linter("groff", pages)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
