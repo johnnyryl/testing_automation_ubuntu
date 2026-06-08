@@ -1,0 +1,54 @@
+future readme
+
+
+
+
+On Windows PowerShell, run:
+
+py -3 tools\dump_cli_parser.py --format json > aerolitctl-cli-surface.json
+py -3 tools\dump_cli_parser.py --format text > aerolitctl-cli-surface.txt
+
+On Linux/RHEL, run:
+
+python3 tools\dump_cli_parser.py --format json > aerolitctl-cli-surface.json
+python3 tools\dump_cli_parser.py --format text > aerolitctl-cli-surface.txt
+
+
+
+
+
+On Windows PowerShell, run:
+
+py -3 tools\scan_argparse_static.py --root . --format text --output aerolitctl-static-argparse-scan.txt
+py -3 tools\scan_argparse_static.py --root . --format json --output aerolitctl-static-argparse-scan.json
+
+On Linux/RHEL, run:
+
+python3 tools/scan_argparse_static.py --root . --format text --output aerolitctl-static-argparse-scan.txt
+python3 tools/scan_argparse_static.py --root . --format json --output aerolitctl-static-argparse-scan.json
+
+The output files should be portable either way. You can run it on Windows, then upload the generated .txt and .json files here.
+
+
+
+
+Run it on Windows:
+
+py -3 tools\check_completion.py --root .
+
+Or use your generated parser dump:
+
+py -3 tools\check_completion.py --root . --surface-json aerolitctl-cli-surface.json
+
+Run it on Linux/RHEL:
+
+python3 tools/check_completion.py --root .
+
+Or:
+
+python3 tools/check_completion.py --root . --surface-json aerolitctl-cli-surface.json
+
+
+
+
+
