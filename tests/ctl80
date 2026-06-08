@@ -1,0 +1,771 @@
+#!/usr/bin/env python3
+"""Readiness tests for the AeroLIT aerolitctl sync command.
+
+This script is intended to live next to aerolitctl_merge_readiness.py, usually
+under tools/ in the aerolitctl repository.
+
+It exercises the sync checklist using:
+  * the real aerolitctl command
+  * a real incoming bundle archive supplied with --bundle-path
+  * temporary fake bundles under /tmp for conflict/removal/tar-safety tests
+
+The real-sync test intentionally runs one real collections-hub sync against the
+configured AeroLIT bundle unless --skip-real-sync is used.
+"""
+
+from __future__ import print_function
+
+import argparse
+import datetime
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+from pathlib import Path
+
+
+DEFAULT_SOURCE = "/aerolit_rhel8_standard-1.13.0.tar.gz"
+MANIFEST_FILE = Path("/var/lib/aerolit/sync/installed-manifest.yml")
+SYNC_LOG_DIR = Path("/var/log/aerolit/sync")
+SYNC_BACKUP_DIR = Path("/var/lib/aerolit/sync/backups")
+
+
+class ReadinessFailure(Exception):
+    """Raised when a readiness test fails."""
+
+
+class Runner(object):
+    """Run shell commands with logging and readable progress output."""
+
+    def __init__(self, args):
+        self.args = args
+        stamp = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        self.run_root = Path(args.output_dir or "/tmp") / "aerolitctl-sync-readiness-{}".format(stamp)
+        self.command_log_dir = self.run_root / "commands"
+        self.command_log_dir.mkdir(parents=True, exist_ok=True)
+        self.command_index = 0
+        self.failures = []
+        self.passes = []
+        self.skips = []
+        self.project_root = find_project_root(args.project_root)
+
+    def banner(self, title):
+        print("")
+        print("=" * 80)
+        print(title)
+        print("=" * 80)
+
+    def pass_test(self, name):
+        self.passes.append(name)
+        print("PASS: {}".format(name))
+
+    def skip_test(self, name, reason):
+        self.skips.append((name, reason))
+        print("SKIP: {} - {}".format(name, reason))
+
+    def fail_test(self, name, reason):
+        self.failures.append((name, reason))
+        print("FAIL: {} - {}".format(name, reason))
+        raise ReadinessFailure(reason)
+
+    def command_log_path(self, name):
+        self.command_index += 1
+        safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in name.lower())
+        return self.command_log_dir / "{:03d}-{}.log".format(self.command_index, safe[:60])
+
+    def run(self, name, command, input_text=None, expected_rc=0, cwd=None, env=None, capture=False):
+        """Run a command, tee output to console/log, and validate return code."""
+        log_path = self.command_log_path(name)
+        cwd = str(cwd or self.project_root)
+        command_display = command if isinstance(command, str) else " ".join(command)
+
+        print("")
+        print("[{}]".format(name))
+        print("$ {}".format(command_display))
+        print("Command log: {}".format(log_path))
+
+        if isinstance(expected_rc, int):
+            expected = (expected_rc,)
+        else:
+            expected = tuple(expected_rc)
+
+        merged_env = os.environ.copy()
+        if env:
+            merged_env.update(env)
+
+        if isinstance(command, str):
+            popen_command = command
+            shell = True
+        else:
+            popen_command = command
+            shell = False
+
+        with log_path.open("w") as log:
+            log.write("$ {}\n".format(command_display))
+            log.write("cwd: {}\n\n".format(cwd))
+            proc = subprocess.Popen(
+                popen_command,
+                shell=shell,
+                cwd=cwd,
+                env=merged_env,
+                stdin=subprocess.PIPE if input_text is not None else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+            )
+
+            if input_text is not None:
+                try:
+                    proc.stdin.write(input_text)
+                    proc.stdin.close()
+                except BrokenPipeError:
+                    pass
+
+            output_chunks = []
+            for line in proc.stdout:
+                output_chunks.append(line)
+                log.write(line)
+                if not capture:
+                    sys.stdout.write(line)
+
+            rc = proc.wait()
+            output = "".join(output_chunks)
+            log.write("\nreturn code: {}\n".format(rc))
+
+        print("Return code: {}".format(rc))
+
+        if rc not in expected:
+            raise ReadinessFailure(
+                "Command '{}' returned {}, expected {}. Log: {}".format(
+                    name,
+                    rc,
+                    ",".join(str(item) for item in expected),
+                    log_path,
+                )
+            )
+
+        return output, rc, log_path
+
+    def aerolitctl(self, name, extra_args, input_text=None, expected_rc=0, capture=False):
+        command = [self.args.aerolitctl] + list(extra_args)
+        return self.run(name, command, input_text=input_text, expected_rc=expected_rc, capture=capture)
+
+
+def find_project_root(project_root_arg):
+    """Find the aerolitctl project root."""
+    if project_root_arg:
+        return Path(project_root_arg).resolve()
+
+    cwd = Path.cwd().resolve()
+    if (cwd / "src" / "aerolitctl").is_dir():
+        return cwd
+
+    script_path = Path(__file__).resolve()
+    candidates = [script_path.parent, script_path.parent.parent, cwd]
+
+    for candidate in candidates:
+        if (candidate / "src" / "aerolitctl").is_dir():
+            return candidate
+
+    return cwd
+
+
+def latest_file(patterns):
+    """Return newest file matching any glob pattern."""
+    files = []
+    for pattern in patterns:
+        files.extend(Path("/").glob(pattern.lstrip("/")))
+
+    files = [path for path in files if path.exists()]
+    if not files:
+        return None
+
+    files.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    return files[0]
+
+
+def latest_sync_report():
+    if not SYNC_LOG_DIR.exists():
+        return None
+    files = list(SYNC_LOG_DIR.glob("*sync-report.yml"))
+    if not files:
+        return None
+    files.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    return files[0]
+
+
+def latest_any_sync_report():
+    if not SYNC_LOG_DIR.exists():
+        return None
+    patterns = (
+        "*sync-report.yml",
+        "*multi-section-sync-plan.yml",
+        "*multi-section-sync-report.yml",
+    )
+    files = []
+    for pattern in patterns:
+        files.extend(SYNC_LOG_DIR.glob(pattern))
+    if not files:
+        return None
+    files.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    return files[0]
+
+
+def latest_backup_dir():
+    if not SYNC_BACKUP_DIR.exists():
+        return None
+    dirs = [path for path in SYNC_BACKUP_DIR.iterdir() if path.is_dir()]
+    if not dirs:
+        return None
+    dirs.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    return dirs[0]
+
+
+def parse_changed_file_count(output):
+    """Return changed file count from aerolitctl sync output, or None."""
+    match = re.search(r"Changed files:\s*\n\s*([0-9]+)", output or "")
+
+    if not match:
+        return None
+
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def assert_file_exists(path, message):
+    path = Path(path)
+    if not path.exists():
+        raise ReadinessFailure(message + ": {}".format(path))
+
+
+def assert_contains(path, text, message):
+    path = Path(path)
+    data = path.read_text(errors="replace")
+    if text not in data:
+        raise ReadinessFailure(message + ": expected '{}' in {}".format(text, path))
+
+
+def assert_not_exists(path, message):
+    path = Path(path)
+    if path.exists():
+        raise ReadinessFailure(message + ": {}".format(path))
+
+
+def write_text(path, text):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def make_source_tar(incoming, source_tar):
+    source_tar = Path(source_tar)
+    if source_tar.exists():
+        source_tar.unlink()
+    subprocess.check_call(["tar", "-C", str(incoming), "-cf", str(source_tar), "collections-hub"])
+    return source_tar
+
+
+def make_base_target(target, incoming, source_tar):
+    target = Path(target)
+    incoming = Path(incoming)
+    source_tar = Path(source_tar)
+
+    for path in (target, incoming):
+        if path.exists():
+            shutil.rmtree(str(path))
+    if source_tar.exists():
+        source_tar.unlink()
+
+    (target / "collections-hub" / "ansible").mkdir(parents=True, exist_ok=True)
+    (target / "collections-hub" / "collections").mkdir(parents=True, exist_ok=True)
+    (incoming / "collections-hub" / "ansible").mkdir(parents=True, exist_ok=True)
+    (incoming / "collections-hub" / "collections").mkdir(parents=True, exist_ok=True)
+
+    write_text(target / "collections-hub" / "README.md", "Target README\n")
+    write_text(incoming / "collections-hub" / "README.md", "Target README\n")
+
+
+class ManifestGuard(object):
+    """Save and restore the real sync manifest around temporary manifest tests."""
+
+    def __init__(self, backup_path):
+        self.backup_path = Path(backup_path)
+        self.had_manifest = MANIFEST_FILE.exists()
+
+    def save(self):
+        self.backup_path.parent.mkdir(parents=True, exist_ok=True)
+        if MANIFEST_FILE.exists():
+            shutil.copy2(str(MANIFEST_FILE), str(self.backup_path))
+
+    def restore(self):
+        if self.backup_path.exists():
+            MANIFEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(self.backup_path), str(MANIFEST_FILE))
+            print("Restored original manifest: {}".format(MANIFEST_FILE))
+        elif not self.had_manifest and MANIFEST_FILE.exists():
+            MANIFEST_FILE.unlink()
+            print("Removed temporary manifest: {}".format(MANIFEST_FILE))
+        else:
+            print("No saved manifest found to restore.")
+
+
+def create_tar_safety_archive(path):
+    """Create tar archive with safe and unsafe members."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with tarfile.open(str(path), "w") as tar:
+        for directory in (
+            "good-bundle/",
+            "good-bundle/collections-hub/",
+            "good-bundle/collections-hub/ansible/",
+            "good-bundle/collections-hub/collections/",
+        ):
+            info = tarfile.TarInfo(directory)
+            info.type = tarfile.DIRTYPE
+            info.mode = 0o755
+            tar.addfile(info)
+
+        data = b"safe file\n"
+        info = tarfile.TarInfo("good-bundle/collections-hub/ansible/safe.yml")
+        info.size = len(data)
+        info.mode = 0o644
+        tar.addfile(info, io.BytesIO(data))
+
+        data = b"bad absolute\n"
+        info = tarfile.TarInfo("/tmp/aerolit-evil-absolute.txt")
+        info.size = len(data)
+        info.mode = 0o644
+        tar.addfile(info, io.BytesIO(data))
+
+        data = b"bad parent\n"
+        info = tarfile.TarInfo("../aerolit-evil-parent.txt")
+        info.size = len(data)
+        info.mode = 0o644
+        tar.addfile(info, io.BytesIO(data))
+
+        info = tarfile.TarInfo("good-bundle/collections-hub/ansible/bad-symlink")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        info.mode = 0o777
+        tar.addfile(info)
+
+        info = tarfile.TarInfo("good-bundle/collections-hub/ansible/bad-hardlink")
+        info.type = tarfile.LNKTYPE
+        info.linkname = "good-bundle/collections-hub/ansible/safe.yml"
+        info.mode = 0o777
+        tar.addfile(info)
+
+        info = tarfile.TarInfo("good-bundle/collections-hub/ansible/bad-fifo")
+        info.type = tarfile.FIFOTYPE
+        info.mode = 0o644
+        tar.addfile(info)
+
+    return path
+
+
+def run_basic_tests(runner, source_bundle):
+    runner.banner("14.1 Basic syntax/import and command tests")
+
+    runner.run("compileall", [sys.executable, "-m", "compileall", "src"], cwd=runner.project_root)
+    assert_file_exists(source_bundle, "source bundle does not exist")
+    runner.run("source exists", ["ls", "-lh", str(source_bundle)], cwd=runner.project_root)
+
+    runner.aerolitctl("sync status", ["sync", "status"])
+    runner.aerolitctl("preserve defaults", ["sync", "preserve", "defaults"])
+    runner.aerolitctl("preserve add", ["sync", "preserve", "add", "ansible/group_vars/all/site.yml"])
+    runner.aerolitctl("preserve explain", ["sync", "preserve", "explain", "ansible/group_vars/all/site.yml"])
+    runner.aerolitctl("preserve remove", ["sync", "preserve", "remove", "ansible/group_vars/all/site.yml"], expected_rc=(0, 1))
+    runner.aerolitctl("preserve validate", ["sync", "preserve", "validate"])
+    runner.aerolitctl("manifest validate", ["sync", "manifest", "validate"])
+
+
+def run_dry_run_tests(runner, source_bundle):
+    runner.banner("14.2/14.3 Dry-run and plan-output tests")
+
+    runner.aerolitctl("collections-hub dry-run", ["sync", str(source_bundle), "--section", "collections-hub", "--dry-run"])
+    runner.aerolitctl("collections-hub dry-run files", ["sync", str(source_bundle), "--section", "collections-hub", "--dry-run", "--show-files"])
+    runner.aerolitctl("files dry-run", ["sync", str(source_bundle), "--section", "files", "--dry-run", "--show-files"])
+    runner.aerolitctl("repos dry-run additive", ["sync", str(source_bundle), "--section", "repos", "--repo-mode", "additive", "--dry-run", "--show-files"])
+    runner.aerolitctl("extracted isos dry-run rhel8", ["sync", str(source_bundle), "--section", "extracted-isos", "--rhel-major", "8", "--dry-run", "--show-files"])
+    runner.aerolitctl("extracted isos large backup dry-run", ["sync", str(source_bundle), "--section", "extracted-isos", "--rhel-major", "8", "--large-backup", "--dry-run"])
+    runner.aerolitctl("multi section all dry-run", ["sync", str(source_bundle), "--section", "all", "--dry-run"])
+    runner.aerolitctl("multi section all dry-run files", ["sync", str(source_bundle), "--section", "all", "--dry-run", "--show-files"])
+
+    output, rc, log_path = runner.aerolitctl(
+        "json output validation",
+        ["sync", str(source_bundle), "--section", "all", "--dry-run", "--output", "json"],
+        capture=True,
+    )
+    try:
+        json.loads(output)
+    except ValueError as exc:
+        raise ReadinessFailure("JSON output did not parse: {}. Log: {}".format(exc, log_path))
+    print("JSON OK")
+
+    plan_path = runner.run_root / "aerolit-sync-plan.yml"
+    runner.aerolitctl("plan output file", ["sync", str(source_bundle), "--section", "all", "--dry-run", "--plan-output", str(plan_path)])
+    assert_file_exists(plan_path, "plan output was not written")
+
+    report = latest_any_sync_report()
+    if not report:
+        raise ReadinessFailure("no sync report/plan report found under {}".format(SYNC_LOG_DIR))
+    print("Latest report: {}".format(report))
+
+
+def run_real_sync_tests(runner, source_bundle):
+    runner.banner("14.3 First real sync tests")
+
+    runner.aerolitctl("real sync precheck dry-run", ["sync", str(source_bundle), "--section", "collections-hub", "--dry-run", "--show-files"])
+
+    sync_started = time.time()
+    sync_output, rc, sync_log = runner.aerolitctl(
+        "real sync collections-hub",
+        ["sync", str(source_bundle), "--section", "collections-hub", "--yes"],
+    )
+    changed_count = parse_changed_file_count(sync_output)
+
+    assert_file_exists(MANIFEST_FILE, "installed manifest was not created")
+    print("Manifest exists: {}".format(MANIFEST_FILE))
+
+    report = latest_sync_report()
+    if not report:
+        raise ReadinessFailure("latest sync report not found")
+    print("Latest sync report: {}".format(report))
+
+    if changed_count is None:
+        print(
+            "NOTE: could not parse changed-file count from sync output. "
+            "Skipping strict backup-created assertion. Log: {}".format(sync_log)
+        )
+    elif changed_count > 0:
+        backup = latest_backup_dir()
+        if not backup:
+            raise ReadinessFailure("backup directory was not created")
+
+        if backup.stat().st_mtime < (sync_started - 1):
+            raise ReadinessFailure(
+                "latest backup appears older than this sync run: {}".format(backup)
+            )
+
+        print("Latest backup: {}".format(backup))
+
+        metadata = backup / "aerolit-sync-backup.yml"
+        if not metadata.exists():
+            raise ReadinessFailure("backup metadata file missing: {}".format(metadata))
+        print("Backup metadata exists: {}".format(metadata))
+
+        pre_manifest = backup / "installed-manifest.before.yml"
+        if not pre_manifest.exists():
+            raise ReadinessFailure("pre-sync manifest backup missing: {}".format(pre_manifest))
+        print("Pre-sync manifest backup exists: {}".format(pre_manifest))
+    else:
+        print("Changed files: 0")
+        print("No backup was required for this real sync run.")
+
+    runner.aerolitctl("sync status after real sync", ["sync", "status"])
+    runner.aerolitctl(
+        "second collections-hub dry-run",
+        ["sync", str(source_bundle), "--section", "collections-hub", "--dry-run", "--show-files"],
+        capture=False,
+    )
+
+
+def run_tar_safety_tests(runner):
+    runner.banner("14.6 Tar safety tests")
+
+    tar_root = runner.run_root / "tar-safety"
+    tar_path = create_tar_safety_archive(tar_root / "aerolit-tar-safety.tar")
+    print("Created tar safety archive: {}".format(tar_path))
+
+    runner.aerolitctl(
+        "tar safety dry-run",
+        ["sync", str(tar_path), "--section", "collections-hub", "--dry-run", "--show-files", "--show-skipped"],
+    )
+
+    report = latest_any_sync_report()
+    if not report:
+        raise ReadinessFailure("no sync report found after tar safety test")
+
+    data = report.read_text(errors="replace")
+    expected_fragments = (
+        "/tmp/aerolit-evil-absolute.txt",
+        "../aerolit-evil-parent.txt",
+        "bad-symlink",
+        "bad-hardlink",
+        "bad-fifo",
+        "unsafe path",
+        "link member",
+        "special tar member",
+    )
+
+    for fragment in expected_fragments:
+        if fragment not in data:
+            raise ReadinessFailure("tar safety report missing '{}' in {}".format(fragment, report))
+
+    assert_not_exists("/tmp/aerolit-evil-absolute.txt", "unsafe absolute tar member escaped staging")
+    assert_not_exists("/tmp/aerolit-evil-parent.txt", "unsafe parent tar member escaped staging")
+    print("Tar safety report includes unsafe/skipped members: {}".format(report))
+
+
+def run_interactive_conflict_tests(runner, guard):
+    runner.banner("14.4 Interactive conflict review tests")
+
+    lab = runner.run_root / "interactive-lab"
+    target = lab / "target-bundle"
+    incoming = lab / "incoming"
+    source_tar = lab / "incoming-collections-hub.tar"
+
+    make_base_target(target, incoming, source_tar)
+    write_text(target / "collections-hub" / "ansible" / "conflict-block.yml", "original block file\n")
+    write_text(incoming / "collections-hub" / "ansible" / "conflict-block.yml", "incoming block file\n")
+    make_source_tar(incoming, source_tar)
+
+    runner.aerolitctl("baseline conflict block", ["sync", "baseline", "--bundle-path", str(target), "--section", "collections-hub", "--yes"])
+    write_text(target / "collections-hub" / "ansible" / "conflict-block.yml", "local edited block file\n")
+
+    runner.aerolitctl(
+        "unresolved conflict blocks sync",
+        ["sync", str(source_tar), "--bundle-path", str(target), "--section", "collections-hub", "--yes"],
+        expected_rc=2,
+    )
+
+    make_base_target(target, incoming, source_tar)
+    for name in ("conflict-keep.yml", "conflict-preserve.yml", "conflict-use.yml"):
+        write_text(target / "collections-hub" / "ansible" / name, "original {}\n".format(name))
+        write_text(incoming / "collections-hub" / "ansible" / name, "incoming {}\n".format(name))
+    make_source_tar(incoming, source_tar)
+
+    runner.aerolitctl("baseline conflict review", ["sync", "baseline", "--bundle-path", str(target), "--section", "collections-hub", "--yes"])
+    write_text(target / "collections-hub" / "ansible" / "conflict-keep.yml", "local edited keep file\n")
+    write_text(target / "collections-hub" / "ansible" / "conflict-preserve.yml", "local edited preserve file\n")
+    write_text(target / "collections-hub" / "ansible" / "conflict-use.yml", "local edited use file\n")
+
+    runner.aerolitctl(
+        "interactive conflict review d k p u",
+        ["sync", str(source_tar), "--bundle-path", str(target), "--section", "collections-hub", "--review-conflicts", "--yes"],
+        input_text="d\nk\np\nu\n",
+    )
+
+    assert_contains(target / "collections-hub" / "ansible" / "conflict-keep.yml", "local edited keep file", "[k] did not keep local file")
+    assert_contains(target / "collections-hub" / "ansible" / "conflict-preserve.yml", "local edited preserve file", "[p] did not keep local file")
+    assert_contains(target / "collections-hub" / "ansible" / "conflict-use.yml", "incoming conflict-use.yml", "[u] did not use incoming file")
+    assert_contains(target / "collections-hub" / ".sync-preserve", "ansible/conflict-preserve.yml", "[p] did not append preserve path")
+    print("Conflict review choices passed.")
+
+
+def run_removal_review_tests(runner, guard):
+    runner.banner("14.5 Removal review tests")
+
+    lab = runner.run_root / "removal-lab"
+    target = lab / "target-bundle"
+    incoming = lab / "incoming"
+    source_tar = lab / "incoming-collections-hub.tar"
+
+    make_base_target(target, incoming, source_tar)
+    write_text(target / "collections-hub" / "ansible" / "remove-skip.yml", "safe remove skip file\n")
+    make_source_tar(incoming, source_tar)
+    runner.aerolitctl("baseline removal skip", ["sync", "baseline", "--bundle-path", str(target), "--section", "collections-hub", "--yes"])
+    runner.aerolitctl(
+        "removal review skip all",
+        ["sync", str(source_tar), "--bundle-path", str(target), "--section", "collections-hub", "--review-removals", "--yes"],
+        input_text="s\n",
+    )
+    assert_file_exists(target / "collections-hub" / "ansible" / "remove-skip.yml", "skip all removals removed the file")
+
+    make_base_target(target, incoming, source_tar)
+    write_text(target / "collections-hub" / "ansible" / "aaa-preserve-selected.yml", "safe remove preserve selected file\n")
+    write_text(target / "collections-hub" / "ansible" / "zzz-remove-other.yml", "safe remove other file\n")
+    make_source_tar(incoming, source_tar)
+    runner.aerolitctl("baseline removal preserve selected", ["sync", "baseline", "--bundle-path", str(target), "--section", "collections-hub", "--yes"])
+    runner.aerolitctl(
+        "removal review preserve selected",
+        ["sync", str(source_tar), "--bundle-path", str(target), "--section", "collections-hub", "--review-removals", "--yes"],
+        input_text="p\n1\n",
+    )
+    assert_file_exists(target / "collections-hub" / "ansible" / "aaa-preserve-selected.yml", "selected preserve removal was removed")
+    assert_contains(target / "collections-hub" / ".sync-preserve", "ansible/aaa-preserve-selected.yml", "selected removal was not added to preserve file")
+    assert_not_exists(target / "collections-hub" / "ansible" / "zzz-remove-other.yml", "non-selected removal was not removed")
+
+    make_base_target(target, incoming, source_tar)
+    write_text(target / "collections-hub" / "ansible" / "remove-all.yml", "safe remove all file\n")
+    make_source_tar(incoming, source_tar)
+    runner.aerolitctl("baseline removal all", ["sync", "baseline", "--bundle-path", str(target), "--section", "collections-hub", "--yes"])
+    runner.aerolitctl(
+        "removal review remove all",
+        ["sync", str(source_tar), "--bundle-path", str(target), "--section", "collections-hub", "--review-removals", "--yes"],
+        input_text="r\n",
+    )
+    assert_not_exists(target / "collections-hub" / "ansible" / "remove-all.yml", "remove all did not remove file")
+    backup = latest_backup_dir()
+    if not backup:
+        raise ReadinessFailure("no backup found after remove all")
+    found = False
+    for current_root, dirnames, filenames in os.walk(str(backup)):
+        if "remove-all.yml" in filenames:
+            found = True
+            break
+    if not found:
+        raise ReadinessFailure("removed file was not found in backup: {}".format(backup))
+
+    make_base_target(target, incoming, source_tar)
+    write_text(target / "collections-hub" / "ansible" / "remove-conflict.yml", "original conflict removal file\n")
+    make_source_tar(incoming, source_tar)
+    runner.aerolitctl("baseline unsafe removal", ["sync", "baseline", "--bundle-path", str(target), "--section", "collections-hub", "--yes"])
+    write_text(target / "collections-hub" / "ansible" / "remove-conflict.yml", "local edited conflict removal file\n")
+    runner.aerolitctl(
+        "unsafe removal becomes conflict",
+        ["sync", str(source_tar), "--bundle-path", str(target), "--section", "collections-hub", "--yes"],
+        expected_rc=2,
+    )
+    print("Removal review tests passed.")
+
+
+def run_interactive_tests(runner):
+    guard = ManifestGuard(runner.run_root / "installed-manifest.original.yml")
+    guard.save()
+    try:
+        run_interactive_conflict_tests(runner, guard)
+        run_removal_review_tests(runner, guard)
+    finally:
+        runner.banner("Restoring real manifest after temporary interactive tests")
+        guard.restore()
+        runner.aerolitctl("final sync status", ["sync", "status"])
+
+
+def cleanup_old_test_file():
+    for path in ("/tmp/aerolit-evil-absolute.txt", "/tmp/aerolit-evil-parent.txt"):
+        try:
+            if Path(path).exists():
+                Path(path).unlink()
+        except OSError:
+            pass
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        description="Run AeroLIT aerolitctl sync readiness tests.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  python3 tools/aerolitctl_sync_readiness.py --bundle-path /aerolit_rhel8_standard-1.13.0.tar.gz
+  python3 tools/aerolitctl_sync_readiness.py --bundle-path /aerolit_rhel8_standard-1.13.0.tar.gz --skip-real-sync
+  python3 tools/aerolitctl_sync_readiness.py --bundle-path /aerolit_rhel8_standard-1.13.0.tar.gz --only tar-safety
+  python3 tools/aerolitctl_sync_readiness.py --bundle-path /aerolit_rhel8_standard-1.13.0.tar.gz --aerolitctl ./bin/aerolitctl
+""",
+    )
+    parser.add_argument(
+        "--bundle-path",
+        "--source-bundle",
+        dest="source_bundle",
+        default=DEFAULT_SOURCE,
+        help=(
+            "Incoming bundle archive or directory used as the sync SOURCE. "
+            "Default: {}".format(DEFAULT_SOURCE)
+        ),
+    )
+    parser.add_argument(
+        "--aerolitctl",
+        default="aerolitctl",
+        help="aerolitctl command to execute. Default: aerolitctl",
+    )
+    parser.add_argument(
+        "--project-root",
+        default=None,
+        help="Project root containing src/aerolitctl. Defaults to auto-detect/current directory.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory for readiness command logs. Default: /tmp",
+    )
+    parser.add_argument(
+        "--only",
+        choices=("all", "basic", "dry-run", "real-sync", "tar-safety", "interactive"),
+        default="all",
+        help="Run only one test suite. Default: all",
+    )
+    parser.add_argument(
+        "--skip-real-sync",
+        action="store_true",
+        help="Skip the real collections-hub sync against the configured bundle.",
+    )
+    parser.add_argument(
+        "--skip-interactive",
+        action="store_true",
+        help="Skip temporary conflict/removal interactive tests.",
+    )
+    parser.add_argument(
+        "--skip-tar-safety",
+        action="store_true",
+        help="Skip tar safety archive tests.",
+    )
+    return parser.parse_args(argv)
+
+
+def should_run(args, suite):
+    if args.only == "all":
+        return True
+    return args.only == suite
+
+
+def main(argv=None):
+    args = parse_args(argv or sys.argv[1:])
+    runner = Runner(args)
+    source_bundle = Path(args.source_bundle).expanduser().resolve()
+
+    print("AeroLIT sync readiness")
+    print("Project root: {}".format(runner.project_root))
+    print("Source bundle: {}".format(source_bundle))
+    print("Command log dir: {}".format(runner.command_log_dir))
+
+    cleanup_old_test_file()
+
+    try:
+        if should_run(args, "basic"):
+            run_basic_tests(runner, source_bundle)
+
+        if should_run(args, "dry-run"):
+            run_dry_run_tests(runner, source_bundle)
+
+        if should_run(args, "real-sync") and not args.skip_real_sync:
+            run_real_sync_tests(runner, source_bundle)
+        elif should_run(args, "real-sync") and args.skip_real_sync:
+            runner.skip_test("real sync tests", "--skip-real-sync was provided")
+
+        if should_run(args, "tar-safety") and not args.skip_tar_safety:
+            run_tar_safety_tests(runner)
+        elif should_run(args, "tar-safety") and args.skip_tar_safety:
+            runner.skip_test("tar safety tests", "--skip-tar-safety was provided")
+
+        if should_run(args, "interactive") and not args.skip_interactive:
+            run_interactive_tests(runner)
+        elif should_run(args, "interactive") and args.skip_interactive:
+            runner.skip_test("interactive tests", "--skip-interactive was provided")
+
+    except ReadinessFailure as exc:
+        runner.banner("READINESS FAILED")
+        print(str(exc))
+        print("Command logs: {}".format(runner.command_log_dir))
+        return 1
+    except KeyboardInterrupt:
+        runner.banner("READINESS CANCELLED")
+        print("Command logs: {}".format(runner.command_log_dir))
+        return 130
+
+    runner.banner("READINESS PASSED")
+    print("Command logs: {}".format(runner.command_log_dir))
+    print("")
+    print("Suites complete. Review logs if needed.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
