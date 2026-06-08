@@ -1,0 +1,993 @@
+#!/usr/bin/env python3
+"""Statically scan Python files for argparse parser definitions.
+
+This does not import aerolitctl.
+It reads .py files and looks for argparse-style calls such as:
+
+  parser.add_subparsers(...)
+  subparsers.add_parser("configure", ...)
+  parser.add_argument("--dry-run", ...)
+
+This is a backup/helper tool for keeping bash completion accurate when the real
+argparse parser cannot be imported on the machine doing the scan.
+
+By default, if src/aerolitctl exists, only src/aerolitctl is scanned.
+That avoids accidentally scanning this tools/ script and polluting the output.
+
+Examples:
+  python3 tools/scan_argparse_static.py
+  python3 tools/scan_argparse_static.py --root .
+  python3 tools/scan_argparse_static.py --root . --format text
+  python3 tools/scan_argparse_static.py --root . --format json
+  python3 tools/scan_argparse_static.py --root . --format json --output aerolitctl-static-argparse-scan.json
+  python3 tools/scan_argparse_static.py --root . --include-path src/aerolitctl --format text
+"""
+
+from __future__ import print_function
+
+import argparse
+import ast
+import json
+import os
+import sys
+from pathlib import Path
+
+
+DEFAULT_EXCLUDE_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".tox",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "build",
+    "dist",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+}
+
+
+NO_VALUE_ACTIONS = {
+    "store_true",
+    "store_false",
+    "store_const",
+    "append_const",
+    "count",
+    "help",
+    "version",
+}
+
+
+DIRECTORY_OPTION_NAMES = {
+    "--bundle",
+    "--bundle-path",
+    "--path-for-ansible",
+    "--target-mount-path",
+    "--nfs-export-path",
+    "--log-dir",
+    "--output-dir",
+}
+
+
+FILE_OPTION_NAMES = {
+    "--output",
+    "-o",
+    "--plan-output",
+    "--server-bootstrap-repo-file",
+    "--ssh-key",
+    "--private-key",
+    "-i",
+    "--inventory",
+    "--inventory-file",
+    "--to",
+    "--path",
+}
+
+
+PATH_OR_URL_OPTION_NAMES = {
+    "--server-baseos-source",
+    "--server-appstream-source",
+    "--provision-repo",
+    "--provision-extra-repo",
+}
+
+
+ARGPARSE_METHODS = {
+    "ArgumentParser",
+    "add_argument",
+    "add_parser",
+    "add_subparsers",
+    "set_defaults",
+}
+
+
+def safe_relative_path(path, root_path):
+    """Return path relative to root_path when possible."""
+    path = Path(path)
+    root_path = Path(root_path)
+
+    try:
+        return str(path.relative_to(root_path))
+    except ValueError:
+        return str(path)
+
+
+def is_string_node(node):
+    """Return True if node is a string literal."""
+    if isinstance(node, ast.Str):
+        return True
+
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return True
+
+    return False
+
+
+def string_value(node):
+    """Return string literal value, or None."""
+    if isinstance(node, ast.Str):
+        return node.s
+
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+
+    return None
+
+
+def literal_or_simple_value(node):
+    """Return a JSON-safe value for an AST node."""
+    if node is None:
+        return None
+
+    try:
+        return ast.literal_eval(node)
+    except Exception:
+        return simple_value(node)
+
+
+def simple_value(node):
+    """Return a simple JSON-safe value for an AST node."""
+    if node is None:
+        return None
+
+    if isinstance(node, ast.Constant):
+        return node.value
+
+    if isinstance(node, ast.Str):
+        return node.s
+
+    if isinstance(node, ast.Num):
+        return node.n
+
+    if isinstance(node, ast.Name):
+        return {"name": node.id}
+
+    if isinstance(node, ast.Attribute):
+        return {"attribute": source_like_name(node)}
+
+    if isinstance(node, ast.Call):
+        return {"call": source_like_name(node)}
+
+    if isinstance(node, ast.Tuple):
+        return [literal_or_simple_value(item) for item in node.elts]
+
+    if isinstance(node, ast.List):
+        return [literal_or_simple_value(item) for item in node.elts]
+
+    if isinstance(node, ast.Set):
+        return [literal_or_simple_value(item) for item in node.elts]
+
+    if isinstance(node, ast.Dict):
+        result = {}
+        for key, value in zip(node.keys, node.values):
+            result[str(literal_or_simple_value(key))] = literal_or_simple_value(value)
+        return result
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        value = literal_or_simple_value(node.operand)
+        if isinstance(value, (int, float)):
+            return -value
+
+    return {"ast": node.__class__.__name__}
+
+
+def source_like_name(node):
+    """Return a dotted-ish name for Name/Attribute/Call nodes."""
+    if isinstance(node, ast.Name):
+        return node.id
+
+    if isinstance(node, ast.Attribute):
+        parent = source_like_name(node.value)
+        if parent:
+            return "{}.{}".format(parent, node.attr)
+        return node.attr
+
+    if isinstance(node, ast.Call):
+        return source_like_name(node.func)
+
+    if isinstance(node, ast.Subscript):
+        return source_like_name(node.value)
+
+    return ""
+
+
+def call_full_name(call):
+    """Return full dotted call name, such as argparse.ArgumentParser."""
+    if not isinstance(call, ast.Call):
+        return ""
+
+    return source_like_name(call.func)
+
+
+def call_method_name(call):
+    """Return method/function name for a call, such as add_argument."""
+    full_name = call_full_name(call)
+
+    if not full_name:
+        return ""
+
+    return full_name.split(".")[-1]
+
+
+def call_object_name(call):
+    """Return object name for a method call, such as server_parser."""
+    if not isinstance(call, ast.Call):
+        return ""
+
+    if isinstance(call.func, ast.Attribute):
+        return source_like_name(call.func.value)
+
+    return ""
+
+
+def keyword_map(call):
+    """Return keyword arguments for a call."""
+    result = {}
+
+    for keyword in call.keywords:
+        if keyword.arg is None:
+            continue
+
+        result[keyword.arg] = literal_or_simple_value(keyword.value)
+
+    return result
+
+
+def first_string_arg(call):
+    """Return first positional string arg for a call."""
+    if not call.args:
+        return None
+
+    first = call.args[0]
+    if is_string_node(first):
+        return string_value(first)
+
+    return None
+
+
+def all_string_args(call):
+    """Return all positional string args for a call."""
+    values = []
+
+    for arg in call.args:
+        if is_string_node(arg):
+            values.append(string_value(arg))
+
+    return values
+
+
+def assignment_targets(node):
+    """Return assignment target names for Assign/AnnAssign nodes."""
+    targets = []
+
+    if isinstance(node, ast.Assign):
+        raw_targets = node.targets
+    elif isinstance(node, ast.AnnAssign):
+        raw_targets = [node.target]
+    else:
+        return targets
+
+    for target in raw_targets:
+        if isinstance(target, ast.Name):
+            targets.append(target.id)
+        elif isinstance(target, ast.Attribute):
+            targets.append(source_like_name(target))
+        elif isinstance(target, ast.Tuple):
+            for item in target.elts:
+                if isinstance(item, ast.Name):
+                    targets.append(item.id)
+
+    return targets
+
+
+def stringify_value(value):
+    """Convert a simple value to a lowercase searchable string."""
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        return value
+
+    if isinstance(value, dict):
+        pieces = []
+        for key, item in sorted(value.items()):
+            pieces.append(str(key))
+            pieces.append(stringify_value(item))
+        return " ".join(pieces)
+
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(stringify_value(item) for item in value)
+
+    return str(value)
+
+
+def option_strings_from_call(call):
+    """Return option strings and positional names from add_argument args."""
+    strings = all_string_args(call)
+
+    option_strings = [item for item in strings if item.startswith("-")]
+    positionals = [item for item in strings if not item.startswith("-")]
+
+    return option_strings, positionals
+
+
+def static_action_takes_value(option_strings, keywords):
+    """Return True if a static add_argument record appears to take a value."""
+    if not option_strings:
+        return False
+
+    action = stringify_value(keywords.get("action")).lower()
+    nargs = stringify_value(keywords.get("nargs")).lower()
+
+    if action in NO_VALUE_ACTIONS:
+        return False
+
+    if nargs == "0":
+        return False
+
+    return True
+
+
+def normalize_choices(value):
+    """Return choices as a list of strings, or None."""
+    if value is None:
+        return None
+
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value]
+
+    return [stringify_value(value)]
+
+
+def infer_completion_type(option_strings, positionals, keywords):
+    """Infer a rough completion type from static argparse metadata."""
+    choices = normalize_choices(keywords.get("choices"))
+    if choices:
+        return "choice"
+
+    if option_strings and not static_action_takes_value(option_strings, keywords):
+        return "none"
+
+    names = " ".join(option_strings + positionals).lower()
+    metavar = stringify_value(keywords.get("metavar")).lower()
+    dest = stringify_value(keywords.get("dest")).lower()
+    help_text = stringify_value(keywords.get("help")).lower()
+
+    combined = " ".join([names, metavar, dest, help_text])
+
+    if set(option_strings).intersection(PATH_OR_URL_OPTION_NAMES):
+        return "path_or_url"
+
+    if set(option_strings).intersection(DIRECTORY_OPTION_NAMES):
+        return "directory"
+
+    if set(option_strings).intersection(FILE_OPTION_NAMES):
+        return "file"
+
+    if "path_or_url" in combined or "path or url" in combined:
+        return "path_or_url"
+
+    if "url" in combined or "http://" in combined or "https://" in combined or "file://" in combined:
+        return "path_or_url"
+
+    if "output file" in combined:
+        return "file"
+
+    if "file" in combined or "yaml" in combined or "yml" in combined:
+        return "file"
+
+    if "directory" in combined or "output dir" in combined or "log directory" in combined:
+        return "directory"
+
+    if "bundle path" in combined or "mount path" in combined or "export path" in combined:
+        return "directory"
+
+    if positionals:
+        return "value"
+
+    if option_strings:
+        return "value"
+
+    return "unknown"
+
+
+def summarize_add_argument(call):
+    """Return useful parsed metadata from an add_argument call."""
+    option_strings, positionals = option_strings_from_call(call)
+    keywords = keyword_map(call)
+    choices = normalize_choices(keywords.get("choices"))
+
+    return {
+        "option_strings": option_strings,
+        "positionals": positionals,
+        "takes_value": static_action_takes_value(option_strings, keywords),
+        "choices": choices,
+        "completion_type_guess": infer_completion_type(
+            option_strings,
+            positionals,
+            keywords,
+        ),
+    }
+
+
+class ArgparseStaticScanner(ast.NodeVisitor):
+    """AST visitor that collects argparse calls."""
+
+    def __init__(self, file_path, root_path):
+        self.file_path = Path(file_path)
+        self.root_path = Path(root_path)
+        self.relative_path = safe_relative_path(self.file_path, self.root_path)
+        self.records = []
+        self.variable_assignments = []
+        self.function_stack = []
+        self.class_stack = []
+
+    def current_context(self):
+        """Return current class/function context."""
+        pieces = []
+
+        if self.class_stack:
+            pieces.extend(self.class_stack)
+
+        if self.function_stack:
+            pieces.extend(self.function_stack)
+
+        return ".".join(pieces)
+
+    def record(self, kind, node, call, extra=None):
+        """Record one argparse-related call."""
+        if extra is None:
+            extra = {}
+
+        record = {
+            "kind": kind,
+            "file": self.relative_path,
+            "line": getattr(node, "lineno", None),
+            "column": getattr(node, "col_offset", None),
+            "context": self.current_context(),
+            "object": call_object_name(call),
+            "call": call_full_name(call),
+            "method": call_method_name(call),
+            "args": all_string_args(call),
+            "first_string_arg": first_string_arg(call),
+            "keywords": keyword_map(call),
+        }
+
+        record.update(extra)
+        self.records.append(record)
+
+    def visit_FunctionDef(self, node):
+        """Track function context."""
+        self.function_stack.append(node.name)
+        self.generic_visit(node)
+        self.function_stack.pop()
+
+    def visit_AsyncFunctionDef(self, node):
+        """Track async function context."""
+        self.function_stack.append(node.name)
+        self.generic_visit(node)
+        self.function_stack.pop()
+
+    def visit_ClassDef(self, node):
+        """Track class context."""
+        self.class_stack.append(node.name)
+        self.generic_visit(node)
+        self.class_stack.pop()
+
+    def visit_Assign(self, node):
+        """Track parser/subparser assignments."""
+        self._maybe_record_assignment(node)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node):
+        """Track annotated parser/subparser assignments."""
+        self._maybe_record_assignment(node)
+        self.generic_visit(node)
+
+    def visit_Expr(self, node):
+        """Record bare method calls such as parser.add_argument(...)."""
+        if isinstance(node.value, ast.Call):
+            self._maybe_record_call(node, node.value)
+        self.generic_visit(node)
+
+    def _maybe_record_assignment(self, node):
+        value = getattr(node, "value", None)
+
+        if not isinstance(value, ast.Call):
+            return
+
+        method = call_method_name(value)
+        if method not in ARGPARSE_METHODS:
+            return
+
+        targets = assignment_targets(node)
+
+        for target in targets:
+            self.variable_assignments.append(
+                {
+                    "target": target,
+                    "method": method,
+                    "line": getattr(node, "lineno", None),
+                    "name": first_string_arg(value),
+                    "object": call_object_name(value),
+                    "keywords": keyword_map(value),
+                    "context": self.current_context(),
+                    "file": self.relative_path,
+                }
+            )
+
+        self._record_argparse_call(node, value, assigned_to=targets)
+
+    def _maybe_record_call(self, node, call):
+        method = call_method_name(call)
+
+        if method not in ARGPARSE_METHODS:
+            return
+
+        self._record_argparse_call(node, call, assigned_to=[])
+
+    def _record_argparse_call(self, node, call, assigned_to):
+        method = call_method_name(call)
+
+        if method == "ArgumentParser":
+            self.record(
+                "argument_parser",
+                node,
+                call,
+                extra={
+                    "assigned_to": assigned_to,
+                },
+            )
+            return
+
+        if method == "add_subparsers":
+            self.record(
+                "add_subparsers",
+                node,
+                call,
+                extra={
+                    "assigned_to": assigned_to,
+                },
+            )
+            return
+
+        if method == "add_parser":
+            self.record(
+                "add_parser",
+                node,
+                call,
+                extra={
+                    "assigned_to": assigned_to,
+                    "parser_name": first_string_arg(call),
+                },
+            )
+            return
+
+        if method == "add_argument":
+            summary = summarize_add_argument(call)
+            self.record(
+                "add_argument",
+                node,
+                call,
+                extra=summary,
+            )
+            return
+
+        if method == "set_defaults":
+            self.record(
+                "set_defaults",
+                node,
+                call,
+                extra={
+                    "assigned_to": assigned_to,
+                },
+            )
+            return
+
+
+def default_scan_roots(root_path):
+    """Return default scan roots."""
+    src_aerolitctl = root_path / "src" / "aerolitctl"
+
+    if src_aerolitctl.is_dir():
+        return [src_aerolitctl]
+
+    return [root_path]
+
+
+def normalize_scan_roots(root_path, include_paths):
+    """Return scan roots from include paths or defaults."""
+    if not include_paths:
+        return default_scan_roots(root_path)
+
+    scan_roots = []
+
+    for include_path in include_paths:
+        candidate = Path(include_path)
+
+        if not candidate.is_absolute():
+            candidate = root_path / candidate
+
+        scan_roots.append(candidate.resolve())
+
+    return scan_roots
+
+
+def iter_python_files(scan_roots, root_path, exclude_dirs):
+    """Yield Python files under scan_roots."""
+    seen = set()
+
+    for scan_root in scan_roots:
+        if not scan_root.exists():
+            continue
+
+        if scan_root.is_file() and scan_root.suffix == ".py":
+            resolved = scan_root.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                yield resolved
+            continue
+
+        for current_root, dirs, files in os.walk(str(scan_root)):
+            dirs[:] = [item for item in dirs if item not in exclude_dirs]
+
+            for file_name in files:
+                if not file_name.endswith(".py"):
+                    continue
+
+                file_path = (Path(current_root) / file_name).resolve()
+
+                if file_path in seen:
+                    continue
+
+                seen.add(file_path)
+                yield file_path
+
+
+def scan_file(file_path, root_path):
+    """Scan one Python file."""
+    relative_file = safe_relative_path(file_path, root_path)
+
+    try:
+        text = Path(file_path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        text = Path(file_path).read_text(encoding="latin-1")
+    except OSError as exc:
+        return {
+            "file": relative_file,
+            "error": "ReadError: {}".format(exc),
+            "records": [],
+            "variable_assignments": [],
+        }
+
+    try:
+        tree = ast.parse(text, filename=str(file_path))
+    except SyntaxError as exc:
+        return {
+            "file": relative_file,
+            "error": "SyntaxError: {}".format(exc),
+            "records": [],
+            "variable_assignments": [],
+        }
+
+    scanner = ArgparseStaticScanner(file_path=file_path, root_path=root_path)
+    scanner.visit(tree)
+
+    return {
+        "file": relative_file,
+        "error": None,
+        "records": scanner.records,
+        "variable_assignments": scanner.variable_assignments,
+    }
+
+
+def summarize_records(file_results):
+    """Build useful summary indexes from raw records."""
+    add_parsers = []
+    add_arguments = []
+    argument_parsers = []
+    set_defaults = []
+    add_subparsers = []
+
+    options = {}
+    positionals = {}
+    parser_variables = {}
+    set_defaults_by_object = {}
+    records_by_file = {}
+
+    for file_result in file_results:
+        for record in file_result["records"]:
+            kind = record["kind"]
+            object_name = record.get("object") or "unknown"
+
+            records_by_file.setdefault(record["file"], [])
+            records_by_file[record["file"]].append(record)
+
+            if kind == "argument_parser":
+                argument_parsers.append(record)
+
+                for target in record.get("assigned_to", []):
+                    parser_variables[target] = {
+                        "parser_name": "ArgumentParser",
+                        "file": record.get("file"),
+                        "line": record.get("line"),
+                        "context": record.get("context"),
+                    }
+
+            elif kind == "add_parser":
+                add_parsers.append(record)
+
+                for target in record.get("assigned_to", []):
+                    parser_variables[target] = {
+                        "parser_name": record.get("parser_name"),
+                        "file": record.get("file"),
+                        "line": record.get("line"),
+                        "context": record.get("context"),
+                    }
+
+            elif kind == "add_argument":
+                add_arguments.append(record)
+
+                for option in record.get("option_strings", []):
+                    options.setdefault(object_name, [])
+                    options[object_name].append(
+                        {
+                            "option": option,
+                            "takes_value": record.get("takes_value"),
+                            "choices": record.get("choices"),
+                            "completion_type_guess": record.get("completion_type_guess"),
+                            "file": record.get("file"),
+                            "line": record.get("line"),
+                            "context": record.get("context"),
+                            "keywords": record.get("keywords", {}),
+                        }
+                    )
+
+                for positional in record.get("positionals", []):
+                    positionals.setdefault(object_name, [])
+                    positionals[object_name].append(
+                        {
+                            "positional": positional,
+                            "completion_type_guess": record.get("completion_type_guess"),
+                            "file": record.get("file"),
+                            "line": record.get("line"),
+                            "context": record.get("context"),
+                            "keywords": record.get("keywords", {}),
+                        }
+                    )
+
+            elif kind == "set_defaults":
+                set_defaults.append(record)
+                set_defaults_by_object.setdefault(object_name, [])
+                set_defaults_by_object[object_name].append(record)
+
+            elif kind == "add_subparsers":
+                add_subparsers.append(record)
+
+    all_options = sorted(
+        set(
+            option_item["option"]
+            for option_list in options.values()
+            for option_item in option_list
+        )
+    )
+
+    parser_names = sorted(
+        set(
+            record.get("parser_name")
+            for record in add_parsers
+            if record.get("parser_name")
+        )
+    )
+
+    return {
+        "parser_names": parser_names,
+        "parser_variables": parser_variables,
+        "all_options": all_options,
+        "options_by_parser_variable": options,
+        "positionals_by_parser_variable": positionals,
+        "set_defaults_by_parser_variable": set_defaults_by_object,
+        "records_by_file": records_by_file,
+        "argument_parser_count": len(argument_parsers),
+        "add_parser_count": len(add_parsers),
+        "add_argument_count": len(add_arguments),
+        "add_subparsers_count": len(add_subparsers),
+        "set_defaults_count": len(set_defaults),
+    }
+
+
+def render_text_report(data):
+    """Return a human-readable text report."""
+    lines = []
+
+    lines.append("Root: {}".format(data["root"]))
+    lines.append("Scan roots:")
+    for scan_root in data["scan_roots"]:
+        lines.append("  {}".format(scan_root))
+    lines.append("Python files scanned: {}".format(data["python_file_count"]))
+    lines.append("Files with argparse records: {}".format(data["files_with_records"]))
+    lines.append("Files with errors: {}".format(data["files_with_errors"]))
+    lines.append("")
+
+    summary = data["summary"]
+
+    lines.append("Counts:")
+    lines.append("  ArgumentParser calls: {}".format(summary["argument_parser_count"]))
+    lines.append("  add_subparsers calls: {}".format(summary["add_subparsers_count"]))
+    lines.append("  add_parser calls: {}".format(summary["add_parser_count"]))
+    lines.append("  add_argument calls: {}".format(summary["add_argument_count"]))
+    lines.append("  set_defaults calls: {}".format(summary["set_defaults_count"]))
+    lines.append("")
+
+    lines.append("Parser/subcommand names found:")
+    for name in summary["parser_names"]:
+        lines.append("  {}".format(name))
+    lines.append("")
+
+    lines.append("All option strings found:")
+    for option in summary["all_options"]:
+        lines.append("  {}".format(option))
+    lines.append("")
+
+    lines.append("Options by parser variable:")
+    for parser_var in sorted(summary["options_by_parser_variable"].keys()):
+        lines.append("  {}:".format(parser_var))
+
+        for option_item in summary["options_by_parser_variable"][parser_var]:
+            option = option_item["option"]
+            takes_value = option_item["takes_value"]
+            completion = option_item["completion_type_guess"]
+            choices = option_item.get("choices")
+            file_name = option_item["file"]
+            line = option_item["line"]
+
+            detail = "{} value={} completion={}".format(
+                option,
+                str(takes_value).lower(),
+                completion,
+            )
+
+            if choices:
+                detail += " choices={}".format(",".join(choices))
+
+            lines.append("    {}    {}:{}".format(detail, file_name, line))
+
+    lines.append("")
+    lines.append("Positionals by parser variable:")
+    for parser_var in sorted(summary["positionals_by_parser_variable"].keys()):
+        lines.append("  {}:".format(parser_var))
+
+        for positional_item in summary["positionals_by_parser_variable"][parser_var]:
+            positional = positional_item["positional"]
+            completion = positional_item["completion_type_guess"]
+            file_name = positional_item["file"]
+            line = positional_item["line"]
+
+            lines.append(
+                "    {} completion={}    {}:{}".format(
+                    positional,
+                    completion,
+                    file_name,
+                    line,
+                )
+            )
+
+    if data["files_with_errors"]:
+        lines.append("")
+        lines.append("Files with parse/read errors:")
+        for file_result in data["files"]:
+            if file_result["error"]:
+                lines.append("  {}: {}".format(file_result["file"], file_result["error"]))
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_output(text, output_path):
+    """Write output text to path."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(text, encoding="utf-8")
+
+
+def main(argv=None):
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description="Statically scan Python files for argparse calls.",
+    )
+    parser.add_argument(
+        "--root",
+        default=".",
+        help="Project root directory. Default: current directory.",
+    )
+    parser.add_argument(
+        "--include-path",
+        action="append",
+        default=[],
+        help=(
+            "Path under --root to scan. Can be used more than once. "
+            "Default: src/aerolitctl when it exists, otherwise --root."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-dir",
+        action="append",
+        default=[],
+        help="Directory name to exclude. Can be used more than once.",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="Output format. Default: text.",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Write output to a file instead of stdout.",
+    )
+
+    args = parser.parse_args(argv)
+
+    root_path = Path(args.root).resolve()
+    exclude_dirs = set(DEFAULT_EXCLUDE_DIRS)
+    exclude_dirs.update(args.exclude_dir)
+
+    scan_roots = normalize_scan_roots(root_path, args.include_path)
+    file_results = []
+
+    for file_path in iter_python_files(scan_roots, root_path, exclude_dirs):
+        file_results.append(scan_file(file_path, root_path))
+
+    summary = summarize_records(file_results)
+
+    files_with_records = sum(1 for item in file_results if item["records"])
+    files_with_errors = sum(1 for item in file_results if item["error"])
+
+    data = {
+        "root": str(root_path),
+        "scan_roots": [str(item) for item in scan_roots],
+        "python_file_count": len(file_results),
+        "files_with_records": files_with_records,
+        "files_with_errors": files_with_errors,
+        "summary": summary,
+        "files": file_results,
+    }
+
+    if args.format == "json":
+        output_text = json.dumps(data, indent=2, sort_keys=True)
+    else:
+        output_text = render_text_report(data)
+
+    if args.output:
+        write_output(output_text + "\n", args.output)
+    else:
+        print(output_text)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
