@@ -1,3 +1,265 @@
+
+Yes — that install list is the right base list.
+
+I would add only one extra file because you already created it in the screenshots:
+
+/etc/aerolit/aerolitctl.yml.example
+
+So the RPM-owned layout should be:
+
+/usr/bin/aerolitctl
+/usr/lib/python3.X/site-packages/aerolitctl/
+/usr/lib/python3.X/site-packages/aerolitctl-*.egg-info/
+/usr/share/man/man1/aerolitctl.1.gz
+/usr/share/man/man1/aerolitctl-*.1.gz
+/usr/share/bash-completion/completions/aerolitctl
+/etc/aerolit/
+/etc/aerolit/aerolitctl.yml
+/etc/aerolit/aerolitctl.yml.example
+/var/lib/aerolit/
+/var/log/aerolit/
+
+Your screenshots show you are very close. The biggest thing I’d fix immediately is this:
+
+bundle-path: /opt/aerolit/aerolit-bundle
+
+Change that to:
+
+bundle_path: /opt/aerolit/aerolit-bundle
+
+Use underscores, not hyphens. Your Python code is almost certainly going to expect bundle_path, log_dir, and state_dir.
+
+⸻
+
+1. Replace both config files with this
+
+Update:
+
+packaging/etc/aerolit/aerolitctl.yml
+packaging/etc/aerolit/aerolitctl.yml.example
+
+Use this content in both files:
+
+# AeroLIT CLI configuration.
+# Prefer using 'aerolitctl path set <path>' instead of editing this file directly.
+bundle_path: /opt/aerolit/aerolit-bundle
+log_dir: /var/log/aerolit
+state_dir: /var/lib/aerolit
+
+Do not use:
+
+bundle-path:
+
+That is the one thing in your screenshot I would definitely change before building.
+
+⸻
+
+2. Replace packaging/rpm/aerolitctl.spec with this
+
+This matches the layout you’re aiming for.
+
+Name:           aerolitctl
+Version:        0.1.0
+Release:        1%{?dist}
+Summary:        Command and control interface for AeroLIT bundles
+License:        Proprietary
+URL:            https://gitlab.example.com/lit/aerolitctl
+Source0:        %{name}-%{version}.tar.gz
+BuildArch:      noarch
+BuildRequires:  python3-devel
+BuildRequires:  python3-rpm-macros
+BuildRequires:  python3-setuptools
+BuildRequires:  python3-wheel
+Requires:       python3
+Requires:       python3-setuptools
+Requires:       python3dist(pyyaml)
+Requires:       bash-completion
+%description
+aerolitctl is the command and control interface for AeroLIT bundles.
+%prep
+%autosetup
+%build
+%py3_build
+%install
+%py3_install
+install -d -m 0755 %{buildroot}%{_sysconfdir}/aerolit
+install -d -m 0755 %{buildroot}%{_localstatedir}/log/aerolit
+install -d -m 0755 %{buildroot}%{_localstatedir}/lib/aerolit
+install -m 0644 packaging/etc/aerolit/aerolitctl.yml \
+    %{buildroot}%{_sysconfdir}/aerolit/aerolitctl.yml
+install -m 0644 packaging/etc/aerolit/aerolitctl.yml.example \
+    %{buildroot}%{_sysconfdir}/aerolit/aerolitctl.yml.example
+install -d -m 0755 %{buildroot}%{_datadir}/bash-completion/completions
+install -m 0644 completions/aerolitctl.bash \
+    %{buildroot}%{_datadir}/bash-completion/completions/aerolitctl
+install -d -m 0755 %{buildroot}%{_mandir}/man1
+install -m 0644 man/man1/*.1 %{buildroot}%{_mandir}/man1/
+%files
+%license LICENSE
+%doc README.md
+%{_bindir}/aerolitctl
+%{python3_sitelib}/aerolitctl/
+%{python3_sitelib}/aerolitctl-*.egg-info/
+%{_mandir}/man1/aerolitctl*.1*
+%{_datadir}/bash-completion/completions/aerolitctl
+%dir %{_sysconfdir}/aerolit
+%config(noreplace) %{_sysconfdir}/aerolit/aerolitctl.yml
+%config(noreplace) %{_sysconfdir}/aerolit/aerolitctl.yml.example
+%dir %{_localstatedir}/log/aerolit
+%dir %{_localstatedir}/lib/aerolit
+%changelog
+* Sat Jun 06 2026 David Oxenreiter <david.m.oxenreiter@lmco.com> - 0.1.0-1
+- Initial aerolitctl RPM packaging
+
+A couple notes on that:
+
+%config(noreplace) is correct for /etc/aerolit/aerolitctl.yml. That protects user edits during upgrade.
+
+I changed bash-completion from Recommends to Requires. Since shell completion is a real feature of the package and you install directly into the bash-completion directory, I’d make it a hard dependency for the first RPM.
+
+I also added:
+
+Requires: python3-setuptools
+
+That protects you on older Python/setuptools-generated console scripts, especially RHEL 8 style environments.
+
+⸻
+
+3. Make sure these two root files exist
+
+Your spec has:
+
+%license LICENSE
+%doc README.md
+
+So your repo root must have:
+
+LICENSE
+README.md
+
+If either file is missing, the RPM build will fail.
+
+For now, LICENSE can be simple/internal, for example:
+
+Proprietary
+Copyright Lockheed Martin.
+All rights reserved.
+
+Use whatever wording your team requires.
+
+⸻
+
+4. Check setup.py
+
+Your setup.py needs the console script entry point. It should include this:
+
+entry_points={
+    "console_scripts": [
+        "aerolitctl=aerolitctl.cli:main",
+    ],
+},
+
+That is what creates:
+
+/usr/bin/aerolitctl
+
+Also, since the RPM spec is now installing man pages and completion directly, I would not rely on setup.py for those system files.
+
+So the clean direction is:
+
+setup.py owns Python package + /usr/bin/aerolitctl
+spec file owns man pages + completion + /etc + /var dirs
+
+That is the right split.
+
+⸻
+
+5. Run these checks now
+
+From the repo root:
+
+find packaging -type f -print | sort
+
+Expected important files:
+
+packaging/etc/aerolit/aerolitctl.yml
+packaging/etc/aerolit/aerolitctl.yml.example
+packaging/rpm/aerolitctl.spec
+
+Then:
+
+python3 -m compileall src
+python3 tools/check_manpages.py
+python3 tools/aerolitctl_merge_readiness.py
+
+Then check the spec file syntax:
+
+rpmspec -P packaging/rpm/aerolitctl.spec >/tmp/aerolitctl.spec.expanded
+
+If that passes, create a source tarball:
+
+cd ..
+cp -a aerolitctl aerolitctl-0.1.0
+tar --exclude='.git' -czf aerolitctl-0.1.0.tar.gz aerolitctl-0.1.0
+rpmdev-setuptree
+cp aerolitctl-0.1.0.tar.gz ~/rpmbuild/SOURCES/
+cp aerolitctl-0.1.0/packaging/rpm/aerolitctl.spec ~/rpmbuild/SPECS/
+rpmbuild -ba ~/rpmbuild/SPECS/aerolitctl.spec
+
+Then install-test it:
+
+sudo dnf install ~/rpmbuild/RPMS/noarch/aerolitctl-0.1.0-1*.noarch.rpm
+
+And verify:
+
+rpm -ql aerolitctl | sort
+aerolitctl --help
+aerolitctl version
+aerolitctl path show
+man aerolitctl
+man aerolitctl-doctor
+complete -p aerolitctl
+rpm -V aerolitctl
+
+⸻
+
+My answer on the file list
+
+Yes, your list is correct.
+
+The final “RPM owns this” list should be:
+
+/usr/bin/aerolitctl
+/usr/lib/python3.X/site-packages/aerolitctl/
+/usr/lib/python3.X/site-packages/aerolitctl-*.egg-info/
+/usr/share/man/man1/aerolitctl.1.gz
+/usr/share/man/man1/aerolitctl-*.1.gz
+/usr/share/bash-completion/completions/aerolitctl
+/etc/aerolit/
+/etc/aerolit/aerolitctl.yml
+/etc/aerolit/aerolitctl.yml.example
+/var/lib/aerolit/
+/var/log/aerolit/
+
+I would not add /opt/aerolit/aerolit-bundle to this RPM. That path is the external bundle location, not something the control-command RPM should own.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Now we should **stop adding big features for a minute and harden/test what we built**.
 
 I checked the two uploaded files, and both compile. Your `sync.py` now includes all four major bundle sections: `collections-hub`, `files`, `repos`, and `extracted_isos`. It also has the improved `sync status` output for ISO trees.  Your `cli.py` has the major sync options wired: `--files-mode`, `--repo-mode`, `--rhel-major`, and `--keep-old-isos`. 
