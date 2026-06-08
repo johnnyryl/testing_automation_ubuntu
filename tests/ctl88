@@ -1,0 +1,3340 @@
+"""Generated playbook and PXE/Kickstart input helpers for aerolitctl.
+
+The generate command is intentionally a safe planning/input layer:
+
+* ``aerolitctl generate playbook`` writes AeroLIT-managed playbooks under the
+  active ``collections-hub/ansible`` directory.
+* ``aerolitctl generate kickstart`` writes PXE profile/template override inputs
+  consumed later by the pxe-content generator.
+
+It does not run Ansible, restart containers, render boot.ipxe, change firewall
+rules, configure NFS, or apply system state.
+"""
+
+from __future__ import print_function
+
+import argparse
+import copy
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from collections import OrderedDict
+from pathlib import Path
+
+from .config import get_bundle_path, load_config
+from .paths import (
+    DEFAULT_BUNDLE_PATH,
+    ansible_dir,
+    aerolitctl_pxe_generated_vars_file,
+    aerolitctl_pxe_profile_file,
+    aerolitctl_pxe_template_overrides_dir,
+)
+from .pxe import (
+    DEFAULT_KERNEL_ARGS,
+    GUIDED_STANDARD_PROFILE_IDS,
+    PxeConfigError,
+    STANDARD_OS_IDS,
+    backup_file,
+    default_profile_definitions,
+    ensure_pxe_directories,
+    load_managed_pxe_state,
+    normalize_kernel_args_values,
+    normalize_profile_id,
+    normalize_supported_os_values,
+    read_text,
+    render_generated_vars,
+    render_profile,
+    validate_pxe_state,
+    validate_template_path,
+    write_if_changed as write_pxe_if_changed,
+    write_text,
+    yaml_value,
+)
+
+
+PLAYBOOK_MARKER = "# Generated AeroLIT playbook"
+TEMPLATE_MARKER = "# Generated AeroLIT PXE template override"
+
+SAFE_FILE_STEM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+ROLE_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:-]*$")
+VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+DEFAULT_PLAYBOOK_HOSTS = "all"
+DEFAULT_PLAYBOOK_NAME_PREFIX = "AeroLIT generated playbook"
+
+
+PLAYBOOK_COLLECTION_ROOT_DIRS = (
+    ("collections-hub", "ansible", "collections", "ansible_collections"),
+    ("collections-hub", "ansible", "collections", "ansible-collections"),
+    ("collections-hub", "collections", "ansible_collections"),
+    ("collections-hub", "collections", "ansible-collections"),
+    ("collections-hub", "ansible_collections"),
+    ("collections-hub", "ansible-collections"),
+    ("collections", "ansible_collections"),
+    ("collections", "ansible-collections"),
+)
+
+ROLE_DETAIL_LINE_LIMIT = 100
+ROLE_DETAIL_FILES = (
+    "README.md",
+    "readme.md",
+    "README.rst",
+    "README.txt",
+    "meta/main.yml",
+    "meta/main.yaml",
+    "defaults/main.yml",
+    "defaults/main.yaml",
+    "tasks/main.yml",
+    "tasks/main.yaml",
+)
+
+ROLE_SUMMARY_FILES = (
+    "README.md",
+    "readme.md",
+    "README.rst",
+    "README.txt",
+    "meta/main.yml",
+    "meta/main.yaml",
+    "defaults/main.yml",
+    "defaults/main.yaml",
+)
+
+COMMON_PLAYBOOK_HOSTS = (
+    "all",
+    "pxe_server",
+    "ansible_controller",
+    "provisioned",
+    "workstations",
+    "rhel10",
+    "rhel9",
+    "rhel8",
+    "rhel7",
+)
+
+TEMPLATE_FILE_PATTERNS = (
+    "**/*.ks.j2",
+    "**/*.ks.tmpl",
+    "**/*.j2",
+    "**/*.tmpl",
+)
+
+PARTIAL_DIR_NAMES = (
+    "partial",
+    "partials",
+    "section",
+    "sections",
+    "fragment",
+    "fragments",
+    "snippet",
+    "snippets",
+)
+
+GUIDED_SECTION_DEFINITIONS = OrderedDict(
+    [
+        (
+            "install_source",
+            {
+                "title": "Install source / installation mode",
+                "keywords": ("install", "source", "repo", "repos", "url", "cdrom"),
+                "description": "How the installer finds content and starts the install.",
+            },
+        ),
+        (
+            "locale_time",
+            {
+                "title": "Language, keyboard, and time",
+                "keywords": ("lang", "language", "keyboard", "timezone", "time", "locale"),
+                "description": "Locale, keyboard, timezone, and time sync choices.",
+            },
+        ),
+        (
+            "network",
+            {
+                "title": "Network and hostname",
+                "keywords": ("network", "hostname", "dns", "interface", "nm", "dhcp", "static"),
+                "description": "Network activation, host naming, DHCP/static behavior, and DNS.",
+            },
+        ),
+        (
+            "storage",
+            {
+                "title": "Disk, partitioning, and bootloader",
+                "keywords": ("disk", "storage", "partition", "part", "lvm", "luks", "bootloader", "clearpart", "autopart", "mount"),
+                "description": "Disk wipe, partitions, LVM, encryption, and bootloader setup.",
+            },
+        ),
+        (
+            "users_security",
+            {
+                "title": "Users, auth, and security",
+                "keywords": ("user", "rootpw", "password", "ssh", "auth", "selinux", "firewall", "fips", "stig", "security", "sudo"),
+                "description": "Root/user setup, SSH, SELinux, firewall, STIG/security choices.",
+            },
+        ),
+        (
+            "software",
+            {
+                "title": "Software and package selection",
+                "keywords": ("package", "packages", "software", "group", "dnf", "yum", "repo"),
+                "description": "Package groups, package lists, and install-time software choices.",
+            },
+        ),
+        (
+            "services",
+            {
+                "title": "Services and first boot behavior",
+                "keywords": ("service", "services", "enable", "disable", "firstboot", "systemctl"),
+                "description": "Services enabled/disabled during or immediately after install.",
+            },
+        ),
+        (
+            "post_install",
+            {
+                "title": "Post-install scripts and cleanup",
+                "keywords": ("post", "script", "cleanup", "finish", "final", "reboot"),
+                "description": "%post snippets, final cleanup, and reboot behavior.",
+            },
+        ),
+        (
+            "other",
+            {
+                "title": "Other Kickstart snippets",
+                "keywords": (),
+                "description": "Templates that did not clearly match another section.",
+            },
+        ),
+    ]
+)
+
+GUIDED_DETAIL_LINE_LIMIT = 80
+
+TEMPLATE_SOURCE_MODES = (
+    "auto",
+    "host",
+    "container",
+)
+
+CONTAINER_ENGINE_CHOICES = (
+    "auto",
+    "podman",
+    "docker",
+)
+
+DEFAULT_PXE_CONTENT_CONTAINER_PATHS = (
+    "/templates",
+    "/profiles",
+    "/overrides/templates",
+)
+
+PXE_CONTENT_CONTAINER_HINTS = (
+    "pxe-content",
+    "aerolit-pxe-content",
+)
+
+TEMPLATE_ROOT_PRIORITY_EXPLICIT = 75
+TEMPLATE_ROOT_PRIORITY_BUNDLE = 50
+TEMPLATE_ROOT_PRIORITY_HOST_OVERRIDE = 100
+TEMPLATE_ROOT_PRIORITY_CONTAINER = 85
+TEMPLATE_ROOT_PRIORITY_CONTAINER_OVERRIDE = 95
+
+
+class GenerateConfigError(Exception):
+    """Raised when generate command input is invalid."""
+
+
+def eprint(message):
+    """Print a message to stderr."""
+    print(message, file=sys.stderr)
+
+
+def fail(message, rc=2):
+    """Return a generate command failure."""
+    eprint("ERROR: {}".format(message))
+    return rc
+
+
+def as_path(value):
+    """Return an expanded Path without requiring it to exist."""
+    return Path(str(value)).expanduser()
+
+
+def command_exists(command):
+    """Return True when a command exists in PATH."""
+    if hasattr(shutil, "which"):
+        return shutil.which(command) is not None
+
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = Path(directory) / command
+        if candidate.exists() and os.access(str(candidate), os.X_OK):
+            return True
+
+    return False
+
+
+def run_command(command):
+    """Run a command and return rc, stdout, stderr."""
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+        stdout, stderr = process.communicate()
+        return process.returncode, stdout.strip(), stderr.strip()
+    except OSError as exc:
+        return 127, "", str(exc)
+
+
+def set_template_root_metadata(args, root, source, priority):
+    """Remember where a discovered template root came from."""
+    if args is None:
+        return
+
+    metadata = getattr(args, "_template_root_metadata", None)
+    if metadata is None:
+        metadata = {}
+        args._template_root_metadata = metadata
+
+    metadata[str(Path(root))] = {
+        "source": source,
+        "priority": priority,
+    }
+
+
+def template_root_metadata(args, root):
+    """Return source/priority metadata for one template root."""
+    if args is not None:
+        metadata = getattr(args, "_template_root_metadata", {})
+        item = metadata.get(str(Path(root)))
+        if item:
+            return item
+
+    if Path(root) == aerolitctl_pxe_template_overrides_dir():
+        return {
+            "source": "host override",
+            "priority": TEMPLATE_ROOT_PRIORITY_HOST_OVERRIDE,
+        }
+
+    return {
+        "source": "bundle",
+        "priority": TEMPLATE_ROOT_PRIORITY_BUNDLE,
+    }
+
+
+def configured_bundle_path(bundle_path=None):
+    """Return the active bundle path from CLI, config, or project default."""
+    if bundle_path:
+        return as_path(bundle_path)
+
+    try:
+        config = load_config()
+        configured = get_bundle_path(config)
+    except Exception:
+        configured = None
+
+    if configured:
+        return as_path(configured)
+
+    return DEFAULT_BUNDLE_PATH
+
+
+def ensure_single_line(value, label, allow_empty=False):
+    """Return a single-line string value."""
+    value = str(value or "").strip()
+
+    if not value and not allow_empty:
+        raise GenerateConfigError("{} cannot be empty".format(label))
+
+    if "\n" in value or "\r" in value:
+        raise GenerateConfigError("{} must be a single-line value".format(label))
+
+    return value
+
+
+def safe_file_stem(value, label):
+    """Validate a file stem/name component used for generated files."""
+    value = ensure_single_line(value, label)
+
+    if not SAFE_FILE_STEM_RE.match(value):
+        raise GenerateConfigError(
+            "{} must start with a letter/number and contain only letters, "
+            "numbers, dot, underscore, or dash: {}".format(label, value)
+        )
+
+    if ".." in value or "/" in value or "\\" in value:
+        raise GenerateConfigError(
+            "{} must not contain path separators or '..': {}".format(label, value)
+        )
+
+    return value
+
+
+def validate_relative_output(value, label, default_suffix=None):
+    """Validate a relative output file path below a managed base directory."""
+    value = ensure_single_line(value, label)
+    path = Path(value)
+
+    if path.is_absolute():
+        raise GenerateConfigError(
+            "{} must be relative to the managed output directory, got: {}".format(
+                label,
+                value,
+            )
+        )
+
+    if ".." in path.parts:
+        raise GenerateConfigError("{} must not contain '..': {}".format(label, value))
+
+    if len(path.parts) != 1:
+        raise GenerateConfigError(
+            "{} must be a filename, not a nested path: {}".format(label, value)
+        )
+
+    if default_suffix and not str(path).endswith((".yml", ".yaml")):
+        path = Path("{}{}".format(str(path), default_suffix))
+
+    return path
+
+
+def split_cli_values(values, label, allow_empty=False):
+    """Split repeatable/comma-separated CLI values."""
+    result = []
+
+    for item in values or []:
+        for part in str(item).split(","):
+            part = part.strip()
+            if part:
+                result.append(part)
+
+    if not result and not allow_empty:
+        raise GenerateConfigError("{} cannot be empty".format(label))
+
+    return result
+
+
+def parse_scalar(value):
+    """Parse a small CLI scalar into a YAML-ish value."""
+    raw = str(value).strip()
+    lowered = raw.lower()
+
+    if lowered in ("true", "yes", "on"):
+        return True
+
+    if lowered in ("false", "no", "off"):
+        return False
+
+    if lowered in ("null", "none"):
+        return None
+
+    try:
+        if raw.startswith("0") and raw not in ("0",):
+            return raw
+        return int(raw)
+    except ValueError:
+        return raw
+
+
+def parse_key_values(items, label="variable"):
+    """Parse repeatable KEY=VALUE options into an OrderedDict."""
+    result = OrderedDict()
+
+    for item in items or []:
+        item = ensure_single_line(item, label)
+
+        if "=" not in item:
+            raise GenerateConfigError(
+                "{} must use KEY=VALUE syntax, got: {}".format(label, item)
+            )
+
+        key, value = item.split("=", 1)
+        key = key.strip()
+
+        if not VAR_NAME_RE.match(key):
+            raise GenerateConfigError(
+                "Invalid variable name '{}'. Use Ansible-style names like foo_bar.".format(
+                    key
+                )
+            )
+
+        result[key] = parse_scalar(value)
+
+    return result
+
+
+def validate_role_name(role):
+    """Validate one Ansible role name/FQCN."""
+    role = ensure_single_line(role, "role")
+
+    if any(character.isspace() for character in role):
+        raise GenerateConfigError("Role must not contain whitespace: {}".format(role))
+
+    if not ROLE_NAME_RE.match(role):
+        raise GenerateConfigError(
+            "Invalid role '{}'. Use a role name/FQCN without shell syntax.".format(role)
+        )
+
+    return role
+
+
+def validate_hosts_pattern(hosts):
+    """Validate a simple Ansible hosts pattern enough to avoid broken YAML."""
+    hosts = ensure_single_line(hosts or DEFAULT_PLAYBOOK_HOSTS, "hosts")
+
+    if hosts.startswith("-"):
+        raise GenerateConfigError("hosts must not start with '-': {}".format(hosts))
+
+    return hosts
+
+
+def render_mapping(lines, mapping, indent):
+    """Render a small ordered mapping as YAML."""
+    prefix = " " * indent
+
+    for key, value in mapping.items():
+        if isinstance(value, dict):
+            lines.append("{}{}:".format(prefix, key))
+            render_mapping(lines, value, indent + 2)
+            continue
+
+        if isinstance(value, list):
+            render_list(lines, key, value, indent)
+            continue
+
+        lines.append("{}{}: {}".format(prefix, key, yaml_value(value)))
+
+
+def render_list(lines, key, values, indent):
+    """Render a small YAML list."""
+    prefix = " " * indent
+
+    if not values:
+        lines.append("{}{}: []".format(prefix, key))
+        return
+
+    lines.append("{}{}:".format(prefix, key))
+
+    for value in values:
+        if isinstance(value, dict):
+            lines.append("{}  -".format(prefix))
+            render_mapping(lines, value, indent + 4)
+        else:
+            lines.append("{}  - {}".format(prefix, yaml_value(value)))
+
+
+def render_playbook(play):
+    """Render one generated Ansible playbook file."""
+    lines = [
+        "---",
+        PLAYBOOK_MARKER,
+        "# Created by aerolitctl generate playbook.",
+        "# This file is safe to replace only when this marker is present.",
+        "",
+        "- name: {}".format(yaml_value(play["name"])),
+        "  hosts: {}".format(yaml_value(play["hosts"])),
+        "  become: {}".format(yaml_value(play["become"])),
+        "  gather_facts: {}".format(yaml_value(play["gather_facts"])),
+    ]
+
+    if play.get("vars"):
+        lines.append("  vars:")
+        render_mapping(lines, play["vars"], 4)
+
+    if play.get("pre_tasks"):
+        render_list(lines, "pre_tasks", play["pre_tasks"], 2)
+
+    lines.append("  roles:")
+    for role in play["roles"]:
+        lines.append("    - role: {}".format(yaml_value(role["role"])))
+
+    if play.get("tasks"):
+        render_list(lines, "tasks", play["tasks"], 2)
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def generated_playbook_path(bundle_path, name, output=None):
+    """Return the path for a generated playbook."""
+    base_dir = ansible_dir(bundle_path)
+
+    if output:
+        relative = validate_relative_output(output, "--output", default_suffix=".yml")
+    else:
+        safe_name = safe_file_stem(name, "playbook name")
+        if safe_name.endswith((".yml", ".yaml")):
+            relative = Path(safe_name)
+        else:
+            relative = Path("{}.yml".format(safe_name))
+
+    return base_dir / relative
+
+
+def playbook_file_looks_managed(path):
+    """Return True when a playbook is safe for generate to update."""
+    path = Path(path)
+
+    if not path.exists():
+        return True
+
+    return PLAYBOOK_MARKER in read_text(path)
+
+
+def write_generated_text(path, content, label, marker_check, dry_run=False, force=False, no_backup=False):
+    """Write a generated text file using marker-based overwrite safety."""
+    path = Path(path)
+    exists = path.exists()
+    current = read_text(path) if exists else None
+
+    if current == content:
+        print("Already current: {}".format(label))
+        return "unchanged"
+
+    if exists and not force and not marker_check(path):
+        raise GenerateConfigError(
+            "{} exists but does not look like an aerolitctl-generated file. "
+            "Refusing to overwrite without --force: {}".format(label, path)
+        )
+
+    if dry_run:
+        if exists:
+            backup_file(path, dry_run=True, no_backup=no_backup, label=label)
+            print("Would update: {}".format(label))
+            return "would_update"
+
+        print("Would create: {}".format(label))
+        return "would_create"
+
+    backup_file(path, dry_run=False, no_backup=no_backup, label=label)
+    write_text(path, content)
+
+    if exists:
+        print("Updated: {}".format(label))
+        return "updated"
+
+    print("Created: {}".format(label))
+    return "created"
+
+
+
+def common_collection_roots(bundle_path, args=None):
+    """Return host-visible Ansible collection roots to scan for roles."""
+    bundle_path = Path(bundle_path)
+    candidates = []
+
+    for value in getattr(args, "collection_root", None) or []:
+        if value:
+            candidates.append(as_path(value))
+
+    for parts in PLAYBOOK_COLLECTION_ROOT_DIRS:
+        candidates.append(bundle_path.joinpath(*parts))
+
+    result = []
+    for path in candidates:
+        path = Path(path)
+        if path.is_dir() and path not in result:
+            result.append(path)
+
+    return result
+
+
+def role_dir_has_role_content(role_dir):
+    """Return True when a role directory looks like a real Ansible role."""
+    role_dir = Path(role_dir)
+
+    role_markers = (
+        role_dir / "tasks" / "main.yml",
+        role_dir / "tasks" / "main.yaml",
+        role_dir / "meta" / "main.yml",
+        role_dir / "meta" / "main.yaml",
+        role_dir / "defaults" / "main.yml",
+        role_dir / "defaults" / "main.yaml",
+        role_dir / "vars" / "main.yml",
+        role_dir / "vars" / "main.yaml",
+        role_dir / "handlers" / "main.yml",
+        role_dir / "handlers" / "main.yaml",
+    )
+
+    for marker in role_markers:
+        if marker.is_file():
+            return True
+
+    # Some role skeletons start with files/templates only. Include them if the
+    # directory clearly contains normal role subdirectories, but ignore empty dirs.
+    for child_name in ("tasks", "templates", "files", "defaults", "vars", "handlers"):
+        child = role_dir / child_name
+        if child.is_dir() and any(child.iterdir()):
+            return True
+
+    return False
+
+
+def read_first_detail_file(role_dir):
+    """Return the first useful role detail file path, or None."""
+    role_dir = Path(role_dir)
+
+    for relative in ROLE_DETAIL_FILES:
+        path = role_dir / relative
+        if path.is_file():
+            return path
+
+    return None
+
+
+def read_first_summary_file(role_dir):
+    """Return the first file that is useful for a short role summary."""
+    role_dir = Path(role_dir)
+
+    for relative in ROLE_SUMMARY_FILES:
+        path = role_dir / relative
+        if path.is_file():
+            return path
+
+    return None
+
+
+def short_role_description(role_dir):
+    """Return a one-line role description from README/meta/default files if possible."""
+    path = read_first_summary_file(role_dir)
+    if not path:
+        return ""
+
+    try:
+        for line in read_text(path).splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("---"):
+                continue
+            if set(stripped) in (set("="), set("-")):
+                continue
+            stripped = stripped.lstrip("#").strip()
+            if stripped:
+                if len(stripped) > 100:
+                    stripped = stripped[:97] + "..."
+                return stripped
+    except (OSError, IOError):
+        return ""
+
+    return ""
+
+
+def discover_playbook_role_options(bundle_path, args=None):
+    """Discover FQCN roles from bundle Ansible collections."""
+    roots = common_collection_roots(bundle_path, args=args)
+    roles = []
+    seen = set()
+
+    for root in roots:
+        for namespace_dir in sorted(Path(root).iterdir()):
+            if not namespace_dir.is_dir():
+                continue
+            namespace = namespace_dir.name
+            if namespace.startswith("."):
+                continue
+
+            for collection_dir in sorted(namespace_dir.iterdir()):
+                if not collection_dir.is_dir():
+                    continue
+                collection = collection_dir.name
+                if collection.startswith("."):
+                    continue
+
+                roles_dir = collection_dir / "roles"
+                if not roles_dir.is_dir():
+                    continue
+
+                collection_fqcn = "{}.{}".format(namespace, collection)
+                collection_roles = []
+
+                for role_dir in sorted(roles_dir.iterdir()):
+                    if not role_dir.is_dir() or role_dir.name.startswith("."):
+                        continue
+                    if not role_dir_has_role_content(role_dir):
+                        continue
+
+                    role_name = role_dir.name
+                    fqcn = "{}.{}".format(collection_fqcn, role_name)
+                    if fqcn in seen:
+                        continue
+                    seen.add(fqcn)
+
+                    role = OrderedDict(
+                        [
+                            ("fqcn", fqcn),
+                            ("role", role_name),
+                            ("namespace", namespace),
+                            ("collection", collection),
+                            ("collection_fqcn", collection_fqcn),
+                            ("collection_path", collection_dir),
+                            ("role_path", role_dir),
+                            ("root", root),
+                            ("description", short_role_description(role_dir)),
+                        ]
+                    )
+                    roles.append(role)
+                    collection_roles.append(role)
+
+    return roles
+
+
+def group_roles_by_collection(roles):
+    """Group discovered roles by collection FQCN."""
+    grouped = OrderedDict()
+
+    for role in roles:
+        key = role["collection_fqcn"]
+        if key not in grouped:
+            grouped[key] = []
+        grouped[key].append(role)
+
+    return grouped
+
+
+def role_option_label(role):
+    """Return a friendly discovered-role label."""
+    description = role.get("description") or ""
+    if description:
+        return "{} - {}".format(role["fqcn"], description)
+    return role["fqcn"]
+
+
+def print_role_detail(role, line_limit=ROLE_DETAIL_LINE_LIMIT):
+    """Print useful details and a bounded content preview for a role."""
+    print("")
+    print("Details for role: {}".format(role["fqcn"]))
+    print("  Collection: {}".format(role["collection_fqcn"]))
+    print("  Role path:  {}".format(role["role_path"]))
+    print("  Root:       {}".format(role["root"]))
+    if role.get("description"):
+        print("  Summary:    {}".format(role.get("description")))
+
+    detail_file = read_first_detail_file(role["role_path"])
+    if not detail_file:
+        print("")
+        print("No README/meta/defaults/tasks detail file found for this role.")
+        return
+
+    print("  Details:    {}".format(detail_file))
+    print("")
+
+    try:
+        lines = read_text(detail_file).splitlines()
+    except (OSError, IOError) as exc:
+        print("Unable to read role detail file: {}".format(exc))
+        return
+
+    if not lines:
+        print("  <empty file>")
+        return
+
+    for number, line in enumerate(lines[:line_limit], start=1):
+        print("{:>4}: {}".format(number, line))
+
+    if len(lines) > line_limit:
+        print("  ... {} more line(s) not shown ...".format(len(lines) - line_limit))
+
+
+def print_playbook_role_inventory(bundle_path, args):
+    """Print discovered role-capable collections and roles."""
+    roles = discover_playbook_role_options(bundle_path, args=args)
+    grouped = group_roles_by_collection(roles)
+
+    print("")
+    print("AeroLIT playbook role options")
+    print("")
+    print("Bundle path: {}".format(bundle_path))
+    print("Collection roots scanned:")
+    roots = common_collection_roots(bundle_path, args=args)
+    if roots:
+        for root in roots:
+            print("  - {}".format(root))
+    else:
+        print("  - none found")
+
+    print("")
+    print("Role-capable collections:")
+    if not grouped:
+        print("  - none discovered")
+        print("")
+        print("Tip: guided playbook generation looks for collections under paths like:")
+        print("  <bundle>/collections-hub/ansible/collections/ansible_collections")
+        print("  <bundle>/collections-hub/collections/ansible_collections")
+        print("Use --collection-root PATH if your bundle keeps collections elsewhere.")
+        print("")
+        return roles
+
+    for collection_fqcn, collection_roles in grouped.items():
+        first = collection_roles[0]
+        print(
+            "  - {} ({})".format(
+                collection_fqcn,
+                "{} role(s)".format(len(collection_roles)),
+            )
+        )
+        print("      path: {}".format(first["collection_path"]))
+        for role in collection_roles:
+            print("      - {}".format(role_option_label(role)))
+
+    print("")
+    print("Only collections with a roles/ directory containing role-like content are shown.")
+    print("Module/plugin-only collections are ignored automatically.")
+    print("When generating a playbook, roles run top-to-bottom in the final roles: list.")
+    print("")
+    return roles
+
+
+def guided_hosts_choice(default_hosts):
+    """Prompt for a playbook hosts pattern."""
+    rows = [
+        {"value": item, "label": item}
+        for item in COMMON_PLAYBOOK_HOSTS
+    ]
+    return prompt_choice(
+        "Choose the Ansible inventory group/hosts pattern this playbook should target",
+        rows,
+        default=default_hosts or DEFAULT_PLAYBOOK_HOSTS,
+        allow_custom=True,
+    )
+
+
+def guide_select_playbook_roles(bundle_path, args):
+    """Interactively choose one or more discovered/manual roles."""
+    roles = discover_playbook_role_options(bundle_path, args=args)
+    grouped = group_roles_by_collection(roles)
+    selected = []
+
+    existing_roles = getattr(args, "role", None) or []
+    if existing_roles:
+        selected = normalized_role_values(existing_roles, label="preselected --role values")
+        print("")
+        print("Preselected roles from --role:")
+        for role in selected:
+            print("  - {}".format(role))
+        print("")
+
+    if not grouped:
+        print_playbook_role_inventory(bundle_path, args)
+        if not selected and not prompt_yes_no(
+            "No role-capable collections were discovered. Enter roles manually?",
+            default=True,
+        ):
+            raise GenerateConfigError("Guided playbook generation cancelled")
+
+        if not selected or prompt_yes_no("Add manual roles now?", default=not bool(selected)):
+            value = prompt_line(
+                "Role FQCN or comma-separated role FQCNs",
+                allow_empty=False,
+            )
+            for role in split_cli_values([value], "manual roles"):
+                role = validate_role_name(role)
+                if role not in selected:
+                    selected.append(role)
+    else:
+        print("")
+        print("Discovered role-capable collections")
+        print("")
+        collection_rows = []
+        for collection_fqcn, collection_roles in grouped.items():
+            collection_rows.append(
+                {
+                    "value": collection_fqcn,
+                    "label": "{} ({} role(s))".format(
+                        collection_fqcn,
+                        len(collection_roles),
+                    ),
+                }
+            )
+        collection_rows.append({"value": "__manual__", "label": "Enter a role manually"})
+        collection_rows.append({"value": "__done__", "label": "Done selecting roles"})
+
+        while True:
+            collection = prompt_choice(
+                "Choose a collection to browse, enter roles manually, or finish role selection",
+                collection_rows,
+                default="__done__" if selected else None,
+            )
+
+            if collection == "__done__":
+                if selected:
+                    break
+                print("Choose at least one role, or use the manual option.")
+                continue
+
+            if collection == "__manual__":
+                value = prompt_line(
+                    "Role FQCN or comma-separated role FQCNs",
+                    allow_empty=False,
+                )
+                for role in split_cli_values([value], "manual roles"):
+                    role = validate_role_name(role)
+                    if role not in selected:
+                        selected.append(role)
+                continue
+
+            collection_roles = grouped.get(collection, [])
+            role_rows = [
+                {"value": role["fqcn"], "label": role_option_label(role), "role": role}
+                for role in collection_roles
+            ]
+
+            if args.guided_show_role_details:
+                for role in collection_roles:
+                    print_role_detail(role)
+
+            chosen = prompt_multi_choice(
+                "Choose roles from {}".format(collection),
+                role_rows,
+                defaults=[],
+                detail_callback=lambda row: print_role_detail(row["role"]),
+            )
+
+            for role in chosen:
+                if role not in selected:
+                    selected.append(role)
+
+            print("")
+            if selected:
+                print("Selected roles so far:")
+                for role in selected:
+                    print("  - {}".format(role))
+                print("")
+
+            if selected and not prompt_yes_no("Add roles from another collection?", default=True):
+                break
+
+    if prompt_yes_no("Add any additional manual roles by FQCN?", default=False):
+        value = prompt_line("Additional role FQCNs, comma-separated")
+        for role in split_cli_values([value], "additional roles"):
+            role = validate_role_name(role)
+            if role not in selected:
+                selected.append(role)
+
+    if not selected:
+        raise GenerateConfigError("No roles selected; guided playbook generation cancelled")
+
+    return selected
+
+def normalized_role_values(values, label="roles"):
+    """Return validated role FQCNs in user-provided order."""
+    roles = []
+    seen = set()
+
+    for role in split_cli_values(values, label):
+        role = validate_role_name(role)
+
+        if role in seen:
+            raise GenerateConfigError(
+                "Duplicate role in {}: {}. List each role once, in the order "
+                "it should run.".format(label, role)
+            )
+
+        seen.add(role)
+        roles.append(role)
+
+    if not roles:
+        raise GenerateConfigError("{} cannot be empty".format(label))
+
+    return roles
+
+
+def apply_playbook_role_order(args, roles):
+    """Apply an explicit non-interactive role order, when provided."""
+    role_order = getattr(args, "role_order", None) or []
+    if not role_order:
+        return roles
+
+    ordered = []
+    seen = set()
+
+    for role in split_cli_values(role_order, "--role-order"):
+        role = validate_role_name(role)
+        if role in seen:
+            raise GenerateConfigError(
+                "--role-order contains duplicate role: {}".format(role)
+            )
+        seen.add(role)
+        ordered.append(role)
+
+    missing = [role for role in roles if role not in ordered]
+    extra = [role for role in ordered if role not in roles]
+
+    if missing or extra:
+        details = []
+        if missing:
+            details.append("missing from --role-order: {}".format(", ".join(missing)))
+        if extra:
+            details.append("not present in --role: {}".format(", ".join(extra)))
+
+        raise GenerateConfigError(
+            "--role-order must contain the same roles as --role. {}".format(
+                "; ".join(details)
+            )
+        )
+
+    return ordered
+
+
+def playbook_role_lookup(bundle_path, args):
+    """Return discovered role metadata keyed by role FQCN."""
+    result = OrderedDict()
+    for role in discover_playbook_role_options(bundle_path, args=args):
+        result[role["fqcn"]] = role
+    return result
+
+
+def print_role_execution_order(roles, role_lookup=None):
+    """Print the current Ansible role execution order."""
+    role_lookup = role_lookup or {}
+
+    print("")
+    print("Current role execution order")
+    print("")
+    for index, role in enumerate(roles, start=1):
+        description = ""
+        metadata = role_lookup.get(role)
+        if metadata and metadata.get("description"):
+            description = " - {}".format(metadata.get("description"))
+        print("  {}. {}{}".format(index, role, description))
+
+
+def reorder_roles_by_number_prompt(roles, role_lookup=None):
+    """Prompt for a final ordered permutation of selected roles."""
+    role_lookup = role_lookup or {}
+
+    if len(roles) <= 1:
+        print_role_execution_order(roles, role_lookup=role_lookup)
+        return roles
+
+    ordered = list(roles)
+
+    while True:
+        print_role_execution_order(ordered, role_lookup=role_lookup)
+        print("")
+        print("Role order matters. Ansible runs roles from top to bottom.")
+        print("Enter the final order as comma-separated numbers, for example:")
+        print("  2,1,3")
+        print("")
+        print("Press Enter to keep this order.")
+        print("Type d<number> to show role details, for example d2.")
+        print("Type r to reverse the current order.")
+        print("Type s to sort alphabetically.")
+        print("")
+
+        value = prompt_line("Final role order", default="", allow_empty=True).strip().lower()
+
+        if not value:
+            return ordered
+
+        if value == "r":
+            ordered = list(reversed(ordered))
+            continue
+
+        if value == "s":
+            ordered = sorted(ordered)
+            continue
+
+        if value.startswith("d"):
+            number = value[1:].strip()
+            if number.isdigit():
+                index = int(number)
+                if 1 <= index <= len(ordered):
+                    metadata = role_lookup.get(ordered[index - 1])
+                    if metadata:
+                        print_role_detail(metadata)
+                    else:
+                        print("No discovered role details are available for {}.".format(ordered[index - 1]))
+                    continue
+            print("Enter details as d1, d2, and so on.")
+            continue
+
+        numbers = []
+        ok = True
+        for part in value.split(","):
+            part = part.strip()
+            if not part.isdigit():
+                ok = False
+                break
+            number = int(part)
+            if number < 1 or number > len(ordered):
+                ok = False
+                break
+            numbers.append(number)
+
+        if not ok:
+            print("Please enter comma-separated numbers from 1 to {}.".format(len(ordered)))
+            continue
+
+        if len(numbers) != len(ordered) or len(set(numbers)) != len(ordered):
+            print(
+                "Please include each role exactly once. Example for {} roles: {}".format(
+                    len(ordered),
+                    ",".join(str(i) for i in range(1, len(ordered) + 1)),
+                )
+            )
+            continue
+
+        return [ordered[number - 1] for number in numbers]
+
+
+def guide_order_playbook_roles(roles, args, bundle_path):
+    """Let guided mode review and reorder selected roles before writing."""
+    roles = list(roles)
+
+    if not roles:
+        raise GenerateConfigError("No roles selected; guided playbook generation cancelled")
+
+    if getattr(args, "skip_role_order_review", False):
+        return roles
+
+    lookup = playbook_role_lookup(bundle_path, args)
+
+    print("")
+    print("Role execution order")
+    print("")
+    print("The generated playbook will run roles in the order shown under roles:.")
+    print("Put prerequisite/setup roles before roles that consume their output.")
+    print("")
+
+    if prompt_yes_no("Review or change role order now?", default=True):
+        roles = reorder_roles_by_number_prompt(roles, role_lookup=lookup)
+    else:
+        print_role_execution_order(roles, role_lookup=lookup)
+
+    return roles
+
+
+
+def guided_playbook_vars(args):
+    """Prompt for optional playbook vars."""
+    values = list(getattr(args, "var", None) or [])
+
+    if not prompt_yes_no("Add play-level variables?", default=bool(values)):
+        return values
+
+    print("Enter variables one at a time using KEY=VALUE. Leave blank when finished.")
+    while True:
+        value = prompt_line("Variable", default="", allow_empty=True)
+        if not value:
+            break
+        # Validate as the user enters so mistakes are caught immediately.
+        parse_key_values([value], label="--var")
+        values.append(value)
+
+    return values
+
+
+def run_guided_playbook(args, bundle_path):
+    """Run the guided generate playbook workflow."""
+    if not stdin_is_interactive():
+        raise GenerateConfigError(
+            "--guided requires an interactive terminal. Use explicit --role flags "
+            "or --list-playbook-roles for non-interactive discovery."
+        )
+
+    print("")
+    print("AeroLIT guided playbook generator")
+    print("")
+    print("This creates a managed playbook only. It does not run Ansible or change")
+    print("system state.")
+    print("")
+
+    if prompt_yes_no("Show discovered collections and roles before starting?", default=True):
+        print_playbook_role_inventory(bundle_path, args)
+
+    if not getattr(args, "name", None):
+        while True:
+            value = prompt_line("Generated playbook name", default="deploy_aerolit_roles")
+            try:
+                args.name = safe_file_stem(value, "playbook name")
+                break
+            except GenerateConfigError as exc:
+                print("Invalid playbook name: {}".format(exc))
+    else:
+        args.name = safe_file_stem(args.name, "playbook name")
+
+    args.hosts = guided_hosts_choice(args.hosts)
+
+    default_title = args.title or "{} {}".format(
+        DEFAULT_PLAYBOOK_NAME_PREFIX,
+        args.name,
+    )
+    args.title = prompt_line("Playbook title", default=default_title)
+
+    args.no_become = not prompt_yes_no(
+        "Use become: true so roles run with elevated privileges when needed?",
+        default=not bool(args.no_become),
+    )
+    args.no_gather_facts = not prompt_yes_no(
+        "Gather facts?",
+        default=not bool(args.no_gather_facts),
+    )
+
+    selected_roles = guide_select_playbook_roles(bundle_path, args)
+
+    if getattr(args, "role_order", None):
+        try:
+            selected_roles = apply_playbook_role_order(args, selected_roles)
+            print("")
+            print("Applied --role-order to the guided role selection.")
+        except GenerateConfigError as exc:
+            print("")
+            print("Warning: could not apply --role-order: {}".format(exc))
+            print("Guided role order review will be used instead.")
+        args.role_order = []
+
+    selected_roles = guide_order_playbook_roles(selected_roles, args, bundle_path)
+    args.role = list(selected_roles)
+    args.var = guided_playbook_vars(args)
+
+    if not args.output:
+        default_output = args.name
+        if not str(default_output).endswith((".yml", ".yaml")):
+            default_output = "{}.yml".format(default_output)
+        args.output = prompt_line("Output playbook filename", default=default_output)
+
+    print("")
+    print("Guided playbook selections complete.")
+    print("  Playbook name:       {}".format(args.name))
+    print("  Output:              {}".format(args.output))
+    print("  Hosts:               {}".format(args.hosts))
+    print("  Become:              {}".format(not args.no_become))
+    print("  Gather facts:        {}".format(not args.no_gather_facts))
+    print("  Roles:")
+    for role in args.role:
+        print("    - {}".format(role))
+    if args.var:
+        print("  Vars:")
+        for value in args.var:
+            print("    - {}".format(value))
+    else:
+        print("  Vars:                none")
+    print("")
+
+    if not prompt_yes_no("Continue and write/preview this generated playbook?", default=True):
+        raise GenerateConfigError("Guided generate playbook cancelled")
+
+
+def build_playbook(args):
+    """Build the in-memory playbook mapping from CLI args."""
+    if not getattr(args, "name", None):
+        raise GenerateConfigError(
+            "PLAYBOOK_NAME is required unless --guided or --list-playbook-roles is used. "
+            "Example: aerolitctl generate playbook deploy_pxe --role namespace.collection.role"
+        )
+
+    roles = normalized_role_values(args.role, label="roles")
+    roles = apply_playbook_role_order(args, roles)
+    variables = parse_key_values(getattr(args, "var", None), label="--var")
+
+    play = OrderedDict()
+    play["name"] = ensure_single_line(
+        args.title or "{} {}".format(DEFAULT_PLAYBOOK_NAME_PREFIX, args.name),
+        "playbook title",
+    )
+    play["hosts"] = validate_hosts_pattern(args.hosts)
+    play["become"] = not bool(args.no_become)
+    play["gather_facts"] = not bool(args.no_gather_facts)
+
+    if variables:
+        play["vars"] = variables
+
+    play["roles"] = [OrderedDict([("role", role)]) for role in roles]
+    return play
+
+
+def validate_playbook_target(bundle_path, dry_run=False):
+    """Validate the active Ansible directory before writing a playbook."""
+    target_dir = ansible_dir(bundle_path)
+
+    if target_dir.exists():
+        return
+
+    if dry_run:
+        print("Would require active Ansible directory: {}".format(target_dir))
+        return
+
+    raise GenerateConfigError(
+        "Active Ansible directory missing: {}. Run 'aerolitctl configure init' "
+        "or pass --bundle-path to an initialized bundle.".format(target_dir)
+    )
+
+
+def run_generate_playbook(args):
+    """Run aerolitctl generate playbook."""
+    bundle_path = configured_bundle_path(args.bundle_path)
+
+    if getattr(args, "list_playbook_roles", False):
+        print_playbook_role_inventory(bundle_path, args)
+        return 0
+
+    if getattr(args, "guided", False):
+        run_guided_playbook(args, bundle_path)
+
+    validate_playbook_target(bundle_path, dry_run=args.dry_run)
+
+    playbook = build_playbook(args)
+    output_path = generated_playbook_path(bundle_path, args.name, output=args.output)
+    content = render_playbook(playbook)
+
+    print("")
+    print("AeroLIT generate playbook plan")
+    print("")
+    print("{:<28} {}".format("Dry run:", args.dry_run))
+    print("{:<28} {}".format("Bundle path:", bundle_path))
+    print("{:<28} {}".format("Ansible directory:", ansible_dir(bundle_path)))
+    print("{:<28} {}".format("Output playbook:", output_path))
+    print("{:<28} {}".format("Hosts:", playbook["hosts"]))
+    print("{:<28} {}".format("Roles:", "{} role(s)".format(len(playbook["roles"]))))
+    print("{:<28} {}".format("Role order:", "top-to-bottom as shown below"))
+    for index, role in enumerate(playbook["roles"], start=1):
+        print("  {:>2}. {}".format(index, role["role"]))
+    print("{:<28} {}".format("Backups enabled:", not args.no_backup))
+    print("{:<28} {}".format("Force overwrite:", args.force))
+    print("")
+
+    write_generated_text(
+        output_path,
+        content,
+        label="generated playbook {}".format(output_path.name),
+        marker_check=playbook_file_looks_managed,
+        dry_run=args.dry_run,
+        force=args.force,
+        no_backup=args.no_backup,
+    )
+
+    if args.dry_run:
+        print("")
+        print("Dry run complete. No files were changed.")
+    else:
+        print("")
+        print("Generated playbook saved: {}".format(output_path))
+
+    return 0
+
+
+def profile_slug(profile_id):
+    """Return the pxe-content profile slug for file names."""
+    return str(profile_id).replace("_", "-")
+
+
+def title_from_profile_id(profile_id):
+    """Return a friendly title from a profile id."""
+    return str(profile_id).replace("_", " ").title()
+
+
+def clone_profile(source_profile, profile_id):
+    """Clone one managed PXE profile for a new generated profile."""
+    profile = copy.deepcopy(source_profile)
+    friendly = title_from_profile_id(profile_id)
+
+    profile["profile_id"] = profile_id
+    profile["title"] = "{} Installs".format(friendly)
+    profile["install_label"] = friendly
+    profile["menu_target"] = profile_id
+
+    # A generated profile should be useful by default. If it clones an
+    # unimplemented placeholder profile, the user can still force placeholder
+    # behavior with --placeholder.
+    profile["implemented"] = True
+    profile["show_in_main_menu"] = True
+
+    return profile
+
+
+def find_source_profile(state, profile_id):
+    """Return a source profile from current managed state."""
+    profile_id = normalize_profile_id(profile_id)
+
+    if profile_id not in state.profiles:
+        raise GenerateConfigError(
+            "Source PXE profile '{}' is not known. Known profiles: {}".format(
+                profile_id,
+                ", ".join(sorted(state.profiles.keys())),
+            )
+        )
+
+    return state.profiles[profile_id]
+
+
+def bool_option_value(value, default):
+    """Return tri-state argparse bool value with default fallback."""
+    if value is None:
+        return default
+    return bool(value)
+
+
+def validate_kickstart_option_conflicts(args):
+    """Reject contradictory generate kickstart options."""
+    conflicts = [
+        (args.implemented, args.placeholder, "--implemented", "--placeholder"),
+        (args.enabled, args.disabled, "--enabled", "--disabled"),
+        (
+            args.show_in_main_menu,
+            args.hide_from_main_menu,
+            "--show-in-main-menu",
+            "--hide-from-main-menu",
+        ),
+    ]
+
+    for left_value, right_value, left_name, right_name in conflicts:
+        if left_value and right_value:
+            raise GenerateConfigError(
+                "{} and {} cannot be used together".format(left_name, right_name)
+            )
+
+    if args.set_kernel_args and args.clear_kernel_args:
+        raise GenerateConfigError(
+            "--set-kernel-args and --clear-kernel-args cannot be used together"
+        )
+
+    if getattr(args, "copy_template", None) and getattr(args, "partial", None):
+        raise GenerateConfigError("--copy-template and --partial cannot be used together")
+
+    if getattr(args, "template_option", None) and getattr(args, "kickstart_template", None):
+        raise GenerateConfigError(
+            "--template-option and --kickstart-template cannot be used together"
+        )
+
+    if getattr(args, "template_option", None) and getattr(args, "partial", None):
+        raise GenerateConfigError("--template-option and --partial cannot be used together")
+
+
+def apply_kickstart_args_to_profile(profile, args):
+    """Apply generate kickstart CLI values to one profile mapping."""
+    profile_id = profile["profile_id"]
+
+    if args.title:
+        title = ensure_single_line(args.title, "--title")
+        profile["title"] = title
+
+    label = args.install_label or args.label
+    if label:
+        profile["install_label"] = ensure_single_line(label, "--install-label/--label")
+
+    if args.menu_target:
+        menu_target = normalize_profile_id(args.menu_target)
+        if menu_target in ("main", "rescue", "shell"):
+            raise GenerateConfigError(
+                "--menu-target uses reserved iPXE target: {}".format(menu_target)
+            )
+        profile["menu_target"] = menu_target
+
+    if args.os:
+        profile["supported_os"] = normalize_supported_os_values(
+            ",".join(split_cli_values(args.os, "--os"))
+        )
+
+    if args.kickstart_template:
+        profile["kickstart_template"] = validate_template_path(
+            args.kickstart_template,
+            profile_id,
+            field="kickstart_template",
+        )
+
+    if args.copy_template and not args.kickstart_template:
+        # When copying a local template, default to one generic override template
+        # file for this generated profile instead of inheriting the source
+        # profile's per-OS template name.
+        profile["kickstart_template"] = "ks/{}.ks.j2".format(profile_slug(profile_id))
+
+    if args.clear_kernel_args:
+        profile["kernel_args"] = []
+
+    if args.set_kernel_args:
+        profile["kernel_args"] = normalize_kernel_args_values(
+            profile_id,
+            ",".join(split_cli_values(args.set_kernel_args, "--set-kernel-args")),
+        )
+
+    if args.kernel_arg:
+        appended = split_cli_values(args.kernel_arg, "--kernel-arg")
+        existing = list(profile.get("kernel_args") or [])
+        profile["kernel_args"] = normalize_kernel_args_values(
+            profile_id,
+            ",".join(existing + appended),
+        )
+
+    profile["uefi"] = bool_option_value(args.uefi, bool(profile.get("uefi", True)))
+    profile["bios"] = bool_option_value(args.bios, bool(profile.get("bios", True)))
+
+    if args.placeholder:
+        profile["implemented"] = False
+    elif args.implemented:
+        profile["implemented"] = True
+    elif args.disabled:
+        # A hidden profile can still be implemented; it is just not displayed in
+        # the main menu. Do not silently change implemented unless requested.
+        pass
+
+    if args.disabled:
+        profile["show_in_main_menu"] = False
+    elif args.enabled:
+        profile["show_in_main_menu"] = True
+    elif args.hide_from_main_menu:
+        profile["show_in_main_menu"] = False
+    elif args.show_in_main_menu:
+        profile["show_in_main_menu"] = True
+
+    if not profile.get("uefi", True) and not profile.get("bios", True):
+        raise GenerateConfigError(
+            "PXE profile {} must enable UEFI and/or BIOS".format(profile_id)
+        )
+
+    return profile
+
+
+def build_kickstart_profile(state, args):
+    """Build or update the managed PXE profile for generate kickstart."""
+    validate_kickstart_option_conflicts(args)
+
+    if not getattr(args, "profile", None):
+        raise GenerateConfigError(
+            "PROFILE is required unless --guided is used. Example: "
+            "aerolitctl generate kickstart rhel9_workstation"
+        )
+
+    profile_id = normalize_profile_id(args.profile)
+    source_id = args.from_profile or "minimal"
+
+    if profile_id in state.profiles and not args.reset_from_profile:
+        profile = copy.deepcopy(state.profiles[profile_id])
+    else:
+        source_profile = find_source_profile(state, source_id)
+        profile = clone_profile(source_profile, profile_id)
+
+    profile = apply_kickstart_args_to_profile(profile, args)
+    state.profiles[profile_id] = profile
+    return profile
+
+
+def template_file_looks_managed(path):
+    """Return True when a template override is safe for generate to update."""
+    path = Path(path)
+
+    if not path.exists():
+        return True
+
+    return TEMPLATE_MARKER in read_text(path)
+
+
+def managed_template_content(source, profile_id):
+    """Return source template content with a small managed header."""
+    content = read_text(source)
+
+    if content.startswith(TEMPLATE_MARKER):
+        return content
+
+    header = [
+        TEMPLATE_MARKER,
+        "# Created by aerolitctl generate kickstart for profile {}.".format(profile_id),
+        "# This file is consumed by the pxe-content generator through /overrides/templates.",
+        "",
+    ]
+
+    return "\n".join(header) + content
+
+
+def copy_kickstart_template(profile, args):
+    """Optionally copy a Kickstart template into PXE template overrides."""
+    if not args.copy_template:
+        return None
+
+    source = as_path(args.copy_template)
+
+    if not source.is_file():
+        raise GenerateConfigError("--copy-template source not found: {}".format(source))
+
+    template_rel = validate_template_path(
+        profile.get("kickstart_template", ""),
+        profile["profile_id"],
+        field="kickstart_template",
+    )
+
+    if "{{" in template_rel or "}}" in template_rel:
+        raise GenerateConfigError(
+            "--copy-template cannot write a templated template filename: {}. "
+            "Use --kickstart-template ks/{}.ks.j2 or pre-create one rendered "
+            "template file per OS.".format(template_rel, profile_slug(profile["profile_id"]))
+        )
+
+    destination = aerolitctl_pxe_template_overrides_dir() / template_rel
+    content = managed_template_content(source, profile["profile_id"])
+
+    return write_generated_text(
+        destination,
+        content,
+        label="PXE template override {}".format(template_rel),
+        marker_check=template_file_looks_managed,
+        dry_run=args.dry_run,
+        force=args.force,
+        no_backup=args.no_backup,
+    )
+
+
+
+def stdin_is_interactive():
+    """Return True when guided mode can safely prompt."""
+    try:
+        return sys.stdin.isatty()
+    except AttributeError:
+        return False
+
+
+def input_function():
+    """Return a Python 2/3 compatible input function."""
+    try:
+        return raw_input  # noqa: F821  # pragma: no cover - Python 2 compatibility
+    except NameError:  # pragma: no cover - normal Python 3 path
+        return input
+
+
+def prompt_line(question, default=None, allow_empty=False):
+    """Prompt for one guided input value."""
+    if not stdin_is_interactive():
+        raise GenerateConfigError(
+            "--guided requires an interactive terminal. Use explicit generate "
+            "options for non-interactive use."
+        )
+
+    if default is None:
+        prompt = "{}: ".format(question)
+    else:
+        prompt = "{} [{}]: ".format(question, default)
+
+    while True:
+        try:
+            value = input_function()(prompt)
+        except EOFError:
+            raise GenerateConfigError("Guided input ended unexpectedly")
+
+        value = str(value).strip()
+
+        if not value and default is not None:
+            return str(default)
+
+        if value or allow_empty:
+            return value
+
+        print("Please enter a value, or press Ctrl+C to cancel.")
+
+
+def prompt_yes_no(question, default=True):
+    """Prompt for a yes/no answer."""
+    default_text = "Y/n" if default else "y/N"
+
+    while True:
+        value = prompt_line("{} ({})".format(question, default_text), allow_empty=True)
+        value = value.strip().lower()
+
+        if not value:
+            return bool(default)
+
+        if value in ("y", "yes"):
+            return True
+
+        if value in ("n", "no"):
+            return False
+
+        print("Please answer yes or no.")
+
+
+def prompt_choice(question, options, default=None, allow_custom=False, detail_callback=None):
+    """Prompt for one numbered choice."""
+    if not options and not allow_custom:
+        raise GenerateConfigError("No choices are available for {}".format(question))
+
+    while True:
+        print("")
+        print(question)
+        print("")
+
+        for index, option in enumerate(options, start=1):
+            suffix = ""
+            if default is not None and option.get("value") == default:
+                suffix = " [default]"
+            print("  {}. {}{}".format(index, option.get("label"), suffix))
+
+        if allow_custom:
+            print("  c. Enter a custom value")
+
+        if detail_callback:
+            print("")
+            print("Type d<number> to show details for an option, or ? to list choices again.")
+
+        value = prompt_line("Choice", default=None, allow_empty=True).strip()
+
+        if not value and default is not None:
+            return default
+
+        if allow_custom and value.lower() == "c":
+            custom = prompt_line("Custom value")
+            if custom:
+                return custom
+            continue
+
+        if detail_callback and value.lower().startswith("d"):
+            number = value[1:].strip()
+            if number.isdigit():
+                index = int(number)
+                if 1 <= index <= len(options):
+                    detail_callback(options[index - 1])
+                    continue
+            print("Enter details as d1, d2, and so on.")
+            continue
+
+        if value == "?":
+            continue
+
+        if value.isdigit():
+            index = int(value)
+            if 1 <= index <= len(options):
+                return options[index - 1].get("value")
+
+        print("Please choose one of the numbered options.")
+
+
+def prompt_multi_choice(question, options, defaults=None, detail_callback=None):
+    """Prompt for zero or more numbered choices."""
+    defaults = list(defaults or [])
+
+    while True:
+        print("")
+        print(question)
+        print("")
+
+        for index, option in enumerate(options, start=1):
+            suffix = ""
+            if option.get("value") in defaults:
+                suffix = " [default]"
+            print("  {}. {}{}".format(index, option.get("label"), suffix))
+
+        print("")
+        print("Use comma-separated numbers, 'all', blank for default/skip, or 'none' to select nothing.")
+        if detail_callback:
+            print("Type d<number> to show details before choosing.")
+
+        value = prompt_line("Choices", default=None, allow_empty=True).strip().lower()
+
+        if not value:
+            return defaults
+
+        if value in ("none", "skip", "n"):
+            return []
+
+        if value == "all":
+            return [option.get("value") for option in options]
+
+        if detail_callback and value.startswith("d"):
+            number = value[1:].strip()
+            if number.isdigit():
+                index = int(number)
+                if 1 <= index <= len(options):
+                    detail_callback(options[index - 1])
+                    continue
+            print("Enter details as d1, d2, and so on.")
+            continue
+
+        selected = []
+        ok = True
+        for part in value.split(","):
+            part = part.strip()
+            if not part.isdigit():
+                ok = False
+                break
+            index = int(part)
+            if index < 1 or index > len(options):
+                ok = False
+                break
+            selected.append(options[index - 1].get("value"))
+
+        if ok:
+            deduped = []
+            for item in selected:
+                if item not in deduped:
+                    deduped.append(item)
+            return deduped
+
+        print("Please enter valid comma-separated option numbers.")
+
+
+def selected_container_engine(args):
+    """Return the requested/available container engine, or None."""
+    wanted = getattr(args, "container_engine", "auto") or "auto"
+
+    if wanted != "auto":
+        if command_exists(wanted):
+            return wanted
+        return None
+
+    for engine in ("podman", "docker"):
+        if command_exists(engine):
+            return engine
+
+    return None
+
+
+def parse_container_ps(output):
+    """Parse a tab-separated podman/docker ps listing."""
+    containers = []
+
+    for line in output.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+
+        containers.append(
+            {
+                "id": parts[0].strip(),
+                "image": parts[1].strip(),
+                "names": parts[2].strip(),
+            }
+        )
+
+    return containers
+
+
+def list_running_containers(engine):
+    """Return running containers visible to the selected engine."""
+    rc, stdout, stderr = run_command(
+        [engine, "ps", "--format", "{{.ID}}\t{{.Image}}\t{{.Names}}"]
+    )
+
+    if rc != 0:
+        return [], stderr or stdout
+
+    return parse_container_ps(stdout), ""
+
+
+def container_matches(container, wanted=None):
+    """Return True when a container looks like pxe-content or matches a request."""
+    container_id = container.get("id", "")
+    image = container.get("image", "")
+    names = container.get("names", "")
+    haystack = "{} {} {}".format(container_id, image, names).lower()
+
+    if wanted:
+        wanted = str(wanted).strip().lower()
+        if not wanted:
+            return False
+        if container_id.lower().startswith(wanted):
+            return True
+        return wanted in [item.strip().lower() for item in names.split(",")] or wanted == image.lower()
+
+    return any(hint in haystack for hint in PXE_CONTENT_CONTAINER_HINTS)
+
+
+def discover_running_pxe_content_container(args):
+    """Discover one running pxe-content container without starting anything."""
+    mode = getattr(args, "template_source", "auto") or "auto"
+    status = OrderedDict()
+    status["mode"] = mode
+    status["engine"] = None
+    status["container"] = None
+    status["used"] = False
+    status["warnings"] = []
+
+    args._pxe_content_container_status = status
+
+    if mode == "host":
+        status["warnings"].append("Container discovery disabled by --template-source host.")
+        return None
+
+    engine = selected_container_engine(args)
+    status["engine"] = engine
+
+    if not engine:
+        message = "No container engine found. Install podman/docker or use --template-root."
+        if mode == "container":
+            raise GenerateConfigError(message)
+        status["warnings"].append(message)
+        return None
+
+    containers, error = list_running_containers(engine)
+    if error:
+        message = "Unable to list running containers with {}: {}".format(engine, error)
+        if mode == "container":
+            raise GenerateConfigError(message)
+        status["warnings"].append(message)
+        return None
+
+    wanted = getattr(args, "pxe_content_container", None)
+    matches = [item for item in containers if container_matches(item, wanted=wanted)]
+
+    if not matches:
+        if wanted:
+            message = "No running pxe-content container matched '{}' using {}.".format(wanted, engine)
+        else:
+            message = "No running pxe-content container was detected using {}.".format(engine)
+
+        if mode == "container":
+            raise GenerateConfigError(message)
+
+        status["warnings"].append(message)
+        return None
+
+    if len(matches) > 1:
+        status["warnings"].append(
+            "Multiple pxe-content-like containers were found; using {} ({}).".format(
+                matches[0].get("names") or matches[0].get("id"),
+                matches[0].get("image"),
+            )
+        )
+
+    status["container"] = matches[0]
+    return matches[0]
+
+
+def validate_container_root(value):
+    """Validate a container-side template/profile directory path."""
+    value = ensure_single_line(value, "container template root")
+
+    if not value.startswith("/"):
+        raise GenerateConfigError(
+            "Container template roots must be absolute container paths: {}".format(value)
+        )
+
+    path = Path(value)
+    if ".." in path.parts:
+        raise GenerateConfigError(
+            "Container template roots must not contain '..': {}".format(value)
+        )
+
+    return value.rstrip("/") or "/"
+
+
+def copy_running_container_template_roots(args):
+    """Copy readable pxe-content roots from a running container into a temp cache."""
+    existing = getattr(args, "_container_template_roots", None)
+    if existing is not None:
+        return existing
+
+    args._container_template_roots = []
+
+    container = discover_running_pxe_content_container(args)
+    status = getattr(args, "_pxe_content_container_status", {})
+    if not container:
+        return []
+
+    engine = status.get("engine")
+    container_id = container.get("id")
+    if not engine or not container_id:
+        return []
+
+    cache_root = Path(tempfile.mkdtemp(prefix="aerolitctl-pxe-content-"))
+    args._container_template_cache = str(cache_root)
+
+    roots = getattr(args, "container_template_root", None) or []
+    if not roots:
+        roots = list(DEFAULT_PXE_CONTENT_CONTAINER_PATHS)
+
+    copied = []
+    warnings = status.setdefault("warnings", [])
+
+    for container_root in roots:
+        container_root = validate_container_root(container_root)
+        name = container_root.strip("/").replace("/", "_") or "root"
+        destination = cache_root / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        source = "{}:{}".format(container_id, container_root)
+        rc, stdout, stderr = run_command([engine, "cp", source, str(destination)])
+
+        if rc != 0:
+            warnings.append(
+                "Could not read {} from running pxe-content container: {}".format(
+                    container_root,
+                    stderr or stdout or "container cp failed",
+                )
+            )
+            continue
+
+        if not destination.is_dir():
+            warnings.append(
+                "Copied {} from the container, but it was not a directory.".format(
+                    container_root
+                )
+            )
+            continue
+
+        priority = TEMPLATE_ROOT_PRIORITY_CONTAINER
+        if container_root.endswith("/overrides/templates") or container_root == "/overrides/templates":
+            priority = TEMPLATE_ROOT_PRIORITY_CONTAINER_OVERRIDE
+
+        source_label = "running-container:{}".format(container_root)
+        set_template_root_metadata(args, destination, source_label, priority)
+        copied.append(destination)
+
+    status["used"] = bool(copied)
+    args._container_template_roots = copied
+    return copied
+
+
+def cleanup_container_template_cache(args):
+    """Remove temporary copied pxe-content template roots."""
+    cache = getattr(args, "_container_template_cache", None)
+    if cache:
+        shutil.rmtree(cache, ignore_errors=True)
+        args._container_template_cache = None
+
+
+def print_container_discovery_notice(args, options=None):
+    """Tell the user whether guided/list mode used live pxe-content data."""
+    if getattr(args, "_container_discovery_notice_printed", False):
+        return
+
+    status = getattr(args, "_pxe_content_container_status", None)
+    if not status:
+        return
+
+    args._container_discovery_notice_printed = True
+
+    print("")
+    print("PXE content discovery")
+    print("")
+    print("  Template source mode: {}".format(status.get("mode")))
+
+    if status.get("used"):
+        container = status.get("container") or {}
+        print(
+            "  Using running container: {} ({}) via {}".format(
+                container.get("names") or container.get("id"),
+                container.get("image"),
+                status.get("engine"),
+            )
+        )
+        print("  Guided choices include template files copied from the live pxe-content container.")
+    else:
+        print("  Running pxe-content container: not used")
+        print(
+            "  For the most current pxe-content options, start/deploy the pxe-content "
+            "container or pass --template-source container --pxe-content-container NAME."
+        )
+        print("  Otherwise guided mode uses host-visible bundle and override template paths.")
+
+    for warning in status.get("warnings", []):
+        print("  Warning: {}".format(warning))
+
+    if options is not None:
+        print("  Discovered template/partial count: {}".format(len(options)))
+
+
+def common_template_roots(bundle_path, args_or_extra_roots=None):
+    """Return available pxe-content template roots from host and optional container."""
+    bundle_path = Path(bundle_path)
+    args = args_or_extra_roots if hasattr(args_or_extra_roots, "__dict__") else None
+    extra_roots = getattr(args, "template_root", None) if args is not None else args_or_extra_roots
+    candidates = []
+
+    for value in extra_roots or []:
+        if value:
+            path = as_path(value)
+            candidates.append(path)
+            set_template_root_metadata(args, path, "explicit", TEMPLATE_ROOT_PRIORITY_EXPLICIT)
+
+    host_override = aerolitctl_pxe_template_overrides_dir()
+    candidates.append(host_override)
+    set_template_root_metadata(args, host_override, "host override", TEMPLATE_ROOT_PRIORITY_HOST_OVERRIDE)
+
+    if args is not None:
+        candidates.extend(copy_running_container_template_roots(args))
+
+    bundle_candidates = [
+        bundle_path / "collections-hub" / "templates" / "pxe-content",
+        bundle_path / "collections-hub" / "templates",
+        bundle_path / "collections-hub" / "pxe-content" / "templates",
+        bundle_path / "pxe-content" / "templates",
+        bundle_path / "files" / "pxe" / "templates",
+        bundle_path / "files" / "pxe" / "pxe-content" / "templates",
+    ]
+
+    for path in bundle_candidates:
+        candidates.append(path)
+        set_template_root_metadata(args, path, "bundle", TEMPLATE_ROOT_PRIORITY_BUNDLE)
+
+    result = []
+    for path in candidates:
+        path = Path(path)
+        if path.is_dir() and path not in result:
+            result.append(path)
+
+    return result
+
+
+def template_option_id(path, root):
+    """Return a pxe-content/Jinja include-friendly relative template id."""
+    rel = Path(path).relative_to(Path(root))
+    return rel.as_posix()
+
+
+def looks_like_partial_template(option_id):
+    """Return True when a template path looks like a reusable fragment."""
+    parts = [part.lower() for part in Path(option_id).parts]
+
+    for part in parts:
+        if part in PARTIAL_DIR_NAMES:
+            return True
+
+    return False
+
+
+def section_for_template(option_id):
+    """Return a guided section key for one dynamic template option."""
+    lowered = option_id.lower().replace("-", "_")
+
+    for section_key, section in GUIDED_SECTION_DEFINITIONS.items():
+        if section_key == "other":
+            continue
+        for keyword in section["keywords"]:
+            if keyword and keyword in lowered:
+                return section_key
+
+    return "other"
+
+
+def discover_kickstart_template_options(bundle_path, args):
+    """Discover available Kickstart templates/partials from host-visible roots."""
+    roots = common_template_roots(bundle_path, args)
+    by_id = OrderedDict()
+
+    for root in roots:
+        for pattern in TEMPLATE_FILE_PATTERNS:
+            for path in sorted(root.glob(pattern)):
+                if not path.is_file():
+                    continue
+
+                option_id = template_option_id(path, root)
+
+                if ".." in Path(option_id).parts:
+                    continue
+
+                existing = by_id.get(option_id)
+                kind = "partial" if looks_like_partial_template(option_id) else "template"
+                metadata = template_root_metadata(args, root)
+                source = metadata.get("source", "bundle")
+                priority = metadata.get("priority", TEMPLATE_ROOT_PRIORITY_BUNDLE)
+
+                # Higher-priority roots should win when the same id appears more than once.
+                if existing and existing.get("priority", 0) > priority:
+                    continue
+
+                by_id[option_id] = OrderedDict(
+                    [
+                        ("id", option_id),
+                        ("path", path),
+                        ("root", root),
+                        ("source", source),
+                        ("priority", priority),
+                        ("kind", kind),
+                        ("section", section_for_template(option_id)),
+                    ]
+                )
+
+    return list(by_id.values())
+
+
+def discovered_full_templates(options):
+    """Return options suitable for direct kickstart_template use."""
+    result = []
+
+    for option in options:
+        option_id = option["id"]
+        if option.get("kind") == "partial":
+            continue
+        if Path(option_id).name.startswith("_"):
+            continue
+        result.append(option)
+
+    return result
+
+
+def discovered_partials(options):
+    """Return options suitable for composed template include choices."""
+    partials = [option for option in options if option.get("kind") == "partial"]
+
+    if partials:
+        return partials
+
+    # If the template tree does not use a clear partials/sections directory, let
+    # guided mode still compose from discovered files while excluding obvious
+    # top-level complete templates where possible.
+    return [
+        option for option in options
+        if option.get("id") not in [item.get("id") for item in discovered_full_templates(options)]
+    ]
+
+
+def option_label(option):
+    """Return a friendly label for a dynamic template option."""
+    return "{} ({}, {})".format(
+        option["id"],
+        option.get("source", "unknown"),
+        option.get("section", "other"),
+    )
+
+
+def print_template_option_detail(option, line_limit=GUIDED_DETAIL_LINE_LIMIT):
+    """Print useful details and a bounded content preview for one option."""
+    path = option["path"]
+    print("")
+    print("Details for: {}".format(option["id"]))
+    print("  Source:  {}".format(option.get("source", "unknown")))
+    print("  Section: {}".format(option.get("section", "other")))
+    print("  Path:    {}".format(path))
+    print("")
+
+    try:
+        lines = read_text(path).splitlines()
+    except (OSError, IOError) as exc:
+        print("Unable to read file: {}".format(exc))
+        return
+
+    if not lines:
+        print("  <empty file>")
+        return
+
+    for number, line in enumerate(lines[:line_limit], start=1):
+        print("{:>4}: {}".format(number, line))
+
+    if len(lines) > line_limit:
+        print("  ... {} more line(s) not shown ...".format(len(lines) - line_limit))
+
+
+def print_kickstart_option_inventory(bundle_path, args, state=None):
+    """Show dynamic templates, fragments, and current PXE profiles."""
+    options = discover_kickstart_template_options(bundle_path, args)
+    full_templates = discovered_full_templates(options)
+    partials = discovered_partials(options)
+
+    print("")
+    print("AeroLIT Kickstart generation options")
+    print("")
+    print("Bundle path: {}".format(bundle_path))
+    print("Template roots scanned:")
+    roots = common_template_roots(bundle_path, args)
+    if roots:
+        for root in roots:
+            metadata = template_root_metadata(args, root)
+            print(
+                "  - {} ({})".format(
+                    root,
+                    metadata.get("source", "unknown"),
+                )
+            )
+    else:
+        print("  - none found")
+
+    print_container_discovery_notice(args, options=options)
+
+    if state is not None:
+        print("")
+        print("Current PXE profiles:")
+        for profile_id, profile in state.profiles.items():
+            print(
+                "  - {:<24} implemented={} visible={} template={}".format(
+                    profile_id,
+                    profile.get("implemented"),
+                    profile.get("show_in_main_menu"),
+                    profile.get("kickstart_template") or "none",
+                )
+            )
+
+    print("")
+    print("Direct Kickstart templates:")
+    if full_templates:
+        for option in full_templates:
+            print("  - {}".format(option_label(option)))
+    else:
+        print("  - none discovered")
+
+    print("")
+    print("Composable partials/sections:")
+    if partials:
+        grouped = group_partials_by_section(partials)
+        for section_key, section_options in grouped.items():
+            section = GUIDED_SECTION_DEFINITIONS[section_key]
+            print("  {}:".format(section["title"]))
+            for option in section_options:
+                print("    - {}".format(option_label(option)))
+    else:
+        print("  - none discovered")
+
+    print("")
+
+
+def validate_discovered_template_id(option_id, options, label):
+    """Validate one selected dynamic option id against discovered templates."""
+    option_id = validate_template_path(option_id, "dynamic", field=label)
+    ids = [option["id"] for option in options]
+
+    if option_id not in ids:
+        raise GenerateConfigError(
+            "{} was not found in discovered pxe-content template options: {}".format(
+                label,
+                option_id,
+            )
+        )
+
+    return option_id
+
+
+def group_partials_by_section(partials):
+    """Group partial options in the guided section order."""
+    grouped = OrderedDict((key, []) for key in GUIDED_SECTION_DEFINITIONS.keys())
+
+    for option in partials:
+        section_key = option.get("section") or "other"
+        if section_key not in grouped:
+            section_key = "other"
+        grouped[section_key].append(option)
+
+    return OrderedDict((key, value) for key, value in grouped.items() if value)
+
+
+def rendered_composed_template(profile_id, selected_partials):
+    """Return a managed Jinja2 template composed from selected partials."""
+    lines = [
+        TEMPLATE_MARKER,
+        "# Created by aerolitctl generate kickstart for profile {}.".format(profile_id),
+        "# This template is composed from pxe-content partial templates.",
+        "# It is consumed later by the pxe-content generator.",
+        "",
+    ]
+
+    for option_id in selected_partials:
+        lines.append("# BEGIN {}".format(option_id))
+        lines.append("{{% include '{}' %}}".format(option_id))
+        lines.append("# END {}".format(option_id))
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def write_composed_kickstart_template(profile, args):
+    """Write a guided/non-interactive composed template override if requested."""
+    content = getattr(args, "_composed_template_content", None)
+    if not content:
+        return None
+
+    template_rel = validate_template_path(
+        profile.get("kickstart_template", ""),
+        profile["profile_id"],
+        field="kickstart_template",
+    )
+    destination = aerolitctl_pxe_template_overrides_dir() / template_rel
+
+    return write_generated_text(
+        destination,
+        content,
+        label="PXE composed template override {}".format(template_rel),
+        marker_check=template_file_looks_managed,
+        dry_run=args.dry_run,
+        force=args.force,
+        no_backup=args.no_backup,
+    )
+
+
+def prepare_dynamic_template_args(bundle_path, args):
+    """Apply non-interactive dynamic template choices before profile build."""
+    options = discover_kickstart_template_options(bundle_path, args)
+
+    if getattr(args, "template_option", None):
+        if args.kickstart_template:
+            raise GenerateConfigError(
+                "--template-option and --kickstart-template cannot be used together"
+            )
+        args.kickstart_template = validate_discovered_template_id(
+            args.template_option,
+            options,
+            "--template-option",
+        )
+        # --template-option is a validated alias for --kickstart-template.
+        # Clear it after translation so the later profile conflict checks do not
+        # think the user supplied both options.
+        args.template_option = None
+
+    if getattr(args, "partial", None):
+        if args.copy_template:
+            raise GenerateConfigError("--partial and --copy-template cannot be used together")
+        if getattr(args, "template_option", None):
+            raise GenerateConfigError("--partial and --template-option cannot be used together")
+
+        selected = []
+        for item in args.partial:
+            for part in split_cli_values([item], "--partial"):
+                selected.append(validate_discovered_template_id(part, options, "--partial"))
+
+        profile_id = normalize_profile_id(args.profile)
+        if not args.kickstart_template:
+            args.kickstart_template = "ks/{}.ks.j2".format(profile_slug(profile_id))
+        args._composed_template_content = rendered_composed_template(profile_id, selected)
+
+
+def guided_profile_options(state):
+    """Return source profile choices for guided mode."""
+    options = []
+    for profile_id in sorted(state.profiles.keys()):
+        profile = state.profiles[profile_id]
+        label = "{} - {} (implemented={}, visible={})".format(
+            profile_id,
+            profile.get("title"),
+            profile.get("implemented"),
+            profile.get("show_in_main_menu"),
+        )
+        options.append({"value": profile_id, "label": label})
+    return options
+
+
+def guided_os_options():
+    """Return OS choices for guided mode."""
+    return [
+        {"value": os_id, "label": os_id}
+        for os_id in STANDARD_OS_IDS
+    ]
+
+
+def guide_compose_template(args, bundle_path, options):
+    """Walk the user through composing a Kickstart template from partials."""
+    partials = discovered_partials(options)
+    if not partials:
+        raise GenerateConfigError(
+            "No composable Kickstart partials were discovered. Add --template-root "
+            "pointing at an unpacked pxe-content template tree, or use copy/existing mode."
+        )
+
+    grouped = group_partials_by_section(partials)
+    selected = []
+
+    show_all_details = bool(args.guided_show_details)
+    if not show_all_details:
+        show_all_details = prompt_yes_no(
+            "Do you want to show full partial file details while choosing?",
+            default=False,
+        )
+
+    for section_key, section_options in grouped.items():
+        section = GUIDED_SECTION_DEFINITIONS[section_key]
+        print("")
+        print("=" * 72)
+        print(section["title"])
+        print(section["description"])
+        print("=" * 72)
+
+        option_rows = [
+            {"value": option["id"], "label": option_label(option), "option": option}
+            for option in section_options
+        ]
+
+        if show_all_details:
+            for option in section_options:
+                print_template_option_detail(option)
+
+        chosen = prompt_multi_choice(
+            "Pick one or more items for this section, or skip it.",
+            option_rows,
+            defaults=[],
+            detail_callback=lambda row: print_template_option_detail(row["option"]),
+        )
+        selected.extend(chosen)
+
+    if not selected:
+        raise GenerateConfigError("No Kickstart partials selected; guided compose cancelled")
+
+    default_template = "ks/{}.ks.j2".format(profile_slug(args.profile))
+    template_name = prompt_line(
+        "Override template path to create",
+        default=default_template,
+    )
+    args.kickstart_template = validate_template_path(
+        template_name,
+        args.profile,
+        field="kickstart_template",
+    )
+    args._composed_template_content = rendered_composed_template(args.profile, selected)
+
+
+def run_guided_kickstart(args, bundle_path, state):
+    """Run the guided generate kickstart workflow."""
+    if not stdin_is_interactive():
+        raise GenerateConfigError(
+            "--guided requires an interactive terminal. Use explicit flags or "
+            "--list-kickstart-options for non-interactive discovery."
+        )
+
+    print("")
+    print("AeroLIT guided Kickstart/PXE profile generator")
+    print("")
+    print("This creates generator inputs only. It does not render boot.ipxe, run")
+    print("Ansible, restart containers, or change system services.")
+    print("")
+
+    options = discover_kickstart_template_options(bundle_path, args)
+    print_container_discovery_notice(args, options=options)
+    if prompt_yes_no("Show discovered profiles/templates before starting?", default=True):
+        print_kickstart_option_inventory(bundle_path, args, state=state)
+
+    if not getattr(args, "profile", None):
+        while True:
+            value = prompt_line("New PXE profile id", default="rhel9_workstation")
+            try:
+                args.profile = normalize_profile_id(value)
+                break
+            except PxeConfigError as exc:
+                print("Invalid profile id: {}".format(exc))
+    else:
+        args.profile = normalize_profile_id(args.profile)
+
+    default_source = args.from_profile or "minimal"
+    args.from_profile = prompt_choice(
+        "Choose the profile to clone as a starting point",
+        guided_profile_options(state),
+        default=default_source if default_source in state.profiles else None,
+    )
+
+    if args.profile in state.profiles:
+        args.reset_from_profile = prompt_yes_no(
+            "Profile already exists. Rebuild it from {} before applying choices?".format(
+                args.from_profile
+            ),
+            default=bool(args.reset_from_profile),
+        )
+
+    source_profile = find_source_profile(state, args.from_profile)
+    default_os = list(source_profile.get("supported_os") or ["rhel9"])
+    args.os = [
+        ",".join(
+            prompt_multi_choice(
+                "Choose supported OS versions",
+                guided_os_options(),
+                defaults=default_os,
+            )
+        )
+    ]
+
+    default_title = args.title or "{} Installs".format(title_from_profile_id(args.profile))
+    args.title = prompt_line("PXE menu section title", default=default_title)
+
+    default_label = args.install_label or args.label or title_from_profile_id(args.profile)
+    args.install_label = prompt_line("Install label shown for boot entries", default=default_label)
+
+    default_target = args.menu_target or args.profile
+    args.menu_target = prompt_line("iPXE menu target", default=default_target)
+
+    args.uefi = prompt_yes_no("Generate UEFI boot entries?", default=bool(source_profile.get("uefi", True)))
+    args.bios = prompt_yes_no("Generate legacy BIOS boot entries?", default=bool(source_profile.get("bios", True)))
+
+    implemented = prompt_yes_no(
+        "Mark this profile implemented so real boot targets/kickstarts are generated?",
+        default=True,
+    )
+    args.implemented = implemented
+    args.placeholder = not implemented
+
+    visible = prompt_yes_no("Show this profile in the main PXE menu?", default=True)
+    args.enabled = visible
+    args.disabled = not visible
+
+    full_templates = discovered_full_templates(options)
+    template_modes = [
+        {"value": "inherit", "label": "Use the cloned profile's current template"},
+    ]
+    if full_templates:
+        template_modes.append({"value": "existing", "label": "Pick an existing discovered template"})
+    if discovered_partials(options):
+        template_modes.append({"value": "compose", "label": "Build a new template by picking Kickstart sections/partials"})
+    template_modes.append({"value": "copy", "label": "Copy a local template file into AeroLIT overrides"})
+    template_modes.append({"value": "custom", "label": "Enter a custom pxe-content template path manually"})
+
+    mode = prompt_choice(
+        "Choose Kickstart template mode",
+        template_modes,
+        default="compose" if discovered_partials(options) else "inherit",
+    )
+
+    if mode == "existing":
+        rows = [
+            {"value": option["id"], "label": option_label(option), "option": option}
+            for option in full_templates
+        ]
+        args.kickstart_template = prompt_choice(
+            "Choose the existing Kickstart template",
+            rows,
+            default=None,
+            detail_callback=lambda row: print_template_option_detail(row["option"]),
+        )
+    elif mode == "compose":
+        guide_compose_template(args, bundle_path, options)
+    elif mode == "copy":
+        args.copy_template = prompt_line("Local template file to copy")
+        default_dest = "ks/{}.ks.j2".format(profile_slug(args.profile))
+        args.kickstart_template = prompt_line("Destination template path", default=default_dest)
+    elif mode == "custom":
+        args.kickstart_template = prompt_line(
+            "Relative pxe-content Kickstart template path",
+            default="ks/{}.ks.j2".format(profile_slug(args.profile)),
+        )
+
+    current_kernel_args = list(source_profile.get("kernel_args") or DEFAULT_KERNEL_ARGS)
+    if prompt_yes_no(
+        "Keep current kernel args ({})?".format(
+            ", ".join(current_kernel_args) or "none"
+        ),
+        default=True,
+    ):
+        args.set_kernel_args = [",".join(current_kernel_args)] if current_kernel_args else []
+    else:
+        value = prompt_line(
+            "Comma-separated kernel args, or blank for none",
+            default="",
+            allow_empty=True,
+        )
+        args.set_kernel_args = [value] if value else []
+        args.clear_kernel_args = not bool(value)
+
+    extra_args = prompt_line(
+        "Additional kernel args to append, comma-separated, or blank",
+        default="",
+        allow_empty=True,
+    )
+    if extra_args:
+        args.kernel_arg = [extra_args]
+
+    print("")
+    print("Guided selections complete.")
+    print("  Profile id:          {}".format(args.profile))
+    print("  Source profile:      {}".format(args.from_profile))
+    print("  Supported OS:        {}".format(", ".join(split_cli_values(args.os, "--os"))))
+    print("  Kickstart template:  {}".format(args.kickstart_template or "cloned profile default"))
+    print("  Copy template:       {}".format(args.copy_template or "no"))
+    print("  Composed template:   {}".format("yes" if getattr(args, "_composed_template_content", None) else "no"))
+    print("")
+
+    if not prompt_yes_no("Continue and write/preview these generated inputs?", default=True):
+        raise GenerateConfigError("Guided generate cancelled")
+
+def print_kickstart_plan(bundle_path, profile, args):
+    """Print a concise generate kickstart plan."""
+    print("")
+    print("AeroLIT generate kickstart plan")
+    print("")
+    print("{:<30} {}".format("Dry run:", args.dry_run))
+    print("{:<30} {}".format("Bundle path:", bundle_path))
+    print("{:<30} {}".format("Profile id:", profile["profile_id"]))
+    print("{:<30} {}".format("Profile file:", aerolitctl_pxe_profile_file(profile["profile_id"])))
+    print("{:<30} {}".format("Generated PXE vars:", aerolitctl_pxe_generated_vars_file(bundle_path)))
+    print("{:<30} {}".format("Title:", profile.get("title")))
+    print("{:<30} {}".format("Install label:", profile.get("install_label")))
+    print("{:<30} {}".format("Menu target:", profile.get("menu_target")))
+    print("{:<30} {}".format("Implemented:", profile.get("implemented")))
+    print("{:<30} {}".format("Show in main menu:", profile.get("show_in_main_menu")))
+    print("{:<30} {}".format("Supported OS:", ", ".join(profile.get("supported_os") or [])))
+    print("{:<30} {}".format("Kickstart template:", profile.get("kickstart_template") or "none"))
+    print("{:<30} {}".format("Kernel args:", ", ".join(profile.get("kernel_args") or []) or "none"))
+    print("{:<30} {}".format("Refresh generated vars:", not args.no_refresh_generated_vars))
+    print("{:<30} {}".format("Backups enabled:", not args.no_backup))
+    print("{:<30} {}".format("Force overwrite:", args.force))
+    print("")
+
+
+def validation_errors_block_generate(report, args):
+    """Return True when validation errors should block this generate run."""
+    if not report.errors:
+        return False
+
+    if not args.dry_run:
+        return True
+
+    # In dry-run mode, let the user preview output even before configure init has
+    # created the active group_vars/all directory. Real writes still fail until
+    # the bundle has been initialized.
+    tolerated = []
+    for message in report.errors:
+        if "group_vars/all directory missing:" in message:
+            tolerated.append(message)
+            continue
+        return True
+
+    for message in tolerated:
+        report.add_warning("Dry run only: {}".format(message))
+
+    report.errors = [
+        message
+        for message in report.errors
+        if message not in tolerated
+    ]
+    return False
+
+
+def run_generate_kickstart(args):
+    """Run aerolitctl generate kickstart."""
+    try:
+        bundle_path = configured_bundle_path(args.bundle_path)
+        state = load_managed_pxe_state(bundle_path)
+
+        if getattr(args, "list_kickstart_options", False):
+            print_kickstart_option_inventory(bundle_path, args, state=state)
+            return 0
+
+        if getattr(args, "guided", False):
+            run_guided_kickstart(args, bundle_path, state)
+
+        if not getattr(args, "profile", None):
+            raise GenerateConfigError(
+                "PROFILE is required unless --guided is used. Example: "
+                "aerolitctl generate kickstart rhel9_workstation"
+            )
+
+        prepare_dynamic_template_args(bundle_path, args)
+        profile = build_kickstart_profile(state, args)
+
+        print_kickstart_plan(bundle_path, profile, args)
+
+        report = validate_pxe_state(
+            bundle_path,
+            state,
+            check_files=True,
+            force=args.force,
+        )
+
+        if validation_errors_block_generate(report, args):
+            print("Refusing to write invalid managed PXE configuration.")
+            print("")
+            report.print_report()
+            return report.exit_code()
+
+        ensure_pxe_directories(dry_run=args.dry_run)
+
+        if getattr(args, "_composed_template_content", None):
+            write_composed_kickstart_template(profile, args)
+
+        if args.copy_template:
+            copy_kickstart_template(profile, args)
+
+        if not args.no_refresh_generated_vars:
+            write_pxe_if_changed(
+                aerolitctl_pxe_generated_vars_file(bundle_path),
+                render_generated_vars(bundle_path, state),
+                dry_run=args.dry_run,
+                label="generated PXE vars",
+                managed_kind="generated_vars",
+                force=args.force,
+                no_backup=args.no_backup,
+            )
+
+        write_pxe_if_changed(
+            aerolitctl_pxe_profile_file(profile["profile_id"]),
+            render_profile(profile),
+            dry_run=args.dry_run,
+            label="PXE profile {}".format(profile["profile_id"]),
+            managed_kind="profile",
+            force=args.force,
+            no_backup=args.no_backup,
+        )
+
+        print("")
+        if args.dry_run:
+            print("Dry run complete. No files were changed.")
+        else:
+            print("Generated PXE/Kickstart profile input saved.")
+
+        if args.validate:
+            print("")
+            final_report = validate_pxe_state(
+                bundle_path,
+                state,
+                check_files=True,
+                force=args.force,
+            )
+            final_report.print_report()
+            return final_report.exit_code()
+
+        return 0
+    finally:
+        cleanup_container_template_cache(args)
+
+
+def run_generate(args):
+    """Dispatch aerolitctl generate."""
+    command = getattr(args, "generate_command", None)
+
+    try:
+        if command == "playbook":
+            return run_generate_playbook(args)
+
+        if command in ("kickstart", "pxe-profile"):
+            return run_generate_kickstart(args)
+
+        return fail("missing generate subcommand; use playbook or kickstart")
+
+    except (GenerateConfigError, PxeConfigError, OSError, IOError) as exc:
+        return fail(str(exc))
+
+
+def add_generate_parser(subparsers):
+    """Add aerolitctl generate parser."""
+    parser = subparsers.add_parser(
+        "generate",
+        help="Generate AeroLIT-managed playbooks and PXE/Kickstart input files.",
+        description=(
+            "Generate AeroLIT-managed input files without applying system changes. "
+            "This command does not run Ansible, restart PXE services, or render boot.ipxe."
+        ),
+    )
+    parser.set_defaults(func=run_generate)
+
+    generate_subparsers = parser.add_subparsers(dest="generate_command")
+
+    playbook = generate_subparsers.add_parser(
+        "playbook",
+        help="Generate an AeroLIT-managed Ansible playbook.",
+        description=(
+            "Write a generated playbook under the active "
+            "collections-hub/ansible directory."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Examples:
+  aerolitctl generate playbook deploy_pxe_content \
+    --hosts pxe_server \
+    --role aerolit.pxe_content.pxe_content
+
+  aerolitctl generate playbook --guided
+
+  aerolitctl generate playbook --list-playbook-roles
+
+  aerolitctl generate playbook controller_setup \
+    --hosts ansible_controller \
+    --role namespace.collection.role1 \
+    --role namespace.collection.role2 \
+    --var aerolit_example=true
+
+  # Roles run top-to-bottom in the order written. You can also enforce order:
+  aerolitctl generate playbook ordered_setup \
+    --role namespace.collection.prereq \
+    --role namespace.collection.configure \
+    --role-order namespace.collection.prereq,namespace.collection.configure
+""",
+    )
+    playbook.add_argument(
+        "name",
+        nargs="?",
+        help=(
+            "Safe generated playbook name, for example deploy_pxe_content. "
+            "Optional with --guided or --list-playbook-roles."
+        ),
+    )
+    playbook.add_argument(
+        "--guided",
+        action="store_true",
+        help="Interactively discover bundle collection roles and build a playbook.",
+    )
+    playbook.add_argument(
+        "--guided-show-role-details",
+        action="store_true",
+        help="During --guided, show role README/meta/tasks details before choices.",
+    )
+    playbook.add_argument(
+        "--list-playbook-roles",
+        action="store_true",
+        help="List discovered role-capable Ansible collections and roles, then exit.",
+    )
+    playbook.add_argument(
+        "--collection-root",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "Extra Ansible collection root to scan for --guided and "
+            "--list-playbook-roles. Can be repeated. Expected layout: "
+            "PATH/<namespace>/<collection>/roles/<role>."
+        ),
+    )
+    playbook.add_argument(
+        "--role",
+        action="append",
+        default=[],
+        metavar="ROLE",
+        help=(
+            "Role name/FQCN. Can be repeated or comma-separated. "
+            "Roles are written to the playbook in the order provided. "
+            "Required unless --guided or --list-playbook-roles is used."
+        ),
+    )
+    playbook.add_argument(
+        "--role-order",
+        action="append",
+        default=[],
+        metavar="ROLE_LIST",
+        help=(
+            "Explicit final role execution order. Most users can simply repeat "
+            "--role in the desired order; use this only when you want to override "
+            "that order. It must contain exactly the same roles as --role."
+        ),
+    )
+    playbook.add_argument(
+        "--skip-role-order-review",
+        action="store_true",
+        help="With --guided, skip the final role execution order review prompt.",
+    )
+    playbook.add_argument(
+        "--hosts",
+        default=DEFAULT_PLAYBOOK_HOSTS,
+        help="Ansible hosts pattern. Default: all.",
+    )
+    playbook.add_argument(
+        "--title",
+        default=None,
+        help="Human-readable play name. Defaults to a generated title.",
+    )
+    playbook.add_argument(
+        "--var",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Play-level variable. Can be repeated.",
+    )
+    playbook.add_argument(
+        "--output",
+        default=None,
+        help="Generated playbook filename relative to collections-hub/ansible.",
+    )
+    playbook.add_argument(
+        "--bundle-path",
+        default=None,
+        help="Bundle path. Defaults to configured bundle path or /opt/aerolit/aerolit-bundle.",
+    )
+    playbook.add_argument(
+        "--no-become",
+        action="store_true",
+        help="Write become: false. Default is become: true.",
+    )
+    playbook.add_argument(
+        "--no-gather-facts",
+        action="store_true",
+        help="Write gather_facts: false. Default is gather_facts: true.",
+    )
+    playbook.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow replacement of an existing non-aerolitctl-generated playbook.",
+    )
+    playbook.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not create timestamped backups before changing files.",
+    )
+    playbook.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview generated output without writing files.",
+    )
+    playbook.set_defaults(func=run_generate, generate_command="playbook")
+
+    kickstart = generate_subparsers.add_parser(
+        "kickstart",
+        aliases=["pxe-profile"],
+        help="Generate a PXE/Kickstart profile override input.",
+        description=(
+            "Create or update a PXE profile override consumed by the pxe-content "
+            "generator. This writes generator inputs, not the final rendered "
+            "Kickstart under the PXE web root."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Examples:
+  aerolitctl generate kickstart rhel9_workstation \
+    --from-profile minimal \
+    --os rhel9 \
+    --label "RHEL 9 Workstation"
+
+  aerolitctl generate kickstart small_disk_lab \
+    --from-profile small_disk \
+    --os rhel9,rhel8 \
+    --kernel-arg inst.sshd
+
+  aerolitctl generate kickstart secure_luks \
+    --from-profile minimal \
+    --copy-template ./rhel-secure-luks.ks.j2 \
+    --kickstart-template ks/secure-luks.ks.j2 \
+    --label "Security + LUKS"
+""",
+    )
+    kickstart.add_argument(
+        "profile",
+        nargs="?",
+        help=(
+            "PXE profile id. Use lowercase letters, numbers, and underscore. "
+            "Optional with --guided."
+        ),
+    )
+    kickstart.add_argument(
+        "--guided",
+        action="store_true",
+        help="Interactively build a PXE/Kickstart profile step by step.",
+    )
+    kickstart.add_argument(
+        "--guided-show-details",
+        action="store_true",
+        help="During --guided, show template/partial file contents before each choice.",
+    )
+    kickstart.add_argument(
+        "--list-kickstart-options",
+        action="store_true",
+        help="List discovered profiles, Kickstart templates, and partials, then exit.",
+    )
+    kickstart.add_argument(
+        "--template-root",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "Extra host-visible pxe-content template root to scan for --guided, "
+            "--template-option, --partial, and --list-kickstart-options. Can be repeated."
+        ),
+    )
+    kickstart.add_argument(
+        "--template-source",
+        choices=TEMPLATE_SOURCE_MODES,
+        default="auto",
+        help=(
+            "Where dynamic Kickstart choices come from. auto scans host-visible paths "
+            "and also uses a running pxe-content container when one is detected; "
+            "host disables container discovery; container requires a running container. "
+            "Default: auto."
+        ),
+    )
+    kickstart.add_argument(
+        "--pxe-content-container",
+        default=None,
+        metavar="NAME_OR_ID",
+        help=(
+            "Specific running pxe-content container name or id to inspect for "
+            "dynamic guided choices. Default: auto-detect a running pxe-content container."
+        ),
+    )
+    kickstart.add_argument(
+        "--container-engine",
+        choices=CONTAINER_ENGINE_CHOICES,
+        default="auto",
+        help="Container engine for live pxe-content discovery. Default: auto.",
+    )
+    kickstart.add_argument(
+        "--container-template-root",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "Container-side template/profile directory to copy from the running "
+            "pxe-content container for dynamic choices. Can be repeated. "
+            "Defaults to /templates, /profiles, and /overrides/templates."
+        ),
+    )
+    kickstart.add_argument(
+        "--template-option",
+        default=None,
+        metavar="TEMPLATE",
+        help=(
+            "Use one discovered Kickstart template id from --list-kickstart-options. "
+            "This is a checked/validated alias for --kickstart-template."
+        ),
+    )
+    kickstart.add_argument(
+        "--partial",
+        action="append",
+        default=[],
+        metavar="TEMPLATE",
+        help=(
+            "Compose a new override template from a discovered partial/template id. "
+            "Can be repeated or comma-separated. Defaults output to ks/<profile>.ks.j2."
+        ),
+    )
+    kickstart.add_argument(
+        "--from-profile",
+        default="minimal",
+        metavar="PROFILE",
+        help=(
+            "Profile to clone when creating a new profile. "
+            "Default: minimal. Known standard profiles: {}.".format(
+                ", ".join(GUIDED_STANDARD_PROFILE_IDS)
+            )
+        ),
+    )
+    kickstart.add_argument(
+        "--reset-from-profile",
+        action="store_true",
+        help="Rebuild an existing generated profile from --from-profile before applying options.",
+    )
+    kickstart.add_argument(
+        "--title",
+        default=None,
+        help="PXE profile title/menu section, for example 'RHEL 9 Workstation Installs'.",
+    )
+    kickstart.add_argument(
+        "--label",
+        default=None,
+        help="Alias for --install-label.",
+    )
+    kickstart.add_argument(
+        "--install-label",
+        default=None,
+        help="Install label used for generated boot entries.",
+    )
+    kickstart.add_argument(
+        "--menu-target",
+        default=None,
+        help="iPXE menu target. Defaults to the profile id.",
+    )
+    kickstart.add_argument(
+        "--os",
+        action="append",
+        default=[],
+        metavar="OS",
+        help="Supported OS id. Can be repeated or comma-separated. Values: {}.".format(
+            ", ".join(STANDARD_OS_IDS)
+        ),
+    )
+    kickstart.add_argument(
+        "--kickstart-template",
+        default=None,
+        help=(
+            "Relative Kickstart template path consumed by pxe-content, such as "
+            "ks/workstation.ks.j2. If omitted, the cloned profile template is used."
+        ),
+    )
+    kickstart.add_argument(
+        "--copy-template",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Copy a local Kickstart template into /etc/aerolit/overrides/pxe/templates. "
+            "Use with --kickstart-template to control the relative destination."
+        ),
+    )
+    kickstart.add_argument(
+        "--kernel-arg",
+        action="append",
+        default=[],
+        metavar="ARG",
+        help=(
+            "Append one kernel argument. Can be repeated or comma-separated. "
+            "Generated args like inst.ks= and inst.repo= are refused."
+        ),
+    )
+    kickstart.add_argument(
+        "--set-kernel-args",
+        action="append",
+        default=[],
+        metavar="ARGS",
+        help="Replace kernel args with this comma-separated list.",
+    )
+    kickstart.add_argument(
+        "--clear-kernel-args",
+        action="store_true",
+        help="Write an empty kernel_args list before appending any --kernel-arg values.",
+    )
+
+    kickstart.set_defaults(uefi=None, bios=None)
+    kickstart.add_argument(
+        "--uefi",
+        dest="uefi",
+        action="store_true",
+        help="Enable UEFI boot entries for this profile.",
+    )
+    kickstart.add_argument(
+        "--no-uefi",
+        dest="uefi",
+        action="store_false",
+        help="Disable UEFI boot entries for this profile.",
+    )
+    kickstart.add_argument(
+        "--bios",
+        dest="bios",
+        action="store_true",
+        help="Enable legacy BIOS boot entries for this profile.",
+    )
+    kickstart.add_argument(
+        "--no-bios",
+        dest="bios",
+        action="store_false",
+        help="Disable legacy BIOS boot entries for this profile.",
+    )
+
+    kickstart.add_argument(
+        "--implemented",
+        action="store_true",
+        help="Mark the profile implemented so real boot targets/kickstarts are generated.",
+    )
+    kickstart.add_argument(
+        "--placeholder",
+        action="store_true",
+        help="Mark the profile as a visible/non-bootable placeholder.",
+    )
+    kickstart.add_argument(
+        "--enabled",
+        action="store_true",
+        help="Show the profile in the generated main PXE menu.",
+    )
+    kickstart.add_argument(
+        "--disabled",
+        action="store_true",
+        help="Hide the profile from the generated main PXE menu.",
+    )
+    kickstart.add_argument(
+        "--show-in-main-menu",
+        action="store_true",
+        help="Alias-style explicit request to show the profile in the main menu.",
+    )
+    kickstart.add_argument(
+        "--hide-from-main-menu",
+        action="store_true",
+        help="Hide the profile from the generated main PXE menu.",
+    )
+    kickstart.add_argument(
+        "--no-refresh-generated-vars",
+        action="store_true",
+        help="Do not refresh group_vars/all/aerolitctl_pxe_generated.yml.",
+    )
+    kickstart.add_argument(
+        "--validate",
+        action="store_true",
+        help="Validate managed PXE state after the generate action.",
+    )
+    kickstart.add_argument(
+        "--bundle-path",
+        default=None,
+        help="Bundle path. Defaults to configured bundle path or /opt/aerolit/aerolit-bundle.",
+    )
+    kickstart.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow replacement of existing non-aerolitctl-managed output files.",
+    )
+    kickstart.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not create timestamped backups before changing files.",
+    )
+    kickstart.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview generated output without writing files.",
+    )
+    kickstart.set_defaults(func=run_generate, generate_command="kickstart")
+
+    return parser
+
+
+if __name__ == "__main__":  # pragma: no cover
+    root = argparse.ArgumentParser(prog="aerolitctl")
+    subs = root.add_subparsers(dest="command")
+    add_generate_parser(subs)
+    parsed = root.parse_args()
+
+    if not hasattr(parsed, "func"):
+        root.print_help()
+        sys.exit(2)
+
+    sys.exit(parsed.func(parsed))
