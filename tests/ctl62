@@ -1648,6 +1648,7 @@ def build_parser():
     subparsers = parser.add_subparsers(
         dest="command",
         metavar="<command>",
+        parser_class=argparse.ArgumentParser,
     )
 
     version_parser = subparsers.add_parser(
