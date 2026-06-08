@@ -1,0 +1,465 @@
+#!/usr/bin/env python3
+"""Dump the aerolitctl argparse command/option surface.
+
+This script imports the real aerolitctl parser and prints the actual CLI
+commands, subcommands, positionals, options, choices, and rough completion
+hints.
+
+It is meant to support bash completion maintenance.
+
+Examples:
+  python3 tools/dump_cli_parser.py
+  python3 tools/dump_cli_parser.py --format text
+  python3 tools/dump_cli_parser.py --format json
+  python3 tools/dump_cli_parser.py --format json > /tmp/aerolitctl-cli-surface.json
+"""
+
+from __future__ import print_function
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+PROGRAM_NAME = "aerolitctl"
+
+
+DIRECTORY_OPTION_NAMES = (
+    "--bundle",
+    "--bundle-path",
+    "--path-for-ansible",
+    "--target-mount-path",
+    "--nfs-export-path",
+    "--log-dir",
+    "--output-dir",
+)
+
+FILE_OPTION_NAMES = (
+    "--output",
+    "-o",
+    "--plan-output",
+    "--server-bootstrap-repo-file",
+    "--ssh-key",
+    "--private-key",
+    "-i",
+    "--inventory",
+    "--inventory-file",
+    "--to",
+    "--path",
+)
+
+PATH_OR_URL_OPTION_NAMES = (
+    "--server-baseos-source",
+    "--server-appstream-source",
+    "--provision-repo",
+    "--provision-extra-repo",
+)
+
+
+def add_repo_src_to_path():
+    """Add repo src/ to sys.path so this script works from the source tree."""
+    script_path = Path(__file__).resolve()
+    repo_root = script_path.parents[1]
+    src_dir = repo_root / "src"
+
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+
+
+def is_subparsers_action(action):
+    """Return True if an argparse action is a subparsers action."""
+    return isinstance(action, argparse._SubParsersAction)
+
+
+def is_no_value_option(action):
+    """Return True if an argparse option does not take a value."""
+    if not getattr(action, "option_strings", None):
+        return False
+
+    if getattr(action, "nargs", None) == 0:
+        return True
+
+    no_value_action_types = (
+        argparse._StoreTrueAction,
+        argparse._StoreFalseAction,
+        argparse._StoreConstAction,
+        argparse._AppendConstAction,
+        argparse._CountAction,
+        argparse._HelpAction,
+        argparse._VersionAction,
+    )
+
+    return isinstance(action, no_value_action_types)
+
+
+def action_takes_value(action):
+    """Return True if an argparse option action expects a value."""
+    if not getattr(action, "option_strings", None):
+        return False
+
+    return not is_no_value_option(action)
+
+
+def action_kind(action):
+    """Return a simple kind for an argparse action."""
+    if is_subparsers_action(action):
+        return "subparsers"
+
+    if not getattr(action, "option_strings", None):
+        return "positional"
+
+    if action_takes_value(action):
+        return "option_value"
+
+    return "flag"
+
+
+def normalize_choices(choices):
+    """Return argparse choices as a list of strings, or None."""
+    if choices is None:
+        return None
+
+    try:
+        return [str(item) for item in choices]
+    except TypeError:
+        return [str(choices)]
+
+
+def action_class_name(action):
+    """Return the argparse action class name."""
+    return action.__class__.__name__
+
+
+def option_strings(action):
+    """Return option strings for an action."""
+    return list(getattr(action, "option_strings", []) or [])
+
+
+def option_matches(action, names):
+    """Return True if the action has one of the given option strings."""
+    action_options = set(option_strings(action))
+    return bool(action_options.intersection(set(names)))
+
+
+def infer_completion_type(action):
+    """Infer a rough completion type from argparse metadata.
+
+    This is a helper hint, not a perfect source of truth.
+
+    The bash completion file or a generated completion script should still use
+    an explicit map for known path/file/path-or-url options.
+    """
+    if getattr(action, "choices", None):
+        return "choice"
+
+    if not action_takes_value(action):
+        return "none"
+
+    if option_matches(action, PATH_OR_URL_OPTION_NAMES):
+        return "path_or_url"
+
+    if option_matches(action, DIRECTORY_OPTION_NAMES):
+        return "directory"
+
+    if option_matches(action, FILE_OPTION_NAMES):
+        return "file"
+
+    names = " ".join(option_strings(action))
+    dest = getattr(action, "dest", "") or ""
+    metavar = getattr(action, "metavar", "") or ""
+    help_text = getattr(action, "help", "") or ""
+
+    combined = " ".join(
+        [
+            str(names).lower(),
+            str(dest).lower(),
+            str(metavar).lower(),
+            str(help_text).lower(),
+        ]
+    )
+
+    if "path_or_url" in combined or "path or url" in combined:
+        return "path_or_url"
+
+    if "url" in combined or "http://" in combined or "https://" in combined or "file://" in combined:
+        return "path_or_url"
+
+    if "output file" in combined:
+        return "file"
+
+    if "file" in combined or "yaml" in combined or "yml" in combined:
+        return "file"
+
+    if "directory" in combined or "output dir" in combined or "log directory" in combined:
+        return "directory"
+
+    if "bundle path" in combined or "mount path" in combined or "export path" in combined:
+        return "directory"
+
+    return "value"
+
+
+def value_count(action):
+    """Return a readable value count for an argparse action."""
+    if not action_takes_value(action):
+        return "0"
+
+    nargs = getattr(action, "nargs", None)
+
+    if nargs is None:
+        return "1"
+
+    return str(nargs)
+
+
+def serialize_action(action):
+    """Serialize one argparse action."""
+    return {
+        "kind": action_kind(action),
+        "action_class": action_class_name(action),
+        "option_strings": option_strings(action),
+        "dest": getattr(action, "dest", None),
+        "metavar": str(getattr(action, "metavar", "") or ""),
+        "nargs": str(getattr(action, "nargs", "") or ""),
+        "value_count": value_count(action),
+        "required": bool(getattr(action, "required", False)),
+        "choices": normalize_choices(getattr(action, "choices", None)),
+        "takes_value": action_takes_value(action),
+        "completion_type_guess": infer_completion_type(action),
+        "help": getattr(action, "help", "") or "",
+    }
+
+
+def find_subparsers_action(parser):
+    """Return the parser's subparsers action, if present."""
+    for action in parser._actions:
+        if is_subparsers_action(action):
+            return action
+
+    return None
+
+
+def parser_command_name(path_parts):
+    """Return a shell-style command name."""
+    return " ".join(path_parts)
+
+
+def walk_parser(parser, path_parts):
+    """Walk parser recursively and return command metadata."""
+    subparsers_action = find_subparsers_action(parser)
+
+    option_actions = []
+    positional_actions = []
+
+    for action in parser._actions:
+        if is_subparsers_action(action):
+            continue
+
+        if getattr(action, "option_strings", None):
+            option_actions.append(serialize_action(action))
+        else:
+            positional_actions.append(serialize_action(action))
+
+    command_info = {
+        "command": parser_command_name(path_parts),
+        "path": list(path_parts),
+        "depth": len(path_parts) - 1,
+        "options": option_actions,
+        "positionals": positional_actions,
+        "subcommands": [],
+    }
+
+    commands = [command_info]
+
+    if subparsers_action is not None:
+        for subcommand_name in sorted(subparsers_action.choices.keys()):
+            child_parser = subparsers_action.choices[subcommand_name]
+            command_info["subcommands"].append(subcommand_name)
+            commands.extend(walk_parser(child_parser, path_parts + [subcommand_name]))
+
+    return commands
+
+
+def build_indexes(commands):
+    """Build useful lookup indexes from command metadata."""
+    command_names = []
+    options_by_command = {}
+    subcommands_by_command = {}
+    positionals_by_command = {}
+    all_option_strings = {}
+    value_options = {}
+
+    for command in commands:
+        command_name = command["command"]
+        command_names.append(command_name)
+
+        subcommands_by_command[command_name] = list(command["subcommands"])
+
+        options_by_command[command_name] = []
+        value_options[command_name] = []
+        positionals_by_command[command_name] = []
+
+        for positional in command["positionals"]:
+            positionals_by_command[command_name].append(
+                {
+                    "dest": positional["dest"],
+                    "metavar": positional["metavar"],
+                    "nargs": positional["nargs"],
+                    "completion_type_guess": positional["completion_type_guess"],
+                }
+            )
+
+        for option in command["options"]:
+            option_summary = {
+                "option_strings": list(option["option_strings"]),
+                "takes_value": option["takes_value"],
+                "choices": option["choices"],
+                "completion_type_guess": option["completion_type_guess"],
+            }
+
+            options_by_command[command_name].append(option_summary)
+
+            if option["takes_value"]:
+                value_options[command_name].append(option_summary)
+
+            for option_string in option["option_strings"]:
+                all_option_strings.setdefault(option_string, [])
+                all_option_strings[option_string].append(command_name)
+
+    return {
+        "command_names": command_names,
+        "subcommands_by_command": subcommands_by_command,
+        "options_by_command": options_by_command,
+        "positionals_by_command": positionals_by_command,
+        "value_options_by_command": value_options,
+        "all_option_strings": all_option_strings,
+    }
+
+
+def load_commands():
+    """Import aerolitctl.cli and return serialized parser metadata."""
+    add_repo_src_to_path()
+
+    from aerolitctl.cli import build_parser
+
+    parser = build_parser()
+    commands = walk_parser(parser, [PROGRAM_NAME])
+    indexes = build_indexes(commands)
+
+    return {
+        "program": PROGRAM_NAME,
+        "command_count": len(commands),
+        "commands": commands,
+        "indexes": indexes,
+    }
+
+
+def print_text_report(data):
+    """Print a human-readable report."""
+    print("Program: {}".format(data["program"]))
+    print("Command count: {}".format(data["command_count"]))
+    print("")
+
+    for command in data["commands"]:
+        print(command["command"])
+
+        if command["subcommands"]:
+            print("  subcommands:")
+            for subcommand in command["subcommands"]:
+                print("    {}".format(subcommand))
+
+        if command["positionals"]:
+            print("  positionals:")
+            for action in command["positionals"]:
+                line = "    {}".format(action["dest"])
+
+                if action["metavar"]:
+                    line += " metavar={}".format(action["metavar"])
+
+                if action["nargs"]:
+                    line += " nargs={}".format(action["nargs"])
+
+                line += " completion={}".format(action["completion_type_guess"])
+
+                print(line)
+
+        if command["options"]:
+            print("  options:")
+            for action in command["options"]:
+                names = ", ".join(action["option_strings"])
+
+                if action["takes_value"]:
+                    names += " VALUE"
+
+                line = "    {}".format(names)
+
+                if action["choices"]:
+                    line += " choices={}".format(",".join(action["choices"]))
+
+                line += " completion={}".format(action["completion_type_guess"])
+
+                print(line)
+
+        print("")
+
+
+def print_summary_report(data):
+    """Print a compact summary report."""
+    indexes = data["indexes"]
+
+    print("Program: {}".format(data["program"]))
+    print("Command count: {}".format(data["command_count"]))
+    print("")
+
+    print("Commands:")
+    for command_name in indexes["command_names"]:
+        print("  {}".format(command_name))
+
+    print("")
+    print("Top-level subcommands:")
+    for subcommand in indexes["subcommands_by_command"].get(PROGRAM_NAME, []):
+        print("  {}".format(subcommand))
+
+    print("")
+    print("Options by command:")
+    for command_name in indexes["command_names"]:
+        options = indexes["options_by_command"].get(command_name, [])
+        if not options:
+            continue
+
+        print("  {}:".format(command_name))
+        for option in options:
+            print("    {}".format(", ".join(option["option_strings"])))
+
+
+def main(argv=None):
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description="Dump aerolitctl argparse command/option metadata.",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("text", "summary", "json"),
+        default="text",
+        help="Output format. Default: text.",
+    )
+
+    args = parser.parse_args(argv)
+
+    data = load_commands()
+
+    if args.format == "json":
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
+
+    if args.format == "summary":
+        print_summary_report(data)
+        return 0
+
+    print_text_report(data)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
