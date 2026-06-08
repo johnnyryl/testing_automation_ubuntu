@@ -1,0 +1,345 @@
+# bash completion for aerolitctl
+
+_aerolitctl_complete_dirs()
+{
+    COMPREPLY=( $(compgen -d -- "${cur}") )
+}
+
+_aerolitctl_complete_files()
+{
+    COMPREPLY=( $(compgen -f -- "${cur}") )
+}
+
+_aerolitctl_complete_yaml_files()
+{
+    COMPREPLY=( $(compgen -f -X '!*.@(yml|yaml)' -- "${cur}") )
+}
+
+_aerolitctl_complete_path_or_url()
+{
+    # For path-or-URL values, complete local files/directories.
+    # Users can still manually type file://, http://, or https:// URLs.
+    COMPREPLY=( $(compgen -f -- "${cur}") )
+}
+
+_aerolitctl()
+{
+    local cur prev first second
+    COMPREPLY=()
+
+    if declare -F _init_completion >/dev/null 2>&1; then
+        _init_completion -n : || return
+    else
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        prev="${COMP_WORDS[COMP_CWORD-1]}"
+    fi
+
+    first="${COMP_WORDS[1]}"
+    second="${COMP_WORDS[2]}"
+
+    local top_commands
+    top_commands="backup bundle configure deploy doctor generate logs path provision settings shell status sync version"
+
+    # Complete values for options that expect directories, files, choices, or URLs.
+    case "${prev}" in
+        --bundle|--bundle-path|--path-for-ansible|--target-mount-path|--nfs-export-path|--log-dir|--output-dir|--template-root|--collection-root)
+            _aerolitctl_complete_dirs
+            return 0
+            ;;
+
+        --path)
+            if [[ "${first}" == "bundle" ]]; then
+                _aerolitctl_complete_dirs
+            else
+                _aerolitctl_complete_files
+            fi
+            return 0
+            ;;
+
+        --output|-o)
+            if [[ "${first}" == "sync" ]]; then
+                COMPREPLY=( $(compgen -W "text json yaml" -- "${cur}") )
+            else
+                _aerolitctl_complete_files
+            fi
+            return 0
+            ;;
+
+        --plan-output|--server-bootstrap-repo-file|--ssh-key|--private-key|--to|--nfs-exports-file|--set-profile-template|--kickstart-template|--copy-template)
+            _aerolitctl_complete_files
+            return 0
+            ;;
+
+        -i|--inventory|--inventory-file)
+            _aerolitctl_complete_files
+            return 0
+            ;;
+
+        --server-baseos-source|--server-appstream-source|--provision-repo|--provision-extra-repo)
+            _aerolitctl_complete_path_or_url
+            return 0
+            ;;
+
+        --mode)
+            COMPREPLY=( $(compgen -W "full pxe controller" -- "${cur}") )
+            return 0
+            ;;
+
+        --section)
+            COMPREPLY=( $(compgen -W "all collections-hub files repos extracted_isos extracted-isos" -- "${cur}") )
+            return 0
+            ;;
+
+        --files-mode|--repo-mode)
+            COMPREPLY=( $(compgen -W "additive mirror" -- "${cur}") )
+            return 0
+            ;;
+
+        --rhel-major)
+            COMPREPLY=( $(compgen -W "7 8 9 10 11" -- "${cur}") )
+            return 0
+            ;;
+
+        --template-source)
+            COMPREPLY=( $(compgen -W "auto host container" -- "${cur}") )
+            return 0
+            ;;
+
+        --container-engine)
+            COMPREPLY=( $(compgen -W "auto podman docker" -- "${cur}") )
+            return 0
+            ;;
+
+        --generated-ks-edit-policy)
+            COMPREPLY=( $(compgen -W "preserve overwrite" -- "${cur}") )
+            return 0
+            ;;
+
+        --validation-failure-policy)
+            COMPREPLY=( $(compgen -W "warn fail" -- "${cur}") )
+            return 0
+            ;;
+
+        --connection)
+            COMPREPLY=( $(compgen -W "ssh local paramiko docker podman" -- "${cur}") )
+            return 0
+            ;;
+
+        --gateway)
+            COMPREPLY=( $(compgen -W "none" -- "${cur}") )
+            return 0
+            ;;
+
+        --os)
+            COMPREPLY=( $(compgen -W "rhel10 rhel9 rhel8 rhel7" -- "${cur}") )
+            return 0
+            ;;
+
+        --container-template-root|--template-option|--partial|--from-profile|--title|--label|--install-label|--menu-target|--pxe-content-container)
+            COMPREPLY=()
+            return 0
+            ;;
+
+        --role|--role-order|--hosts|--var)
+            COMPREPLY=()
+            return 0
+            ;;
+
+        --enable-profile|--disable-profile|--remove-profile|--implement-profile|--placeholder-profile|--profile-uefi|--no-profile-uefi|--profile-bios|--no-profile-bios)
+            COMPREPLY=()
+            return 0
+            ;;
+
+        --set-profile-title|--set-profile-label|--set-profile-menu-target|--set-profile-os|--set-profile-kernel-args)
+            COMPREPLY=()
+            return 0
+            ;;
+
+        --set-kernel-args|--kernel-arg)
+            COMPREPLY=()
+            return 0
+            ;;
+
+        --set-global-var|--remove-global-var|--set-group-var|--remove-group-var)
+            COMPREPLY=()
+            return 0
+            ;;
+
+        --mount-mode|--mount-owner|--mount-group)
+            COMPREPLY=()
+            return 0
+            ;;
+    esac
+
+    # Complete top-level commands.
+    if [[ "${COMP_CWORD}" -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "${top_commands} --verbose -h --help" -- "${cur}") )
+        return 0
+    fi
+
+    case "${first}" in
+        backup)
+            if [[ "${COMP_CWORD}" -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "config -h --help" -- "${cur}") )
+            elif [[ "${second}" == "config" ]]; then
+                COMPREPLY=( $(compgen -W "--output-dir --dry-run --list-files --include-rendered --no-state --no-bundle-generated --verbose -h --help" -- "${cur}") )
+            else
+                COMPREPLY=( $(compgen -W "-h --help" -- "${cur}") )
+            fi
+            return 0
+            ;;
+
+        bundle)
+            if [[ "${COMP_CWORD}" -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "show validate -h --help" -- "${cur}") )
+            else
+                COMPREPLY=( $(compgen -W "--path --verbose -h --help" -- "${cur}") )
+            fi
+            return 0
+            ;;
+
+        configure)
+            if [[ "${COMP_CWORD}" -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "all ansible init pxe repos server -h --help" -- "${cur}") )
+                return 0
+            fi
+
+            case "${second}" in
+                all)
+                    COMPREPLY=( $(compgen -W "--guided --dry-run --show --validate --non-interactive --bundle --mode --path-for-ansible --write-server-bootstrap --skip-init --skip-server --skip-repos --skip-ansible --skip-pxe --force --no-backup --continue-on-error --verbose -h --help" -- "${cur}") )
+                    ;;
+
+                ansible)
+                    COMPREPLY=( $(compgen -W "--bundle-path --show --guided --dry-run --validate --ansible-inventory-check --force --no-backup --ensure-standard-groups --local-controller --add-group --remove-group --add-child-group --remove-child-group --add-kubernetes-cluster --add-kubernetes-server --add-kubernetes-agent --add-host --remove-host --remove-host-from-group --group --ansible-host --ip --ansible-user --ansible-port --ssh-key --private-key --connection --python-interpreter --become --no-become --host-var --set-host-var --remove-host-var --set-global-var --remove-global-var --set-group-var --remove-group-var --allow-sensitive-vars --add-host-range --range-start --range-end --host-number-width --ip-start --verbose -h --help" -- "${cur}") )
+                    ;;
+
+                init)
+                    COMPREPLY=( $(compgen -W "--bundle --force --dry-run --non-interactive --no-backup --skip-preserve-file --skip-ci-file --skip-ansible-files --verbose -h --help" -- "${cur}") )
+                    ;;
+
+                pxe)
+                    COMPREPLY=( $(compgen -W "--bundle-path --show --guided --dry-run --validate --force --no-backup --enable-profile --disable-profile --remove-profile --implement-profile --placeholder-profile --set-profile-title --set-profile-label --set-profile-menu-target --set-profile-template --set-profile-os --set-profile-kernel-args --profile-uefi --no-profile-uefi --profile-bios --no-profile-bios --watch-interval --generated-ks-edit-policy --validation-failure-policy --reset-standard-profiles --verbose -h --help" -- "${cur}") )
+                    ;;
+
+                repos)
+                    COMPREPLY=( $(compgen -W "--bundle-path --path-for-ansible --guided --show --validate --refresh --dry-run --write-server-bootstrap --server-bootstrap-repo-file --ensure-server-prereqs --server-prereq-package --server-bootstrap-only --force --no-backup --server-baseos-source --server-appstream-source --provision-repo --provision-extra-repo --no-auto-discovery --disable-auto-discovery --verbose -h --help" -- "${cur}") )
+                    ;;
+
+                server)
+                    COMPREPLY=( $(compgen -W "--guided --show --dry-run --mode --interface --server-ip --network --prefix --gateway --dns --dhcp-start --dhcp-end --pxe-http-port --pxe-http-bind-address --configure-interface --no-configure-interface --nfs-enabled --no-nfs --nfs-export-path --nfs-allow-clients --nfs-allowed-clients --nfs-allow-all-clients --no-nfs-allow-all-clients --nfs-create-export-path --no-nfs-create-export-path --nfs-exports-file --target-mount-path --mount-mode --mount-owner --mount-group --firewall-manage --no-firewall-manage --verbose -h --help" -- "${cur}") )
+                    ;;
+
+                *)
+                    COMPREPLY=( $(compgen -W "-h --help" -- "${cur}") )
+                    ;;
+            esac
+            return 0
+            ;;
+
+        deploy)
+            if [[ "${COMP_CWORD}" -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "server -h --help" -- "${cur}") )
+            elif [[ "${second}" == "server" ]]; then
+                COMPREPLY=( $(compgen -W "--dry-run --show --skip-interface --skip-nfs --skip-firewall --skip-pxe --skip-controller --skip-repo-prep --skip-server-prereqs --skip-repo-vars-refresh --server-bootstrap-only --verbose -h --help" -- "${cur}") )
+            else
+                COMPREPLY=( $(compgen -W "-h --help" -- "${cur}") )
+            fi
+            return 0
+            ;;
+
+        doctor|status|version)
+            COMPREPLY=( $(compgen -W "--verbose -h --help" -- "${cur}") )
+            return 0
+            ;;
+
+        generate)
+            if [[ "${COMP_CWORD}" -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "kickstart playbook pxe-profile -h --help" -- "${cur}") )
+                return 0
+            fi
+
+            case "${second}" in
+                kickstart|pxe-profile)
+                    COMPREPLY=( $(compgen -W "--guided --guided-show-details --list-kickstart-options --template-root --template-source --pxe-content-container --container-engine --container-template-root --template-option --partial --from-profile --reset-from-profile --title --label --install-label --menu-target --os --kickstart-template --copy-template --kernel-arg --set-kernel-args --clear-kernel-args --uefi --no-uefi --bios --no-bios --implemented --placeholder --enabled --disabled --show-in-main-menu --hide-from-main-menu --no-refresh-generated-vars --validate --bundle-path --force --no-backup --dry-run -h --help" -- "${cur}") )
+                    ;;
+
+                playbook)
+                    COMPREPLY=( $(compgen -W "--guided --guided-show-role-details --list-playbook-roles --collection-root --role --role-order --skip-role-order-review --hosts --title --var --output --bundle-path --no-become --no-gather-facts --force --no-backup --dry-run -h --help" -- "${cur}") )
+                    ;;
+
+                *)
+                    COMPREPLY=( $(compgen -W "-h --help" -- "${cur}") )
+                    ;;
+            esac
+            return 0
+            ;;
+
+        logs)
+            COMPREPLY=( $(compgen -W "--list --limit --tail --follow --dir --path --log-dir --pattern --verbose -h --help" -- "${cur}") )
+            return 0
+            ;;
+
+        path)
+            if [[ "${COMP_CWORD}" -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "show set -h --help" -- "${cur}") )
+            elif [[ "${second}" == "set" ]]; then
+                _aerolitctl_complete_dirs
+            else
+                COMPREPLY=( $(compgen -W "--no-backup --verbose -h --help" -- "${cur}") )
+            fi
+            return 0
+            ;;
+
+        provision)
+            if [[ "${COMP_CWORD}" -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "list check --install-ansible-core --verbose -h --help" -- "${cur}") $(compgen -f -- "${cur}") )
+            else
+                COMPREPLY=( $(compgen -W "-i --inventory --inventory-file --limit --check --diff --tags --skip-tags --extra-vars -h --help" -- "${cur}") )
+            fi
+            return 0
+            ;;
+
+        settings)
+            if [[ "${COMP_CWORD}" -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "show export import -h --help" -- "${cur}") )
+            elif [[ "${second}" == "import" && "${COMP_CWORD}" -eq 3 ]]; then
+                _aerolitctl_complete_yaml_files
+            else
+                case "${second}" in
+                    show)
+                        COMPREPLY=( $(compgen -W "--no-redact --verbose -h --help" -- "${cur}") )
+                        ;;
+                    export)
+                        COMPREPLY=( $(compgen -W "--output -o --force --redact --verbose -h --help" -- "${cur}") )
+                        ;;
+                    import)
+                        COMPREPLY=( $(compgen -W "--dry-run --merge --no-backup --no-redact-diff --verbose -h --help" -- "${cur}") )
+                        ;;
+                    *)
+                        COMPREPLY=( $(compgen -W "-h --help" -- "${cur}") )
+                        ;;
+                esac
+            fi
+            return 0
+            ;;
+
+        shell)
+            if [[ "${COMP_CWORD}" -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "info completion -h --help" -- "${cur}") )
+            else
+                COMPREPLY=( $(compgen -W "-h --help" -- "${cur}") )
+            fi
+            return 0
+            ;;
+
+        sync)
+            COMPREPLY=( $(compgen -W "status diff rollback cleanup preserve --bundle-path --section --files-mode --repo-mode --rhel-major --keep-old-isos --large-backup --restart-affected --to --keep --days --dry-run --yes -y --force --show-files --show-all-files --show-skipped --diff-lines --path --output --plan-output --no-backup --review --review-conflicts --review-removals --defaults --all --verbose -h --help" -- "${cur}") )
+            return 0
+            ;;
+    esac
+
+    COMPREPLY=( $(compgen -W "-h --help" -- "${cur}") )
+    return 0
+}
+
+complete -o default -o bashdefault -F _aerolitctl aerolitctl
