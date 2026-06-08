@@ -27,6 +27,7 @@ from .command_log import (
 )
 from .sync import run_sync
 from .shell import add_shell_parser
+from .generate import add_generate_parser
 
 
 def cmd_version(args):
@@ -1563,6 +1564,7 @@ def build_parser():
     add_settings_parser(subparsers)
     add_sync_parser(subparsers)
     add_shell_parser(subparsers)
+    add_generate_parser(subparsers)
 
     configure_parser = subparsers.add_parser(
         "configure",
