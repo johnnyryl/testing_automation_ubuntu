@@ -1,0 +1,160 @@
+"""Shell integration helpers for aerolitctl.
+
+This module does not deploy anything.
+It only helps with terminal/shell quality-of-life features:
+- shell info
+- bash completion status/help
+"""
+
+from __future__ import print_function
+
+import os
+from pathlib import Path
+
+
+COMMAND_NAME = "aerolitctl"
+
+BASH_COMPLETION_SYSTEM_PATH = "/usr/share/bash-completion/completions/aerolitctl"
+BASH_COMPLETION_DEV_PATH = "completions/aerolitctl.bash"
+
+
+def detect_shell():
+    """Return the user's shell name, such as bash, zsh, fish, or unknown."""
+    shell_path = os.environ.get("SHELL", "")
+    shell_name = os.path.basename(shell_path)
+
+    if shell_name:
+        return shell_name
+
+    return "unknown"
+
+
+def shell_rc_file(shell_name=None):
+    """Return the common rc file for a shell."""
+    if shell_name is None:
+        shell_name = detect_shell()
+
+    home = str(Path.home())
+
+    if shell_name == "bash":
+        return os.path.join(home, ".bashrc")
+
+    if shell_name == "zsh":
+        return os.path.join(home, ".zshrc")
+
+    if shell_name == "fish":
+        return os.path.join(home, ".config", "fish", "config.fish")
+
+    return "unknown"
+
+
+def bash_completion_installed():
+    """Return True if the system bash completion file is installed."""
+    return os.path.exists(BASH_COMPLETION_SYSTEM_PATH)
+
+
+def print_shell_info():
+    """Print shell integration status."""
+    shell_name = detect_shell()
+    rc_file = shell_rc_file(shell_name)
+
+    print("AeroLIT shell integration")
+    print("")
+    print("Command: {}".format(COMMAND_NAME))
+    print("Detected shell: {}".format(shell_name))
+    print("Shell rc file: {}".format(rc_file))
+    print("")
+    print("Bash completion system path:")
+    print("  {}".format(BASH_COMPLETION_SYSTEM_PATH))
+
+    if bash_completion_installed():
+        print("Bash completion status: installed")
+    else:
+        print("Bash completion status: not installed at the system path")
+
+    print("")
+    print("Normal AeroLIT settings are stored in:")
+    print("  /etc/aerolit/aerolitctl.yml")
+    print("")
+    print("Set the AeroLIT bundle path with:")
+    print("  aerolitctl path set /path/to/aerolit-bundle")
+    print("")
+    print("Show the AeroLIT bundle path with:")
+    print("  aerolitctl path show")
+    print("")
+    print("After installing or updating completion, open a new terminal or run:")
+    print("  exec bash")
+    print("")
+    print("Then test with:")
+    print("  aerolitctl <TAB>")
+
+
+def print_completion_help():
+    """Print bash completion help."""
+    print("AeroLIT bash completion")
+    print("")
+    print("RPM-installed completion path:")
+    print("  {}".format(BASH_COMPLETION_SYSTEM_PATH))
+    print("")
+    print("Development/source-tree completion path:")
+    print("  {}".format(BASH_COMPLETION_DEV_PATH))
+    print("")
+
+    if bash_completion_installed():
+        print("Status: installed")
+    else:
+        print("Status: not installed at the system path")
+
+    print("")
+    print("For RPM users:")
+    print("  1. Install the aerolitctl RPM")
+    print("  2. Open a new terminal, or run: exec bash")
+    print("  3. Type: aerolitctl <TAB>")
+    print("")
+    print("For development testing from the repo:")
+    print("  source completions/aerolitctl.bash")
+    print("  aerolitctl <TAB>")
+
+
+def run_shell(args):
+    """Run aerolitctl shell subcommands."""
+    action = getattr(args, "shell_action", "info")
+
+    if action == "info":
+        print_shell_info()
+        return 0
+
+    if action == "completion":
+        print_completion_help()
+        return 0
+
+    print("Unknown shell action: {}".format(action))
+    return 2
+
+
+def add_shell_parser(subparsers):
+    """Register aerolitctl shell parser commands."""
+    shell_parser = subparsers.add_parser(
+        "shell",
+        help="Show shell integration helpers.",
+        description="Show shell integration helpers for aerolitctl.",
+    )
+
+    shell_parser.set_defaults(func=run_shell, shell_action="info")
+
+    shell_subparsers = shell_parser.add_subparsers(
+        dest="shell_action",
+        metavar="SHELL_COMMAND",
+    )
+
+    info_parser = shell_subparsers.add_parser(
+        "info",
+        help="Show shell integration status.",
+    )
+    info_parser.set_defaults(func=run_shell, shell_action="info")
+
+    completion_parser = shell_subparsers.add_parser(
+        "completion",
+        help="Show bash completion status and setup help.",
+    )
+    completion_parser.set_defaults(func=run_shell, shell_action="completion")
