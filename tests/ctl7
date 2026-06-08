@@ -1,37 +1,15 @@
-S C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto> Select-String -Path completions\aerolitctl.bash -Pattern "--add-child-group"
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto> Select-String -Path completions\aerolitctl.bash -Pattern "--bundle-path"
+Select-String -Path completions\aerolitctl.bash -Pattern "--add-child-group"
+Select-String -Path completions\aerolitctl.bash -Pattern "--bundle-path"
+Select-String -Path completions\aerolitctl.bash -Pattern "--generated-ks-edit-policy"
+py -3 tools\check_completion.py --root . --surface-json aerolitctl-cli-surface.json --output completion-check.txt
+py -3 tools\check_completion.py --root . --surface-json aerolitctl-cli-surface.json --output completion-check.txt
+py -3 tools\dump_cli_parser.py --format text > aerolitctl-cli-surface.txt
+py -3 tools\dump_cli_parser.py --format json > aerolitctl-cli-surface.json
+py -3 tools\check_completion.py --root . --surface-json aerolitctl-cli-surface.json --output completion-check.txt
+py -3 tools\dump_cli_parser.py --format json | Set-Content -Encoding utf8 aerolitctl-cli-surface.json
+py -3 tools\dump_cli_parser.py --format text | Set-Content -Encoding utf8 aerolitctl-cli-surface.txt
+py -3 tools\check_completion.py --root . --surface-json aerolitctl-cli-surface.json --output completion-check.txt
 
-completions\aerolitctl.bash:49:                COMPREPLY=( $(compgen -W "--bundle --bundle-path --guided --show --dry-run --validate --force --no-backup --non-interactive --verbose -h --help" -- "${cur}") )
-completions\aerolitctl.bash:115:                COMPREPLY=( $(compgen -W "status diff rollback cleanup preserve --bundle-path --section --files-mode --repo-mode --rhel-major --dry-run --yes -y --force --review --review-conflicts --review-removals --show-files --show-all-files
---show-skipped --output --plan-output --no-backup --verbose -h --help" -- "${cur}") )
-completions\aerolitctl.bash:117:                COMPREPLY=( $(compgen -W "--bundle-path --section --files-mode --repo-mode --rhel-major --keep-old-isos --large-backup --restart-affected --to --keep --days --dry-run --yes -y --force --show-files --show-all-files --show-skipped
---diff-lines --path --output --plan-output --no-backup --review --review-conflicts --review-removals --defaults --all --verbose -h --help" -- "${cur}") )
-
-
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto> Select-String -Path completions\aerolitctl.bash -Pattern "--generated-ks-edit-policy"
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto> py -3 tools\check_completion.py --root . --surface-json aerolitctl-cli-surface.json --output completion-check.txt
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto>
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto>
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto>
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto>
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto>
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto>
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto>
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto>
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto>
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto>
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto> py -3 tools\check_completion.py --root . --surface-json aerolitctl-cli-surface.json --output completion-check.txt
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto> py -3 tools\dump_cli_parser.py --format text > aerolitctl-cli-surface.txt
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto> py -3 tools\dump_cli_parser.py --format json > aerolitctl-cli-surface.json
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto> py -3 tools\check_completion.py --root . --surface-json aerolitctl-cli-surface.json --output completion-check.txt
-ERROR: could not load aerolitctl parser surface: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte
-
-Try using a previously generated parser dump instead:
-  python3 tools/check_completion.py --root . --surface-json aerolitctl-cli-surface.json
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto> py -3 tools\dump_cli_parser.py --format json | Set-Content -Encoding utf8 aerolitctl-cli-surface.json
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto> py -3 tools\dump_cli_parser.py --format text | Set-Content -Encoding utf8 aerolitctl-cli-surface.txt
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto> py -3 tools\check_completion.py --root . --surface-json aerolitctl-cli-surface.json --output completion-check.txt
-PS C:\Users\david\OneDrive\Documents\GitHub\testing_demo_auto>
 
 
 
