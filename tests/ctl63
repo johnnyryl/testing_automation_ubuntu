@@ -3138,7 +3138,11 @@ def test_generate_help_and_parser(args):
     assert_contains(playbook_help, "--role", "generate playbook help")
     assert_contains(playbook_help, "--role-order", "generate playbook help")
     assert_contains(playbook_help, "--skip-role-order-review", "generate playbook help")
-    assert_contains(playbook_help, "Roles are written to the playbook in the order provided", "generate playbook help")
+    assert_regex(
+        playbook_help,
+        r"Roles are written to the playbook\s+in the order\s+provided",
+        "generate playbook help",
+    )
 
     kickstart_help = run_cmd(["aerolitctl", "generate", "kickstart", "--help"])
     assert_contains(kickstart_help, "--guided", "generate kickstart help")
