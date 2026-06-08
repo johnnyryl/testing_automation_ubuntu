@@ -7,6 +7,291 @@ SOURCE_TAR="$LAB/incoming-collections-hub.tar"
 MANIFEST="/var/lib/aerolit/sync/installed-manifest.yml"
 MANIFEST_SAVE="$LAB/installed-manifest.original.yml"
 
+restore_real_manifest() {
+    if [ -f "$MANIFEST_SAVE" ]; then
+        cp -a "$MANIFEST_SAVE" "$MANIFEST"
+        echo
+        echo "Restored original manifest:"
+        echo "  $MANIFEST"
+    else
+        echo
+        echo "No saved manifest found to restore."
+    fi
+}
+
+make_base_target() {
+    rm -rf "$TARGET" "$INCOMING" "$SOURCE_TAR"
+
+    mkdir -p "$TARGET/collections-hub/ansible"
+    mkdir -p "$TARGET/collections-hub/collections"
+
+    mkdir -p "$INCOMING/collections-hub/ansible"
+    mkdir -p "$INCOMING/collections-hub/collections"
+
+    cat > "$TARGET/collections-hub/README.md" <<'EOF'
+Target README
+EOF
+
+    cat > "$INCOMING/collections-hub/README.md" <<'EOF'
+Target README
+EOF
+}
+
+make_source_tar() {
+    rm -f "$SOURCE_TAR"
+    tar -C "$INCOMING" -cf "$SOURCE_TAR" collections-hub
+    ls -lh "$SOURCE_TAR"
+}
+
+echo
+echo "================================================================================"
+echo "START: restore real manifest from previous interrupted test"
+echo "================================================================================"
+
+restore_real_manifest
+
+echo
+echo "================================================================================"
+echo "TEST 36 retry: removal review preserve selected"
+echo "================================================================================"
+
+make_base_target
+
+cat > "$TARGET/collections-hub/ansible/aaa-preserve-selected.yml" <<'EOF'
+safe remove preserve selected file
+EOF
+
+cat > "$TARGET/collections-hub/ansible/zzz-remove-other.yml" <<'EOF'
+safe remove other file
+EOF
+
+make_source_tar
+
+aerolitctl sync baseline --bundle-path "$TARGET" --section collections-hub --yes
+
+printf 'p\n1\n' | aerolitctl sync "$SOURCE_TAR" --bundle-path "$TARGET" --section collections-hub --review-removals --yes
+
+test -f "$TARGET/collections-hub/ansible/aaa-preserve-selected.yml" \
+    && echo "OK: selected preserved removal stayed" \
+    || { echo "ERROR: selected preserved removal was removed"; restore_real_manifest; exit 1; }
+
+grep -q "ansible/aaa-preserve-selected.yml" "$TARGET/collections-hub/.sync-preserve" \
+    && echo "OK: selected removal was appended to .sync-preserve" \
+    || { echo "ERROR: selected removal was not appended to .sync-preserve"; restore_real_manifest; exit 1; }
+
+test ! -f "$TARGET/collections-hub/ansible/zzz-remove-other.yml" \
+    && echo "OK: non-selected removal was removed" \
+    || { echo "ERROR: non-selected removal still exists"; restore_real_manifest; exit 1; }
+
+echo
+echo "================================================================================"
+echo "TEST 37: removal review remove all and backup"
+echo "================================================================================"
+
+make_base_target
+
+cat > "$TARGET/collections-hub/ansible/remove-all.yml" <<'EOF'
+safe remove all file
+EOF
+
+make_source_tar
+
+aerolitctl sync baseline --bundle-path "$TARGET" --section collections-hub --yes
+
+printf 'r\n' | aerolitctl sync "$SOURCE_TAR" --bundle-path "$TARGET" --section collections-hub --review-removals --yes
+
+test ! -f "$TARGET/collections-hub/ansible/remove-all.yml" \
+    && echo "OK: remove all removed file" \
+    || { echo "ERROR: remove all did not remove file"; restore_real_manifest; exit 1; }
+
+latest_backup="$(ls -1dt /var/lib/aerolit/sync/backups/* | head -1)"
+echo "Latest backup:"
+echo "  $latest_backup"
+
+find "$latest_backup" -type f | grep -q "remove-all.yml" \
+    && echo "OK: safe removal was backed up" \
+    || { echo "ERROR: removed file was not found in backup"; restore_real_manifest; exit 1; }
+
+echo
+echo "================================================================================"
+echo "TEST 38: unsafe removal becomes conflict"
+echo "================================================================================"
+
+make_base_target
+
+cat > "$TARGET/collections-hub/ansible/remove-conflict.yml" <<'EOF'
+original conflict removal file
+EOF
+
+make_source_tar
+
+aerolitctl sync baseline --bundle-path "$TARGET" --section collections-hub --yes
+
+cat > "$TARGET/collections-hub/ansible/remove-conflict.yml" <<'EOF'
+local edited conflict removal file
+EOF
+
+aerolitctl sync "$SOURCE_TAR" --bundle-path "$TARGET" --section collections-hub --yes && {
+    echo "ERROR: unsafe removal unexpectedly succeeded"
+    restore_real_manifest
+    exit 1
+} || {
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+        echo "OK: unsafe removal became conflict and blocked sync"
+    else
+        echo "ERROR: expected return code 2 for unsafe removal conflict, got $rc"
+        restore_real_manifest
+        exit 1
+    fi
+}
+
+echo
+echo "================================================================================"
+echo "CLEANUP: restore real manifest"
+echo "================================================================================"
+
+restore_real_manifest
+
+echo
+echo "================================================================================"
+echo "FINAL STATUS"
+echo "================================================================================"
+
+aerolitctl sync status
+
+echo
+echo "================================================================================"
+echo "DONE: remaining removal tests completed"
+echo "================================================================================"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+set -u
+
+LAB="/tmp/aerolit-sync-interactive-lab"
+TARGET="$LAB/target-bundle"
+INCOMING="$LAB/incoming"
+SOURCE_TAR="$LAB/incoming-collections-hub.tar"
+MANIFEST="/var/lib/aerolit/sync/installed-manifest.yml"
+MANIFEST_SAVE="$LAB/installed-manifest.original.yml"
+
 echo
 echo "================================================================================"
 echo "SETUP: temporary interactive sync lab"
