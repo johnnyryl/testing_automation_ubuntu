@@ -1,3 +1,144 @@
+Yes — this job log tells us what the old Molecule setup was probably missing now.
+
+The failure is here:
+
+Podman not usable, switching to **docker** driver.
+CRITICAL Unable to contact the Docker daemon.
+
+That means the Molecule job container can start, but inside the job container it cannot reach a container engine. Your runner itself can talk to Podman, but the job container also needs the Podman socket mounted in and exposed as a Docker socket.
+
+So yes, this is likely one of the old config.toml tricks.
+
+Fix config.toml
+
+Stop the runner:
+
+systemctl --user stop gitlab-runner.service
+
+Back it up:
+
+cp ~/.config/gitlab-runner/config.toml ~/.config/gitlab-runner/config.toml.bak-before-molecule-socket
+
+Open it:
+
+vim ~/.config/gitlab-runner/config.toml
+
+In your remaining runner block:
+
+[[runners]]
+  name = "AeroLIT Molecule Runner"
+
+make sure the environment = [ list includes this line:
+
+    "DOCKER_HOST=unix:///run/docker.sock",
+
+So it should look roughly like:
+
+  environment = [
+    "https_proxy=http://proxy-zsgov.external.lmco.com:80",
+    "http_proxy=http://proxy-zsgov.external.lmco.com:80",
+    "HTTPS_PROXY=http://proxy-zsgov.external.lmco.com:80",
+    "HTTP_PROXY=http://proxy-zsgov.external.lmco.com:80",
+    "no_proxy=...",
+    "NO_PROXY=...",
+    "TF_LOG=TRACE",
+    "DOCKER_HOST=unix:///run/docker.sock",
+  ]
+
+Then under:
+
+  [runners.docker]
+
+change your volumes line from this:
+
+    volumes = ["/cache"]
+
+to this, using your actual UID path from the screenshot:
+
+    volumes = [
+      "/cache",
+      "/run/user/2271030/podman/podman.sock:/run/docker.sock:Z",
+      "/run/user/2271030/podman/podman.sock:/var/run/docker.sock:Z"
+    ]
+
+Also make sure this is still there:
+
+    host = "unix:///run/docker.sock"
+
+So the important part should look roughly like:
+
+  [runners.docker]
+    host = "unix:///run/docker.sock"
+    tls_verify = false
+    image = "harbor.global.lmco.com/ext.registry.gitlab.com/gitlab-org/gitlab-runner:latest"
+    memory = "4g"
+    cpus = "2"
+    privileged = false
+    volumes = [
+      "/cache",
+      "/run/user/2271030/podman/podman.sock:/run/docker.sock:Z",
+      "/run/user/2271030/podman/podman.sock:/var/run/docker.sock:Z"
+    ]
+    shm_size = 0
+
+The /var/run/docker.sock mount is just a compatibility safety net because some tools still assume the default Docker socket path.
+
+Restart and test
+
+systemctl --user start gitlab-runner.service
+
+Check status:
+
+systemctl --user status gitlab-runner.service --no-pager
+
+Verify the runner:
+
+podman exec -it gitlab-runner gitlab-runner verify
+
+Then rerun the Molecule job.
+
+What should change in the job log
+
+You should no longer see:
+
+CRITICAL Unable to contact the Docker daemon
+
+It may still say:
+
+Podman not usable, switching to docker driver
+
+That is okay as long as Docker works after that, because “Docker” here is really talking to the rootless Podman socket through Docker-compatible API.
+
+So the old magic was probably this:
+
+Runner container can reach Podman socket
+AND
+Molecule job containers can also reach that same socket
+AND
+DOCKER_HOST tells Molecule/Docker SDK where the socket is
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
