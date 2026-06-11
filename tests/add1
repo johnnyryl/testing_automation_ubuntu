@@ -1,4 +1,38 @@
 
+
+
+cat > ~/.config/containers/systemd/gitlab-runner.container <<'EOF'
+[Unit]
+Description=GitLab Runner managed by rootless Podman Quadlet
+Wants=podman.socket
+After=podman.socket
+
+[Container]
+ContainerName=gitlab-runner
+Image=harbor.global.lmco.com/ext.registry.gitlab.com/gitlab-org/gitlab-runner:latest
+Pull=newer
+AutoUpdate=registry
+
+Volume=%h/.config/gitlab-runner:/etc/gitlab-runner:Z
+Volume=%t/podman/podman.sock:/run/docker.sock:Z
+Volume=%h/.config/gitlab-runner/cert.pem:/etc/ssl/certs/cert.crt:Z
+
+Environment=DOCKER_HOST=unix:///run/docker.sock
+
+SecurityLabelDisable=true
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target
+EOF
+
+
+
+
 Yes — that install list is the right base list.
 
 I would add only one extra file because you already created it in the screenshots:
