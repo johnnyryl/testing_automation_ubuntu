@@ -1,3 +1,14 @@
+
+
+podman run --rm \
+  --security-opt label=disable \
+  -e DOCKER_HOST=unix:///var/run/docker.sock \
+  -v "/run/user/$(id -u)/podman/podman.sock:/var/run/docker.sock" \
+  registry.gitlab.us.lmco.com:443/lit/containers/images/ansible-molecule:latest \
+  bash -lc 'echo "DOCKER_HOST=$DOCKER_HOST"; ls -l /var/run/docker.sock; python3 -c "import docker; c=docker.from_env(); print(c.version())"'
+
+
+
 Yes — this job log tells us what the old Molecule setup was probably missing now.
 
 The failure is here:
