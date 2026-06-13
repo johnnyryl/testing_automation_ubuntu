@@ -1,3 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="${1:?Missing release version}"
+RELEASE_TAG="${2:-v${VERSION}}"
+
+VERSION="${VERSION#v}"
+
+echo "Syncing aerolitctl project files to version ${VERSION}"
+echo "Release tag: ${RELEASE_TAG}"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "ERROR: python3 is required to run tools/set_project_version.py"
+  exit 1
+fi
+
+if [ ! -f tools/set_project_version.py ]; then
+  echo "ERROR: tools/set_project_version.py was not found."
+  exit 1
+fi
+
+python3 tools/set_project_version.py "${VERSION}" --release 1 \
+  --changelog-author "AeroLIT Release Bot <aerolit-release-bot@example.com>"
+
+# Stage only files this hook is allowed to update.
+for path in \
+  setup.py \
+  pyproject.toml \
+  project.toml \
+  src/aerolitctl/__init__.py \
+  packaging/rpm/aerolitctl.spec \
+  man
+do
+  if [ -e "${path}" ]; then
+    echo "Staging ${path}"
+    git add "${path}"
+  fi
+done
+
+echo "Hook staged files:"
+git status --short
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #!/usr/bin/env python3
 """
 Update AeroLIT aerolitctl project version files for release builds.
