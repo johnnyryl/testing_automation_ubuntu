@@ -1,4 +1,109 @@
 
+stages:
+  - build
+
+variables:
+  PACKAGE_NAME: "aerolitctl"
+  RPM_RELEASE: "1"
+
+  # Set NEXUS_BASE_REPO_URL in GitLab CI/CD variables if the repo name differs.
+  # Example:
+  # https://nexus-ent.us.lmco.com/repository/<your-nexus-repo-name>
+  NEXUS_COMPONENT_PATH: "Aero.Linux-Integration-Team/offline_package/package_components/repos/aerolitctl"
+
+build_publish_aerolitctl_rpm:
+  stage: build
+  image: cdn.harbor-global.lmco.com/lmc.eo.swf.limited/ext.registry.access.redhat.com/ubi9:9.6
+
+  rules:
+    # Runs only on release tags like v0.1.1 or 0.1.1
+    - if: '$CI_COMMIT_TAG =~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/'
+      when: on_success
+    - when: never
+
+  before_script:
+    - dnf install -y rpmdevtools rpmlint rpm-build python3-devel python3-rpm-macros python3-setuptools python3-wheel python3-pyyaml git tar gzip curl
+    - rpmdev-setuptree
+
+  script:
+    - |
+      set -euo pipefail
+
+      VERSION="${CI_COMMIT_TAG#v}"
+
+      echo "Building ${PACKAGE_NAME} version ${VERSION}-${RPM_RELEASE}"
+      echo "Git tag: ${CI_COMMIT_TAG}"
+      echo "Commit: ${CI_COMMIT_SHA}"
+
+      python3 tools/set_project_version.py "${VERSION}" --release "${RPM_RELEASE}"
+
+      cp packaging/rpm/${PACKAGE_NAME}.spec /root/rpmbuild/SPECS/${PACKAGE_NAME}.spec
+
+      mkdir -p /tmp/${PACKAGE_NAME}-${VERSION}
+      rsync -a \
+        --exclude ".git" \
+        --exclude "dist" \
+        --exclude "build" \
+        --exclude "*.egg-info" \
+        ./ /tmp/${PACKAGE_NAME}-${VERSION}/
+
+      tar -C /tmp -czf /root/rpmbuild/SOURCES/${PACKAGE_NAME}-${VERSION}.tar.gz ${PACKAGE_NAME}-${VERSION}
+
+      rpmlint /root/rpmbuild/SPECS/${PACKAGE_NAME}.spec || true
+
+      rpmbuild -ba /root/rpmbuild/SPECS/${PACKAGE_NAME}.spec
+
+      mkdir -p dist/rpms dist/srpms dist/logs
+
+      cp -v /root/rpmbuild/RPMS/noarch/*.rpm dist/rpms/
+      cp -v /root/rpmbuild/SRPMS/*.src.rpm dist/srpms/ || true
+
+      rpmlint dist/rpms/*.rpm > dist/logs/rpmlint-rpm.log || true
+
+      echo "Built RPMs:"
+      ls -lh dist/rpms/
+
+      : "${NEXUS_BASE_REPO_URL:?Missing CI/CD variable NEXUS_BASE_REPO_URL}"
+      : "${ARTIFACTORY_BOT_USER:?Missing CI/CD variable ARTIFACTORY_BOT_USER}"
+      : "${ARTIFACTORY_BOT_PASS:?Missing CI/CD variable ARTIFACTORY_BOT_PASS}"
+
+      NEXUS_UPLOAD_DIR="${NEXUS_BASE_REPO_URL%/}/${NEXUS_COMPONENT_PATH}"
+
+      echo "Uploading RPMs to Nexus path:"
+      echo "${NEXUS_UPLOAD_DIR}"
+
+      for rpm in dist/rpms/*.rpm; do
+        filename="$(basename "${rpm}")"
+
+        curl --fail --show-error --silent \
+          -u "${ARTIFACTORY_BOT_USER}:${ARTIFACTORY_BOT_PASS}" \
+          --upload-file "${rpm}" \
+          "${NEXUS_UPLOAD_DIR}/${filename}"
+
+        echo "Uploaded ${filename}"
+      done
+
+  artifacts:
+    name: "aerolitctl-${CI_COMMIT_TAG}-rpm"
+    when: always
+    expire_in: 90 days
+    paths:
+      - dist/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 podman run --rm \
   --security-opt label=disable \
