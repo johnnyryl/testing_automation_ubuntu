@@ -1,3 +1,198 @@
+#!/usr/bin/env python3
+"""
+Update AeroLIT aerolitctl project version files for release builds.
+
+This script is intended to run in CI before rpmbuild creates the source tarball.
+It updates the build workspace, not the Git repository history.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def write_text(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+
+
+def update_file(path: Path, updater) -> bool:
+    if not path.exists():
+        return False
+
+    old = read_text(path)
+    new = updater(old)
+
+    if new != old:
+        write_text(path, new)
+        print(f"updated: {path}")
+        return True
+
+    print(f"unchanged: {path}")
+    return False
+
+
+def update_setup_py(text: str, version: str) -> str:
+    return re.sub(
+        r'(version\s*=\s*["\'])([^"\']+)(["\'])',
+        rf"\g<1>{version}\g<3>",
+        text,
+        count=1,
+    )
+
+
+def update_pyproject_toml(text: str, version: str) -> str:
+    return re.sub(
+        r'(?m)^(version\s*=\s*["\'])([^"\']+)(["\'])',
+        rf"\g<1>{version}\g<3>",
+        text,
+        count=1,
+    )
+
+
+def update_init_py(text: str, version: str) -> str:
+    return re.sub(
+        r'(?m)^(__version__\s*=\s*["\'])([^"\']+)(["\'])',
+        rf"\g<1>{version}\g<3>",
+        text,
+        count=1,
+    )
+
+
+def rpm_changelog_date() -> str:
+    now = datetime.now(timezone.utc)
+    # rpm changelog wants something like: Fri Jun 12 2026
+    return f"{now.strftime('%a %b')} {now.day} {now.year}"
+
+
+def update_spec(text: str, version: str, release: str, author: str) -> str:
+    text = re.sub(
+        r"(?m)^(Version:\s*)(\S+)",
+        rf"\g<1>{version}",
+        text,
+        count=1,
+    )
+
+    text = re.sub(
+        r"(?m)^(Release:\s*)(\S+)",
+        rf"\g<1>{release}%{{?dist}}",
+        text,
+        count=1,
+    )
+
+    changelog_entry = (
+        f"* {rpm_changelog_date()} {author} - {version}-{release}\n"
+        f"- Release aerolitctl {version}\n"
+    )
+
+    if "%changelog" not in text:
+        return text.rstrip() + "\n\n%changelog\n" + changelog_entry
+
+    before, after = text.split("%changelog", 1)
+
+    # Avoid duplicate top entries when the script is run more than once.
+    if f"- {version}-{release}" in after[:500]:
+        return before + "%changelog" + after
+
+    return before + "%changelog\n" + changelog_entry + "\n" + after.lstrip("\n")
+
+
+def update_man_page(text: str, version: str) -> str:
+    now = datetime.now(timezone.utc)
+    month_year = now.strftime("%B %Y")
+
+    # Update common roff header:
+    # .TH AEROLITCTL 1 "June 2026" "aerolitctl 0.1.0" "User Commands"
+    text = re.sub(
+        r'(?m)^(\.TH\s+\S+\s+\S+\s+")([^"]*)("\s+")([^"]*)(".*)$',
+        rf'\g<1>{month_year}\g<3>aerolitctl {version}\g<5>',
+        text,
+        count=1,
+    )
+
+    # Catch any remaining product-version string in the man page.
+    text = re.sub(
+        r"(aerolitctl\s+)v?[0-9]+\.[0-9]+\.[0-9]+",
+        rf"\g<1>{version}",
+        text,
+    )
+
+    return text
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Update aerolitctl project version files before RPM build."
+    )
+    parser.add_argument("version", help="Release version, for example 0.1.1 or v0.1.1")
+    parser.add_argument("--release", default="1", help="RPM release number, default: 1")
+    parser.add_argument("--root", default=".", help="Project root, default: current directory")
+    parser.add_argument(
+        "--changelog-author",
+        default=None,
+        help="RPM changelog author, for example 'David Oxenreiter <email@example.com>'",
+    )
+
+    args = parser.parse_args()
+
+    version = args.version.strip()
+    if version.startswith("v"):
+        version = version[1:]
+
+    if not SEMVER_RE.match(version):
+        raise SystemExit(
+            f"ERROR: unsupported version '{args.version}'. Use tags like v0.1.1 or 0.1.1."
+        )
+
+    root = Path(args.root).resolve()
+
+    gitlab_name = os.environ.get("GITLAB_USER_NAME", "AeroLIT CI")
+    gitlab_email = os.environ.get("GITLAB_USER_EMAIL", "noreply@example.com")
+    author = args.changelog_author or f"{gitlab_name} <{gitlab_email}>"
+
+    print(f"project root: {root}")
+    print(f"version: {version}")
+    print(f"rpm release: {args.release}")
+    print(f"changelog author: {author}")
+
+    update_file(root / "setup.py", lambda text: update_setup_py(text, version))
+
+    update_file(root / "pyproject.toml", lambda text: update_pyproject_toml(text, version))
+    update_file(root / "project.toml", lambda text: update_pyproject_toml(text, version))
+
+    update_file(root / "src" / "aerolitctl" / "__init__.py", lambda text: update_init_py(text, version))
+
+    update_file(
+        root / "packaging" / "rpm" / "aerolitctl.spec",
+        lambda text: update_spec(text, version, args.release, author),
+    )
+
+    man_root = root / "man"
+    if man_root.exists():
+        for man_page in sorted(man_root.rglob("*.1")):
+            update_file(man_page, lambda text: update_man_page(text, version))
+
+    print("version update complete")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+
+
+
 
 stages:
   - build
