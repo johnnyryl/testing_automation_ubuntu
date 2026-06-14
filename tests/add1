@@ -1,3 +1,29 @@
+ARG DOCKER_FROM_IMAGE
+FROM ${DOCKER_FROM_IMAGE}
+
+USER 0
+
+COPY company-ca.crt /etc/pki/ca-trust/source/anchors/company-ca.crt
+
+RUN update-ca-trust extract
+
+RUN dnf -y install --allowerasing \
+        skopeo \
+        jq \
+        coreutils \
+    && dnf clean all \
+    && rm -rf /var/cache/yum /var/cache/dnf
+
+RUN skopeo --version \
+    && jq --version \
+    && rpm -q coreutils
+
+
+
+
+
+
+
 ARG DOCKER_FROM_IMAGE=registry.access.redhat.com/ubi8/ubi-init:latest
 FROM ${DOCKER_FROM_IMAGE}
 
