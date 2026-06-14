@@ -1,3 +1,49 @@
+ARG DOCKER_FROM_IMAGE=registry.access.redhat.com/ubi8/ubi-init:latest
+FROM ${DOCKER_FROM_IMAGE}
+
+USER 0
+
+# Trust company CA in RHEL/UBI location
+COPY company-ca.crt /etc/pki/ca-trust/source/anchors/company-ca.crt
+
+RUN update-ca-trust extract
+
+# Install required tools
+RUN yum -y install \
+        skopeo \
+        jq \
+        coreutils \
+        python3 \
+    && yum clean all \
+    && rm -rf /var/cache/yum /var/cache/dnf
+
+# Sanity checks
+RUN skopeo --version \
+    && jq --version \
+    && rpm -q coreutils \
+    && python3 --version
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #!/usr/bin/env bash
 set -euo pipefail
 
