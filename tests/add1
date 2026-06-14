@@ -1,3 +1,49 @@
+PROJECT_VERSION_HOOK="${VERSION_UPDATE_HOOK:-}"
+
+if [ -z "${PROJECT_VERSION_HOOK}" ] && [ -f "tools/release_version_hook.sh" ]; then
+  PROJECT_VERSION_HOOK="tools/release_version_hook.sh"
+fi
+
+if [ -n "${PROJECT_VERSION_HOOK}" ]; then
+  echo "Project version update hook requested: ${PROJECT_VERSION_HOOK}"
+
+  if [ ! -f "${PROJECT_VERSION_HOOK}" ]; then
+    echo "ERROR: Project version update hook does not exist: ${PROJECT_VERSION_HOOK}"
+    exit 1
+  fi
+
+  if [ -z "${RELEASE_TAG:-}" ]; then
+    echo "ERROR: RELEASE_TAG is required when project version update hook is used."
+    exit 1
+  fi
+
+  RELEASE_VERSION="${RELEASE_TAG#v}"
+
+  echo "Running project version update hook."
+  echo "Release tag: ${RELEASE_TAG}"
+  echo "Release version: ${RELEASE_VERSION}"
+
+  chmod +x "${PROJECT_VERSION_HOOK}"
+  "${PROJECT_VERSION_HOOK}" "${RELEASE_VERSION}" "${RELEASE_TAG}"
+
+  echo "Files staged after project version update hook:"
+  git status --short
+else
+  echo "No project version update hook configured or detected."
+fi
+
+
+
+
+
+
+
+
+
+
+
+
+
 ARG DOCKER_FROM_IMAGE
 FROM ${DOCKER_FROM_IMAGE}
 
