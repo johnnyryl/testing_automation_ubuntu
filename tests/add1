@@ -1,3 +1,36 @@
+[[runners]]
+  name = "AeroLIT Molecule Runner"
+  limit = 3
+  request_concurrency = 2
+  url = "https://gitlab.us.lmco.com"
+  executor = "docker"
+  environment = [..., "DOCKER_HOST=unix:///var/run/docker.sock", "CONTAINER_HOST=unix:///var/run/docker.sock"]
+
+  pre_get_sources_script = "git config --global http.proxy $HTTP_PROXY; git config --global https.proxy $HTTPS_PROXY; git config --global no.proxy $NO_PROXY;"
+
+  pre_build_script = """
+if [ -x /usr/bin/podman ]; then
+  cat > /usr/local/bin/podman <<'EOF'
+#!/bin/sh
+exec /usr/bin/podman --remote "$@"
+EOF
+  chmod +x /usr/local/bin/podman
+fi
+
+podman info >/dev/null 2>&1 || {
+  echo "ERROR: remote podman check failed"
+  exit 1
+}
+"""
+
+  [runners.docker]
+    host = "unix:///run/docker.sock"
+
+
+
+
+
+
 podman run --rm \
   --security-opt label=disable \
   -e DOCKER_HOST=unix:///var/run/docker.sock \
