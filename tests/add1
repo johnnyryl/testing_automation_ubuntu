@@ -1,3 +1,29 @@
+podman run --rm \
+  --security-opt label=disable \
+  -e DOCKER_HOST=unix:///var/run/docker.sock \
+  -v "/run/user/$(id -u)/podman/podman.sock:/var/run/docker.sock" \
+  registry.gitlab.us.lmco.com:443/lit/containers/images/ansible-molecule:latest \
+  bash -lc '
+    echo "PATH=$PATH"
+    echo "--- docker check ---"
+    command -v docker || true
+    docker version || true
+    echo "--- podman check ---"
+    command -v podman || true
+    podman --version || true
+    podman info || true
+  '
+
+
+
+
+
+
+
+
+
+
+
 I would use:
 
 Autonomic Operations: Governed Remediation Framework
