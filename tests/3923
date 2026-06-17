@@ -1,0 +1,470 @@
+You’re right — use no /srv paths. Since your runner is rootless and managed with systemctl --user, the best placement is under the runner user’s home directory.
+
+Use this pattern:
+
+Runner-owned fixture root:
+  ~/.local/share/aerolit-molecule
+Runner config:
+  ~/.config/gitlab-runner/config.toml
+Runner service:
+  systemctl --user restart gitlab-runner
+Compliance center:
+  templates/ansible-molecule/*
+
+The GitLab Runner config.toml volume mount is the key because the GitLab Docker executor uses that config to mount host paths into job containers. GitLab documents runner behavior as being controlled through config.toml, including Docker executor configuration.   Molecule’s Podman example also lines up with what you’re doing because it uses standard Ansible inventory/playbooks to control the test environment.  
+
+⸻
+
+Phase 1 — Create the runner-owned fixture area
+
+Run this on the runner host as your runner user, not inside a CI job container:
+
+export AEROLIT_FIXTURE_ROOT="$HOME/.local/share/aerolit-molecule"
+mkdir -p "$AEROLIT_FIXTURE_ROOT"/{hubs,files,repos,logs,cache}
+mkdir -p "$AEROLIT_FIXTURE_ROOT/files/current"
+mkdir -p "$AEROLIT_FIXTURE_ROOT/repos/current"
+echo "fixture-ok" > "$AEROLIT_FIXTURE_ROOT/files/current/.fixture-ok"
+echo "fixture-ok" > "$AEROLIT_FIXTURE_ROOT/repos/current/.fixture-ok"
+realpath "$AEROLIT_FIXTURE_ROOT"
+ls -la "$AEROLIT_FIXTURE_ROOT"
+
+You want the real path to look something like:
+
+/home/YOUR_USER/.local/share/aerolit-molecule
+
+Do not use $HOME inside config.toml. Use the actual absolute path.
+
+⸻
+
+Phase 2 — Create the first pinned hub snapshot
+
+Still on the runner host:
+
+export AEROLIT_FIXTURE_ROOT="$HOME/.local/share/aerolit-molecule"
+export SNAP_NAME="approved-$(date +%Y%m%d)"
+export SNAP_DIR="$AEROLIT_FIXTURE_ROOT/hubs/$SNAP_NAME"
+mkdir -p "$SNAP_DIR"/{roles,collections}
+cat > "$SNAP_DIR/metadata.yml" <<EOF
+name: $SNAP_NAME
+created_by: $(whoami)
+created_at: $(date -Is)
+purpose: Pinned AeroLIT Molecule dependency hub snapshot
+EOF
+ln -sfn "$SNAP_DIR" "$AEROLIT_FIXTURE_ROOT/hubs/current"
+ls -la "$AEROLIT_FIXTURE_ROOT/hubs"
+ls -la "$AEROLIT_FIXTURE_ROOT/hubs/current"
+
+For now, the hub can be mostly empty. The first goal is proving the path works.
+
+Later it should look like this:
+
+~/.local/share/aerolit-molecule/
+├── hubs/
+│   ├── approved-20260616/
+│   │   ├── roles/
+│   │   │   ├── administration/
+│   │   │   │   └── some-required-role/
+│   │   │   └── common/
+│   │   │       └── repo-client/
+│   │   ├── collections/
+│   │   └── metadata.yml
+│   └── current -> approved-20260616
+├── files/
+│   └── current/
+├── repos/
+│   └── current/
+├── logs/
+└── cache/
+
+⸻
+
+Phase 3 — Update your rootless runner config
+
+Open:
+
+vi ~/.config/gitlab-runner/config.toml
+
+Find your [runners.docker] section and add a volume for the fixture root.
+
+Example using a real absolute path:
+
+volumes = [
+  "/cache",
+  "/run/user/2271030/podman/podman.sock:/run/docker.sock",
+  "/run/user/2271030/podman/podman.sock:/var/run/docker.sock",
+  "/home/YOUR_USER/.local/share/aerolit-molecule:/home/YOUR_USER/.local/share/aerolit-molecule:ro"
+]
+
+Keep your existing socket volumes. Just add the fixture mount.
+
+Also add this near the [[runners]] level if you do not already have an environment entry:
+
+environment = [
+  "AEROLIT_FIXTURE_ROOT=/home/YOUR_USER/.local/share/aerolit-molecule"
+]
+
+If you already have an environment = [...] list, append the new value instead of creating a second one.
+
+Then restart your rootless runner:
+
+systemctl --user daemon-reload
+systemctl --user restart gitlab-runner
+systemctl --user status gitlab-runner --no-pager
+
+The important detail: the fixture path should be mounted into the job container at the same absolute path that exists on the runner host.
+
+That matters because Molecule creates sibling UBI containers through the Podman socket. So this path:
+
+/home/YOUR_USER/.local/share/aerolit-molecule
+
+needs to be valid from the host Podman point of view and visible inside the CI job container.
+
+⸻
+
+Phase 4 — Add compliance-center variables safely
+
+In your templates/ansible-molecule/template.yml, add an input like this:
+
+aerolit_fixture_root:
+  type: string
+  default: ""
+
+Then in the job variables, do not overwrite the real runner variable directly. Use an input variable:
+
+variables:
+  AEROLIT_FIXTURE_ROOT_INPUT: "$[[ inputs.aerolit_fixture_root ]]"
+
+Then in your script section, add:
+
+# Prefer explicit component input if provided.
+# Otherwise use the runner-level AEROLIT_FIXTURE_ROOT environment variable.
+if [ -n "${AEROLIT_FIXTURE_ROOT_INPUT:-}" ]; then
+  export AEROLIT_FIXTURE_ROOT="$AEROLIT_FIXTURE_ROOT_INPUT"
+fi
+: "${AEROLIT_FIXTURE_ROOT:?AEROLIT_FIXTURE_ROOT is not set. Set it on the runner or pass aerolit_fixture_root to the component.}"
+export AEROLIT_COLLECTION_HUB="${AEROLIT_COLLECTION_HUB:-$AEROLIT_FIXTURE_ROOT/hubs/current}"
+export AEROLIT_TEST_FILES_DIR="${AEROLIT_TEST_FILES_DIR:-$AEROLIT_FIXTURE_ROOT/files/current}"
+export AEROLIT_TEST_REPOS_DIR="${AEROLIT_TEST_REPOS_DIR:-$AEROLIT_FIXTURE_ROOT/repos/current}"
+
+This makes the compliance component portable:
+
+Your runner:
+  gets AEROLIT_FIXTURE_ROOT from config.toml
+Another program:
+  can pass aerolit_fixture_root as a component input
+
+⸻
+
+Phase 5 — Add preflight logging before Molecule runs
+
+Put this before the current role-detection logic or right before the Molecule loop:
+
+echo "=== AeroLIT Molecule preflight ==="
+echo "CI_PROJECT_PATH=$CI_PROJECT_PATH"
+echo "CI_COMMIT_REF_NAME=${CI_COMMIT_REF_NAME:-}"
+echo "CI_COMMIT_SHA=${CI_COMMIT_SHA:-}"
+echo "AEROLIT_FIXTURE_ROOT=$AEROLIT_FIXTURE_ROOT"
+echo "AEROLIT_COLLECTION_HUB=$AEROLIT_COLLECTION_HUB"
+echo "AEROLIT_TEST_FILES_DIR=$AEROLIT_TEST_FILES_DIR"
+echo "AEROLIT_TEST_REPOS_DIR=$AEROLIT_TEST_REPOS_DIR"
+python3 --version
+ansible --version
+python3 -m molecule --version || molecule --version
+podman --version || true
+test -d "$AEROLIT_FIXTURE_ROOT" || {
+  echo "Missing fixture root: $AEROLIT_FIXTURE_ROOT"
+  exit 1
+}
+test -d "$AEROLIT_COLLECTION_HUB" || {
+  echo "Missing collection hub: $AEROLIT_COLLECTION_HUB"
+  exit 1
+}
+test -d "$AEROLIT_COLLECTION_HUB/roles" || {
+  echo "Missing hub roles directory: $AEROLIT_COLLECTION_HUB/roles"
+  exit 1
+}
+test -d "$AEROLIT_COLLECTION_HUB/collections" || {
+  echo "Missing hub collections directory: $AEROLIT_COLLECTION_HUB/collections"
+  exit 1
+}
+test -d "$AEROLIT_TEST_FILES_DIR" || {
+  echo "Missing files fixture directory: $AEROLIT_TEST_FILES_DIR"
+  exit 1
+}
+test -d "$AEROLIT_TEST_REPOS_DIR" || {
+  echo "Missing repos fixture directory: $AEROLIT_TEST_REPOS_DIR"
+  exit 1
+}
+
+At first, make this strict. Once it works, you can make files and repos optional per role.
+
+⸻
+
+Phase 6 — Fix role dependency resolution
+
+Your current setup symlinks the role under test into the temporary Molecule scenario. Keep that.
+
+Add the hub as fallback.
+
+Because your role projects may be nested like this:
+
+roles/administration/root-password-management
+roles/common/repo-client
+
+you should not assume all roles live directly under one flat roles/ directory. Build the hub role path dynamically.
+
+Add this helper in the compliance-center script:
+
+build_hub_roles_path() {
+  local hub_roles_dir="$1"
+  if [ ! -d "$hub_roles_dir" ]; then
+    return 0
+  fi
+  find "$hub_roles_dir" \
+    -type f \
+    -path '*/tasks/main.yml' \
+    -print \
+  | while read -r main_yml; do
+      role_dir="$(dirname "$(dirname "$main_yml")")"
+      dirname "$role_dir"
+    done \
+  | sort -u \
+  | paste -sd ':' -
+}
+
+Then when you create the scenario:
+
+HUB_ROLES_PATH="$(build_hub_roles_path "$AEROLIT_COLLECTION_HUB/roles")"
+export ANSIBLE_ROLES_PATH="$SCEN_DIR/roles"
+if [ -n "$HUB_ROLES_PATH" ]; then
+  export ANSIBLE_ROLES_PATH="$ANSIBLE_ROLES_PATH:$HUB_ROLES_PATH"
+fi
+export ANSIBLE_ROLES_PATH="$ANSIBLE_ROLES_PATH:/usr/share/ansible/roles"
+export ANSIBLE_COLLECTIONS_PATH="$AEROLIT_COLLECTION_HUB/collections:/usr/share/ansible/collections"
+
+Then print it:
+
+echo "=== AeroLIT Molecule dependency resolution ==="
+echo "Role under test: $ROLE_NAME"
+echo "Scenario dir: $SCEN_DIR"
+echo "Hub: $AEROLIT_COLLECTION_HUB"
+echo "ANSIBLE_ROLES_PATH=$ANSIBLE_ROLES_PATH"
+echo "ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH"
+
+This gives you the behavior you want:
+
+role under test
+  -> current branch from the GitLab checkout
+dependency roles
+  -> pinned hub snapshot
+system fallback
+  -> only last
+
+⸻
+
+Phase 7 — Update molecule.yml to mount global fixtures
+
+In templates/ansible-molecule/molecule.yml, add the file/repo mounts to every UBI platform.
+
+Example:
+
+volumes:
+  - /sys/fs/cgroup:/sys/fs/cgroup:ro
+  - ${AEROLIT_TEST_FILES_DIR}:/opt/aerolit/files:ro
+  - ${AEROLIT_TEST_REPOS_DIR}:/opt/aerolit/repos:ro
+
+So one platform becomes:
+
+- name: ubi9
+  image: ${UBI9_INIT_IMAGE}
+  pre_build_image: true
+  privileged: true
+  command: /usr/sbin/init
+  volumes:
+    - /sys/fs/cgroup:/sys/fs/cgroup:ro
+    - ${AEROLIT_TEST_FILES_DIR}:/opt/aerolit/files:ro
+    - ${AEROLIT_TEST_REPOS_DIR}:/opt/aerolit/repos:ro
+  tmpfs:
+    /run: "rw"
+    /tmp: "rw"
+
+If you hit SELinux volume access issues later, change those fixture volume lines to:
+
+    - ${AEROLIT_TEST_FILES_DIR}:/opt/aerolit/files:ro,z
+    - ${AEROLIT_TEST_REPOS_DIR}:/opt/aerolit/repos:ro,z
+
+Do not start there unless you need it.
+
+⸻
+
+Phase 8 — Upgrade prepare.yml
+
+Your current prepare.yml is empty. This is where the global setup should begin.
+
+Replace it with this first version:
+
+---
+- name: Prepare
+  hosts: all
+  gather_facts: true
+  become: true
+  vars:
+    aerolit_requires_files: "{{ lookup('env', 'AEROLIT_REQUIRES_FILES') | default('false', true) | bool }}"
+    aerolit_requires_repos: "{{ lookup('env', 'AEROLIT_REQUIRES_REPOS') | default('false', true) | bool }}"
+    aerolit_prepare_roles_raw: "{{ lookup('env', 'AEROLIT_PREPARE_ROLES') | default('', true) }}"
+    aerolit_prepare_roles: "{{ aerolit_prepare_roles_raw.split(',') | map('trim') | reject('equalto', '') | list }}"
+  tasks:
+    - name: Check AeroLIT files mount
+      ansible.builtin.stat:
+        path: /opt/aerolit/files
+      register: aerolit_files_mount
+    - name: Check AeroLIT repos mount
+      ansible.builtin.stat:
+        path: /opt/aerolit/repos
+      register: aerolit_repos_mount
+    - name: Fail if files are required but not mounted
+      ansible.builtin.assert:
+        that:
+          - aerolit_files_mount.stat.exists
+          - aerolit_files_mount.stat.isdir
+        fail_msg: "This role requires /opt/aerolit/files, but the files fixture is not mounted."
+      when: aerolit_requires_files
+    - name: Fail if repos are required but not mounted
+      ansible.builtin.assert:
+        that:
+          - aerolit_repos_mount.stat.exists
+          - aerolit_repos_mount.stat.isdir
+        fail_msg: "This role requires /opt/aerolit/repos, but the repos fixture is not mounted."
+      when: aerolit_requires_repos
+    - name: Configure AeroLIT test repo
+      ansible.builtin.copy:
+        dest: /etc/yum.repos.d/aerolit-test.repo
+        mode: "0644"
+        content: |
+          [aerolit-test]
+          name=AeroLIT Molecule Test Repo
+          baseurl=file:///opt/aerolit/repos
+          enabled=1
+          gpgcheck=0
+      when: aerolit_requires_repos
+    - name: Run prerequisite roles
+      ansible.builtin.include_role:
+        name: "{{ item }}"
+      loop: "{{ aerolit_prepare_roles }}"
+      when: aerolit_prepare_roles | length > 0
+
+For the first test, you can set:
+
+export AEROLIT_REQUIRES_FILES=false
+export AEROLIT_REQUIRES_REPOS=false
+export AEROLIT_PREPARE_ROLES=""
+
+Later, a role can override those.
+
+⸻
+
+Phase 9 — Update converge.yml
+
+Use include_role instead of a static roles: block:
+
+---
+- name: Converge
+  hosts: all
+  gather_facts: true
+  become: "{{ lookup('env', 'AEROLIT_BECOME') | default('true', true) | bool }}"
+  tasks:
+    - name: Run role under test
+      ansible.builtin.include_role:
+        name: "{{ lookup('env', 'ROLE_NAME') }}"
+
+This gives you more control later when you need conditions, variables, debug, or role wrapping.
+
+⸻
+
+Phase 10 — Keep verify.yml basic for now
+
+Your current verify.yml is okay as a default smoke test:
+
+---
+- name: Verify
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Ping target
+      ansible.builtin.ping:
+
+Later, each role can provide its own:
+
+molecule/default/verify.yml
+
+and your compliance-center logic can overlay it.
+
+⸻
+
+Phase 11 — Version control the Molecule toolchain
+
+Molecule versions do matter. Molecule’s own docs say it supports only the latest two major versions of Ansible.   That does not mean you need to solve versioning before the fixture work, but once this works, do not leave the job floating forever with unpinned installs.
+
+For now, print versions in every job. Later, create a pinned Molecule runner image.
+
+The eventual direction should be an internal image like:
+
+registry.gitlab.us.lmco.com:443/lit/containers/images/ansible-molecule-runner:2026.06
+
+with a pinned set of:
+
+python
+ansible-core
+molecule
+molecule-plugins[podman]
+ansible-lint
+podman client
+docker Python SDK only if you keep Docker fallback
+
+Molecule plugins also matter because the plugin package has separate extras for drivers like Podman. The molecule-plugins project documents installing driver extras such as molecule-plugins[podman].  
+
+⸻
+
+The first thing I would test
+
+Do not start with role dependencies yet.
+
+First prove the job container can see the runner fixture root.
+
+Add this temporary debug block to the compliance-center job:
+
+echo "=== Fixture visibility test ==="
+echo "AEROLIT_FIXTURE_ROOT=$AEROLIT_FIXTURE_ROOT"
+ls -la "$AEROLIT_FIXTURE_ROOT"
+ls -la "$AEROLIT_FIXTURE_ROOT/hubs/current"
+ls -la "$AEROLIT_TEST_FILES_DIR"
+ls -la "$AEROLIT_TEST_REPOS_DIR"
+
+Expected result:
+
+.fixture-ok appears under files/current
+.fixture-ok appears under repos/current
+hubs/current resolves to approved-YYYYMMDD
+
+Once that passes, then test the Molecule container mount by adding this to verify.yml temporarily:
+
+- name: Check files mount inside Molecule target
+  ansible.builtin.stat:
+    path: /opt/aerolit/files/.fixture-ok
+  register: files_fixture
+- name: Check repos mount inside Molecule target
+  ansible.builtin.stat:
+    path: /opt/aerolit/repos/.fixture-ok
+  register: repos_fixture
+- name: Assert fixture mounts are visible inside target
+  ansible.builtin.assert:
+    that:
+      - files_fixture.stat.exists
+      - repos_fixture.stat.exists
+
+That proves both layers work:
+
+GitLab job container sees runner fixtures
+Molecule-created UBI containers see runner fixtures
+
+Paste your actual realpath "$HOME/.local/share/aerolit-molecule" and the [runners.docker] volumes section after you add the mount, and I’ll help you verify the exact TOML before you restart the runner.
