@@ -1,3 +1,292 @@
+1. GitLab runner recovery and queue reduction
+
+Problem: GitLab runners go offline, fill disks, lose registration, hang jobs, or become overloaded. Developers wait on pipelines instead of delivering code.
+
+Telemetry: GitLab runner status, Prometheus queue/utilization metrics, Nagios host/service checks, Splunk runner logs.
+
+AAP remediation: Restart runner service, clean approved workspace/cache paths, validate registration, drain unhealthy runners, re-enable healthy runners, provision standby runners where supported.
+
+Savings: Less pipeline downtime, less engineer babysitting, faster build/test cycles.
+
+⸻
+
+2. Artifact repository and container registry reliability
+
+Problem: Builds fail when artifact repositories, package mirrors, or container registries become unavailable, slow, full, or out of sync.
+
+Telemetry: Prometheus latency/storage metrics, Nagios availability checks, Splunk service logs, registry/repository health APIs.
+
+AAP remediation: Restart known services, validate mounts/storage, clear safe temp areas, trigger mirror sync, fail over to approved secondary endpoints, verify artifact pull/push after recovery.
+
+Savings: Prevents software factory stoppages caused by broken dependencies.
+
+⸻
+
+3. Restricted-network content mirror health
+
+Problem: DSO teams in restricted or disconnected networks lose time when approved software, packages, containers, or automation content are stale, missing, or inconsistently mirrored.
+
+Telemetry: Mirror freshness checks, repository metadata checks, registry sync status, Splunk logs, Prometheus/Nagios availability.
+
+AAP remediation: Trigger approved sync jobs, validate metadata, compare source/target manifests, repair failed syncs, generate mirror status evidence.
+
+Savings: Reduces manual mirror troubleshooting and keeps disconnected software delivery moving.
+
+⸻
+
+4. Test lab readiness and environment reset
+
+Problem: Integration labs and test environments drift, get left in bad states, or require manual reset before test events.
+
+Telemetry: Host/service checks, lab reservation state, test harness status, VM/container health, Splunk logs.
+
+AAP remediation: Reset systems to a known-good baseline, restart simulators/services, restore VM snapshots, validate required ports/services, release stuck reservations, produce readiness status.
+
+Savings: Less waiting for labs, fewer delayed test windows, faster integration cycles.
+
+⸻
+
+5. Software factory platform service recovery
+
+Problem: DSO tools like GitLab, AAP, SonarQube, artifact repositories, container registries, databases, execution nodes, or test automation services fail and require manual troubleshooting.
+
+Telemetry: Prometheus service metrics, Nagios service checks, Splunk logs, application health endpoints.
+
+AAP remediation: Restart approved services, validate dependencies, check disk/memory/connectivity, collect diagnostics, escalate after repeated failure instead of looping.
+
+Savings: Faster recovery of shared DSO platforms and less repetitive admin effort.
+
+⸻
+
+6. Storage pressure prevention for build/test infrastructure
+
+Problem: Runner workspaces, artifact stores, logs, caches, and test outputs fill disks and break builds or test jobs.
+
+Telemetry: Prometheus disk thresholds, Nagios filesystem checks, Splunk log-growth patterns.
+
+AAP remediation: Clean approved cache paths, rotate logs, archive old artifacts, expand storage where supported, notify owners, validate free space after action.
+
+Savings: Prevents predictable outages and reduces manual cleanup work.
+
+⸻
+
+7. Automated failed pipeline triage and recovery
+
+Problem: Engineers spend time determining whether a pipeline failed because of code, infrastructure, runner health, dependency issues, or transient platform problems.
+
+Telemetry: GitLab job status, runner logs, Splunk failure patterns, Prometheus/Nagios platform health.
+
+AAP remediation: Classify failure type, collect diagnostics, retry only known transient failures, restart impacted runner/service, attach findings to the job or ticket.
+
+Savings: Reduces time spent chasing non-code failures and prevents unnecessary developer interruptions.
+
+⸻
+
+8. Deployment rollback and post-deployment validation
+
+Problem: Failed deployments or unstable test deployments often require manual rollback, service checks, and log collection.
+
+Telemetry: Deployment job events, service health checks, application metrics, Splunk logs, synthetic test results.
+
+AAP remediation: Execute approved rollback, restart services, restore last-known-good configuration, run smoke tests, collect logs, notify stakeholders.
+
+Savings: Faster recovery from bad deployments and more consistent release operations.
+
+⸻
+
+9. Configuration drift detection and re-baselining
+
+Problem: Build agents, test hosts, lab machines, and automation nodes drift over time, causing inconsistent results and “works on one runner but not another” failures.
+
+Telemetry: Scheduled baseline checks, Prometheus/Nagios health, AAP facts, Splunk drift indicators.
+
+AAP remediation: Reapply approved baseline, align runner/tool versions, repair proxy/DNS/NTP/repo settings, validate build/test readiness.
+
+Savings: Fewer inconsistent builds, fewer hidden environment problems, less troubleshooting.
+
+⸻
+
+10. Capacity-aware scaling for DSO workloads
+
+Problem: Build and test demand changes throughout the day. Teams either wait in queues or overprovision infrastructure.
+
+Telemetry: GitLab queue depth, runner utilization, Prometheus resource usage, lab/test schedule signals.
+
+AAP remediation: Add temporary runners, power on standby resources, drain unhealthy nodes, scale down after demand drops, notify capacity owners.
+
+Savings: Better throughput without permanent overprovisioning.
+
+
+
+
+
+
+1. Kubernetes/OpenShift pod failure recovery
+
+Problem: Pods get stuck in CrashLoopBackOff, ImagePullBackOff, Pending, failed readiness checks, or repeated restart loops.
+
+Telemetry: Prometheus, Kubernetes events, Splunk logs, Nagios service checks.
+
+AAP action: Collect pod logs/events, identify failure pattern, restart deployment, roll back to last known-good version where approved, validate health, and notify owning team. Ansible can manage Kubernetes objects through the kubernetes.core.k8s module, so this can be built as governed automation rather than ad hoc scripts.  
+
+Ticket logic: Create or update a Jira ticket if the same namespace/app fails repeatedly within a defined window.
+
+Why it saves money: Reduces repeated platform triage and shortens developer/test downtime.
+
+⸻
+
+2. Kubernetes node and resource-pressure remediation
+
+Problem: Nodes hit DiskPressure, MemoryPressure, NotReady, image-cache bloat, or scheduling failures that impact multiple teams.
+
+Telemetry: Prometheus node metrics, Kubernetes events, Nagios host checks, Splunk system logs.
+
+AAP action: Run approved cleanup, collect diagnostics, validate kubelet/container runtime health, cordon/drain only when allowed, and escalate higher-risk actions.
+
+Ticket logic: Create a Jira issue when pressure repeats on the same node pool or affects multiple namespaces.
+
+Why it saves money: Prevents one unhealthy node or cluster condition from blocking many pipelines and deployments.
+
+⸻
+
+3. Podman/container runtime failure recovery
+
+Problem: Build hosts fail because Podman/buildah storage fills, overlay issues occur, rootless containers break, registries become unreachable, or container services hang.
+
+Telemetry: Prometheus host metrics, Splunk logs, Nagios service checks, build job failures.
+
+AAP action: Clean approved container cache paths, restart known services, validate podman info, test registry pull, and return the host to service.
+
+Ticket logic: Create Jira tickets for repeated runtime failures by host group, runner pool, or container image source.
+
+Why it saves money: Keeps build infrastructure healthy without engineers manually logging into hosts to clear the same issues.
+
+⸻
+
+4. GitLab runner fleet recovery and queue reduction
+
+Problem: Shared runners go offline, lose registration, run out of disk, hang jobs, or cause long queue times.
+
+Telemetry: GitLab runner status, Prometheus runner metrics, Splunk runner logs, Nagios checks.
+
+AAP action: Drain unhealthy runners, restart runner services, clean approved workspaces, validate registration, re-enable runners, or provision standby runners where supported.
+
+Ticket logic: Open or update Jira only when runner failures exceed a threshold, queue time breaches a target, or the same runner pool repeatedly fails.
+
+Why it saves money: Reduces blocked developers and pipeline waiting time across a large audience.
+
+⸻
+
+5. GitLab server and platform-service health recovery
+
+Problem: GitLab platform components or supporting services degrade, causing widespread software factory disruption.
+
+Telemetry: GitLab health endpoints, Prometheus metrics, Splunk logs, Nagios service checks.
+
+AAP action: Collect diagnostics, restart approved services, validate dependencies, check storage and database connectivity, and escalate when unsafe.
+
+Ticket logic: Automatically create a Jira incident/problem ticket when impact is broad, repeated, or outside safe remediation.
+
+Why it saves money: Reduces downtime for an enterprise service that many teams depend on.
+
+⸻
+
+6. Artifact repository and container registry reliability
+
+Problem: Builds fail when artifact repositories, package repositories, or container registries are slow, full, unavailable, or out of sync.
+
+Telemetry: Prometheus latency/storage metrics, Splunk service logs, Nagios availability checks, registry/repository APIs.
+
+AAP action: Validate storage/mounts, restart approved services, trigger mirror sync, test artifact pull/push, and generate status evidence.
+
+Ticket logic: Create Jira issues when the same registry/repository failure repeatedly blocks builds.
+
+Why it saves money: Prevents repeated “pipeline failed because dependency infrastructure broke” investigations.
+
+⸻
+
+7. Enterprise recurring-issue detection and Jira problem creation
+
+Problem: Teams often fix the same failure repeatedly without the data needed to justify a permanent fix.
+
+Telemetry: Splunk saved searches, Prometheus alert history, GitLab job failures, Nagios state changes, AAP job results.
+
+AAP / event action: Normalize events into an issue fingerprint such as runner_pool + failure_type + service + environment, count occurrences, suppress noise, and create or update Jira only when the pattern crosses a threshold.
+
+Ticket logic: Example: “Create Jira if this failure happens 5 times in 24 hours, impacts 3 or more teams, or consumes more than X minutes of pipeline downtime.” Jira supports issue creation through REST APIs, so this could be integrated as part of the workflow.  
+
+Why it saves money: Turns noisy recurring failures into actionable engineering backlog instead of endless one-off troubleshooting.
+
+⸻
+
+8. Pipeline failure classification: code issue vs platform issue
+
+Problem: Developers waste time figuring out whether a pipeline failed because of their code or because the software factory infrastructure broke.
+
+Telemetry: GitLab job logs, runner health, artifact repository status, Kubernetes deployment events, Splunk error patterns.
+
+AAP action: Collect evidence, classify common failure signatures, retry known transient platform failures, route likely code failures back to the developer, and create Jira for recurring platform issues.
+
+Ticket logic: Jira ticket only when failures are infrastructure-patterned and repeated, not for every failed pipeline.
+
+Why it saves money: Reduces unnecessary developer interruptions and DSO support tickets.
+
+⸻
+
+9. DSO platform capacity and scaling automation
+
+Problem: Build/test demand spikes cause long queues, while static capacity creates waste.
+
+Telemetry: GitLab queue depth, runner utilization, Kubernetes pending pods, Prometheus CPU/memory trends, lab schedule signals.
+
+AAP action: Add temporary runners, scale approved worker pools, power on standby resources, drain unhealthy nodes, and scale down after demand drops.
+
+Ticket logic: Create Jira capacity tickets when scaling actions repeat frequently or demand consistently exceeds baseline.
+
+Why it saves money: Improves throughput without permanently overprovisioning.
+
+⸻
+
+10. AAP and automation execution reliability
+
+Problem: AAP itself can become a DSO dependency. Failed job launches, execution-node issues, project sync failures, credential problems, or execution-environment pull failures can block automation.
+
+Telemetry: AAP job status, controller metrics, execution node health, Splunk logs, Nagios checks.
+
+AAP action: Collect diagnostics, restart approved components, resync projects, validate execution environments, retry known transient failures, and escalate repeated failures.
+
+Ticket logic: Create Jira issues when automation-platform failures affect multiple teams or repeat after recovery.
+
+Why it saves money: Keeps the remediation platform reliable and avoids engineers manually fixing the tool that is supposed to fix other things.
+
+The Jira pattern is a major selling point
+
+I would explicitly include this in the proposal:
+
+The capability will avoid ticket noise by using event correlation, deduplication, thresholds, and issue fingerprinting. One-off events may trigger automated recovery and evidence capture, while repeated or high-impact patterns create or update Jira tickets for long-term engineering resolution.
+
+
+
+That is a strong DSO message because it says:
+
+
+We are not just auto-fixing symptoms.
+We are collecting data to identify recurring software factory problems.
+We are turning repeated failures into funded/trackable engineering work.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 You’re right — use no /srv paths. Since your runner is rootless and managed with systemctl --user, the best placement is under the runner user’s home directory.
 
 Use this pattern:
