@@ -1,3 +1,2060 @@
+DSO Team Enablement Program
+
+This could be a very strong Level 5 case if it is framed the right way.
+
+I would not present this as:
+
+I created a bunch of PowerPoint trainings.
+
+I would present it as:
+
+I built a reusable DSO training and onboarding program that turns individual knowledge into team capability, reduces ramp-up time for new team members, standardizes how we support our environments, and improves the long-term maintainability of the tools, platforms, and processes our team owns.
+
+That sounds much more like Level 5 impact.
+
+The real value is not just the slides. The value is that the team becomes less dependent on tribal knowledge, new people can ramp up faster, common work is documented, and team practices become more consistent.
+
+The Big Idea
+
+Create a structured training program with tracks instead of a random collection of slide decks.
+
+Recommended program name:
+
+DSO Team Enablement Program
+
+Program description:
+
+A reusable training and onboarding curriculum covering Linux, GitLab, CI/CD, Ansible, automation, classified infrastructure concepts, security/compliance, AeroLIT, operational support, and DSO operating principles. The goal is to reduce knowledge silos, improve new-hire onboarding, standardize team practices, and help the team move from manual support toward repeatable, governed automation.
+
+This gives your manager something easy to understand, support, and defend.
+
+The strongest version of this effort should include:
+
+* PowerPoint training decks
+* hands-on labs
+* troubleshooting runbooks
+* onboarding checklists
+* training recordings, if allowed
+* a central GitLab documentation repo
+* a training tracker
+* feedback forms
+* a manager-facing impact summary
+* a sustainment plan so the material stays current
+
+That turns it into a real enablement program.
+
+⸻
+
+Recommended Training Tracks
+
+1. New Team Member Onboarding Track
+
+This should be one of the highest priorities because it directly supports training new people and reducing ramp-up time.
+
+1. Welcome to the Team: What We Support
+
+Purpose: Give new team members a clear understanding of what the team does and how to start contributing.
+
+Topics:
+
+* What the team supports
+* Major systems, tools, and environments
+* Common customer/program needs
+* How work comes into the team
+* Ticket flow and request flow
+* Who owns what
+* Where documentation lives
+* How to ask for help
+* Expectations for new team members
+* Common mistakes new people make
+
+Suggested deliverables:
+
+* PowerPoint deck
+* new-hire quick reference sheet
+* team support map
+* “first 30 days” checklist
+
+⸻
+
+2. Lockheed Martin Infrastructure Basics
+
+Purpose: Help new people understand the basic environment language and boundaries they will hear every day.
+
+Topics:
+
+* LMI, UDN, PDN, and classified network concepts
+* Why environments are separated
+* What disconnected/offline environments mean
+* Why approved transfer paths matter
+* Why source-of-truth matters
+* Basic concepts around classified/restricted spaces
+* What assumptions should not be made between networks
+* High-level overview of how content may move between environments
+
+Important note:
+
+This deck should be reviewed carefully and kept high-level. Do not include sensitive architecture, real network diagrams, credentials, hostnames, IPs, paths, or specific transfer details unless they are approved for that audience.
+
+Suggested deliverables:
+
+* PowerPoint deck
+* sanitized environment concept diagram
+* terminology glossary
+
+⸻
+
+3. Source of Truth and Promotion Flows
+
+Purpose: Explain how the team should think about authoritative content, controlled changes, traceability, and promotion between environments.
+
+Topics:
+
+* What “source of truth” means
+* GitLab as an authoritative source for code/configuration
+* Why manual changes are risky
+* Approved promotion flows
+* Webhook transfer concepts
+* Mirroring concepts
+* Evidence and traceability
+* Why repeatable promotion matters
+* How source-of-truth supports auditability
+* How disconnected environments change the workflow
+
+Suggested deliverables:
+
+* PowerPoint deck
+* source-of-truth flow diagram
+* promotion checklist
+* common mistakes list
+
+⸻
+
+4. DSO 101: What DevSecOps Means for Our Team
+
+Purpose: Explain DSO in a way that connects directly to the team’s work.
+
+Topics:
+
+* DevSecOps in simple terms
+* Development + Security + Operations working together
+* Shift-left concepts
+* Automation
+* Repeatability
+* Evidence
+* Standardization
+* Security built into the process
+* What “good” looks like for our team
+* Moving from manual support to reusable patterns
+* Moving from one-off fixes to governed automation
+* How DSO reduces risk and saves time
+
+Key message:
+
+DSO is not just tools. It is a way of working that makes delivery, support, security, and operations more repeatable, measurable, and sustainable.
+
+Suggested deliverables:
+
+* PowerPoint deck
+* DSO maturity diagram
+* examples of “manual way” vs “DSO way”
+
+⸻
+
+2. RHEL / Linux Foundations Track
+
+This track should teach the basic operating system skills the team needs for daily support.
+
+5. RHEL 101
+
+Purpose: Give new people a practical starting point for working on RHEL systems.
+
+Topics:
+
+* What RHEL is
+* Why enterprise Linux matters
+* Filesystem basics
+* Users and groups
+* File permissions
+* Basic commands
+* Package management
+* Services
+* Logs
+* Network basics
+* Basic troubleshooting mindset
+
+Suggested lab:
+
+* Navigate the filesystem
+* check service status
+* inspect logs
+* install/query packages
+* check user/group/permission basics
+
+⸻
+
+6. RHEL Basics for Daily Support
+
+Purpose: Teach the commands people actually need when supporting systems.
+
+Topics:
+
+* systemctl
+* journalctl
+* dnf / yum
+* rpm
+* ss
+* ip
+* nmcli
+* firewall-cmd
+* df
+* du
+* find
+* grep
+* logs under /var/log
+* common support workflow
+
+Suggested lab:
+
+* Given a failing service, use logs and system commands to determine what happened.
+
+⸻
+
+7. RHEL Shortcuts, Tips, and Tricks
+
+Purpose: Help newer team members become faster and more comfortable on the command line.
+
+Topics:
+
+* command history
+* aliases
+* tab completion
+* grep
+* awk
+* sed
+* find
+* xargs
+* watch
+* less
+* shell expansion
+* quick log review
+* quick service checks
+* useful one-liners
+* safe command habits
+
+Suggested lab:
+
+* Find files, search logs, filter output, and monitor a command using common Linux tools.
+
+⸻
+
+8. RHEL Troubleshooting 101
+
+Purpose: Teach people how to troubleshoot instead of guessing.
+
+Topics:
+
+* Service will not start
+* Disk full
+* Permission denied
+* DNS issue
+* repo issue
+* package issue
+* certificate issue
+* SELinux denial
+* firewall issue
+* system resource issue
+* how to isolate root cause
+* how to capture evidence
+* how to avoid making the problem worse
+
+Key message:
+
+Do not randomly change things. Form a hypothesis, check evidence, change one thing at a time, and document what fixed it.
+
+Suggested deliverables:
+
+* PowerPoint deck
+* troubleshooting flowchart
+* runbook template
+* sample troubleshooting exercise
+
+⸻
+
+9. RHEL 7 vs 8 vs 9 vs 10
+
+Purpose: Help the team understand why older assumptions may break on newer versions.
+
+Topics:
+
+* package/repo differences
+* Python differences
+* crypto policy changes
+* system role changes
+* network management differences
+* container tooling changes
+* security hardening differences
+* STIG differences
+* deprecated commands/features
+* why migration planning matters
+* why automation should be version-aware
+
+Suggested deliverables:
+
+* comparison chart
+* migration considerations checklist
+* “things that changed” reference sheet
+
+⸻
+
+10. SELinux Without Fear
+
+Purpose: Help the team troubleshoot SELinux properly instead of immediately disabling it.
+
+Topics:
+
+* What SELinux is doing
+* enforcing vs permissive
+* contexts
+* labels
+* common denials
+* how to read SELinux-related messages
+* safe troubleshooting approach
+* when policy changes may be needed
+* why disabling SELinux should not be the default fix
+
+Suggested lab:
+
+* Diagnose a basic SELinux denial and identify the correct type of fix.
+
+⸻
+
+11. RHEL Security and Compliance Basics
+
+Purpose: Connect Linux administration to security, compliance, and auditability.
+
+Topics:
+
+* STIGs
+* errata
+* CVEs
+* patching
+* package repositories
+* Satellite/content views, if relevant
+* system hardening
+* audit logs
+* evidence collection
+* configuration drift
+* compliance-friendly administration
+
+Suggested deliverables:
+
+* PowerPoint deck
+* patching/compliance flow diagram
+* compliance evidence checklist
+
+⸻
+
+3. GitLab / CI/CD Track
+
+This is a strong Level 5 area because it improves team process, quality, and delivery.
+
+12. Git and GitLab 101
+
+Purpose: Teach the basic GitLab workflow every team member should understand.
+
+Topics:
+
+* repositories
+* branches
+* commits
+* merge requests
+* code review
+* tags
+* releases
+* protected branches
+* basic Git commands
+* good commit messages
+* avoiding direct changes in the wrong place
+
+Suggested lab:
+
+* Create a branch, make a change, open a merge request, and review the flow.
+
+⸻
+
+13. GitLab Pipelines 101
+
+Purpose: Explain how pipelines work and how to troubleshoot them.
+
+Topics:
+
+* what a pipeline is
+* stages
+* jobs
+* artifacts
+* variables
+* includes
+* runners
+* pipeline logs
+* common failure points
+* how to read a failed job
+
+Suggested lab:
+
+* Fix a simple failed pipeline.
+
+⸻
+
+14. Managing GitLab Pipelines from the Compliance Center
+
+Purpose: Train the team on centrally managed pipeline standards and how they affect projects.
+
+Topics:
+
+* compliance pipelines
+* centrally managed templates
+* how projects inherit standards
+* why this matters
+* how to troubleshoot inherited pipeline logic
+* how to safely update shared CI templates
+* how changes can affect many projects
+* testing before rollout
+* documenting pipeline changes
+
+Suggested deliverables:
+
+* PowerPoint deck
+* pipeline inheritance diagram
+* checklist for changing shared templates
+
+⸻
+
+15. GitLab Runner Basics
+
+Purpose: Explain the runner layer because runner problems can break many teams at once.
+
+Topics:
+
+* what a runner does
+* runner registration
+* shared vs project runners
+* runner tags
+* executors
+* containerized jobs
+* rootless Podman concepts, if relevant
+* common runner failures
+* registry authentication issues
+* disconnected environment considerations
+* how to tell if the problem is code, pipeline, runner, or infrastructure
+
+Suggested lab:
+
+* Diagnose a mocked failed runner/job issue.
+
+⸻
+
+16. CI/CD Security Best Practices
+
+Purpose: Help the team avoid security mistakes in pipelines.
+
+Topics:
+
+* protected variables
+* secret handling
+* least privilege
+* credentials in logs
+* artifact retention
+* registry authentication
+* dependency control
+* scanning concepts
+* approval gates
+* branch protection
+* avoiding unsafe pipeline shortcuts
+
+Suggested deliverables:
+
+* PowerPoint deck
+* CI/CD security checklist
+* examples of safe vs unsafe pipeline patterns
+
+⸻
+
+17. From Commit to Deployment
+
+Purpose: Show the full lifecycle from code change to controlled deployment.
+
+Topics:
+
+* code change
+* merge request
+* review
+* pipeline
+* artifact
+* release
+* promotion
+* approval
+* deployment
+* validation
+* rollback thinking
+* evidence capture
+* why “works on my machine” is not enough
+
+Suggested deliverables:
+
+* lifecycle diagram
+* sample release/promotion checklist
+
+⸻
+
+4. Ansible / Automation Track
+
+This should be one of the largest and most valuable tracks.
+
+18. Ansible 101
+
+Purpose: Give the team a basic understanding of Ansible.
+
+Topics:
+
+* inventory
+* playbooks
+* tasks
+* modules
+* variables
+* handlers
+* facts
+* templates
+* idempotency
+* running a playbook
+* reading playbook output
+
+Suggested lab:
+
+* Write and run a basic playbook.
+
+⸻
+
+19. Ansible Best Practices
+
+Purpose: Teach people how to write automation that is readable, reusable, and safe.
+
+Topics:
+
+* idempotent design
+* readable task names
+* variable organization
+* tags
+* handlers
+* error handling
+* avoiding unnecessary shell commands
+* using modules when available
+* keeping secrets out of code
+* check mode considerations
+* making automation maintainable
+* documenting expected behavior
+
+Suggested deliverables:
+
+* best-practices checklist
+* bad playbook vs good playbook examples
+
+⸻
+
+20. Ansible Roles
+
+Purpose: Teach reusable automation structure.
+
+Topics:
+
+* role structure
+* defaults vs vars
+* tasks
+* handlers
+* templates
+* files
+* meta dependencies
+* role inputs and outputs
+* designing a clean role
+* role documentation
+* role testing expectations
+
+Suggested lab:
+
+* Convert a simple playbook into a role.
+
+⸻
+
+21. Ansible Collections
+
+Purpose: Explain the collection-first model and why it matters for team reuse.
+
+Topics:
+
+* what collections are
+* why collections matter
+* FQCNs
+* internal collections
+* roles inside collections
+* plugins/modules, at a high level
+* versioning
+* packaging
+* dependency management
+* publishing/consuming internal automation
+* collection-first automation standards
+
+Suggested deliverables:
+
+* collection structure diagram
+* internal collection standards checklist
+
+⸻
+
+22. Ansible Molecule
+
+Purpose: Teach how automated testing improves Ansible quality.
+
+Topics:
+
+* what Molecule does
+* why role testing matters
+* scenarios
+* prepare
+* converge
+* verify
+* cleanup
+* CI integration
+* test containers
+* disconnected/rootless container challenges
+* common Molecule failure patterns
+
+Suggested lab:
+
+* Run a Molecule test against a simple role and troubleshoot a failed test.
+
+⸻
+
+23. Ansible for Disconnected Environments
+
+Purpose: Teach automation design for environments without internet access.
+
+Topics:
+
+* local collections
+* internal registries
+* offline dependencies
+* local repos
+* package availability
+* execution environment concepts
+* content mirroring
+* dependency pinning
+* repeatable automation without internet
+* avoiding assumptions that only work online
+
+Suggested deliverables:
+
+* disconnected automation checklist
+* dependency planning worksheet
+
+⸻
+
+24. Event-Driven Ansible and Self-Healing Concepts
+
+Purpose: Show how monitoring events can trigger governed automation.
+
+Topics:
+
+* what event-driven automation is
+* event source
+* rulebook
+* action
+* approval gates
+* low-risk remediation
+* audit trails
+* human-in-the-loop vs fully automated
+* safe examples:
+    * service restart
+    * certificate warning
+    * disk threshold response
+    * GitLab runner issue
+    * failed container
+    * evidence collection
+
+Key message:
+
+Self-healing does not mean unsafe automation. It means bounded, governed remediation with guardrails, evidence, and approval where needed.
+
+⸻
+
+25. Automation Design: From One-Off Fix to Reusable Capability
+
+Purpose: Teach people how to identify work that should become automation.
+
+Topics:
+
+* identifying repeated work
+* identifying high-value manual tasks
+* turning tickets into automation ideas
+* defining inputs and outputs
+* documenting the manual process first
+* creating a role/playbook
+* adding tests
+* adding CI/CD
+* documenting usage
+* measuring time saved
+* avoiding automation of bad processes
+
+Suggested deliverables:
+
+* automation candidate worksheet
+* automation value scoring matrix
+* sample before/after example
+
+⸻
+
+5. AeroLIT / Imaging / Platform Track
+
+This is where you can really separate yourself because this captures specialized knowledge you have built.
+
+26. AeroLIT Overview
+
+Purpose: Explain what AeroLIT is, what problem it solves, and why it matters.
+
+Topics:
+
+* what problem AeroLIT solves
+* disconnected/offline imaging needs
+* repeatable environment setup
+* bundle concept
+* PXE/content server concept
+* local repos
+* Ansible handoff
+* what aerolitctl does
+* how it supports standardization
+
+Suggested deliverables:
+
+* overview deck
+* architecture diagram
+* “why this matters” slide for leadership
+
+⸻
+
+27. Building Blocks of AeroLIT
+
+Purpose: Break AeroLIT into understandable components.
+
+Topics:
+
+* PXE
+* ISO content
+* extracted installation media
+* local repos
+* kickstart/autoinstall/unattend concepts
+* Ansible handoff
+* inventory
+* generated variables
+* config/state/log locations
+* bundle validation
+* troubleshooting areas
+
+Suggested lab:
+
+* Walk through the bundle layout and explain what each major directory/file supports.
+
+⸻
+
+28. Using aerolitctl
+
+Purpose: Train the team on the CLI workflow.
+
+Topics:
+
+* version
+* doctor
+* status
+* settings
+* path show/set
+* bundle show/validate
+* configure
+* deploy
+* repo
+* generate kickstart
+* generate playbook
+* provision
+* sync
+* logs
+* troubleshooting commands
+
+Suggested deliverables:
+
+* command reference
+* CLI workflow diagram
+* “common command examples” handout
+
+⸻
+
+29. AeroLIT Server Deployment Walkthrough
+
+Purpose: Show how to configure and deploy the server side.
+
+Topics:
+
+* bundle validation
+* server configuration
+* repo setup
+* PXE content
+* generated files
+* service validation
+* logs
+* common failures
+* how to recover
+
+Suggested lab:
+
+* Walk through a mocked or lab deployment flow.
+
+⸻
+
+30. AeroLIT Provisioning Walkthrough
+
+Purpose: Show how the Ansible handoff/provisioning side works.
+
+Topics:
+
+* running playbooks
+* inventory injection
+* playbook discovery
+* list/check helpers
+* logs
+* reboot handling concepts
+* preserving existing team roles/playbooks
+* troubleshooting failed provisioning
+
+Suggested deliverables:
+
+* provisioning workflow diagram
+* troubleshooting checklist
+
+⸻
+
+31. AeroLIT Roadmap: From RHEL Tooling to OS-Agnostic Imaging
+
+Purpose: Show the forward-looking vision and why the architecture should be extensible.
+
+Topics:
+
+* current RHEL-focused support
+* future support ideas:
+    * RHEL x86_64
+    * RHEL ARM/aarch64
+    * Rocky Linux
+    * Ubuntu
+    * Windows 11
+    * Windows Server
+* OS/version/architecture-based content structure
+* arbitrary install media support
+* kickstart/autoinstall/unattend-style concepts
+* why breaking old assumptions early is better
+* how this could become a broader imaging capability
+
+Key message:
+
+AeroLIT should not just be a RHEL helper. It should become a reusable imaging and provisioning foundation that can support broader mission environment needs.
+
+⸻
+
+32. AeroLIT as a DSO Capability
+
+Purpose: Connect AeroLIT to DSO outcomes.
+
+Topics:
+
+* reduces manual setup
+* improves repeatability
+* supports disconnected environments
+* enables standardization
+* improves handoff between imaging and automation
+* creates evidence
+* reduces tribal knowledge
+* supports cross-program reuse
+* helps new people understand the full environment lifecycle
+
+Suggested deliverables:
+
+* leadership-friendly summary deck
+* value/impact slide
+* before/after workflow comparison
+
+⸻
+
+6. Security / Classified Environment Track
+
+This track is important, but it needs to be handled carefully. Keep it high-level unless the material has been approved for the specific audience.
+
+33. Security Basics for DSO Engineers
+
+Purpose: Teach the security mindset needed for daily engineering work.
+
+Topics:
+
+* least privilege
+* secrets handling
+* approved storage
+* patching
+* logging
+* auditability
+* change control
+* configuration drift
+* evidence
+* secure defaults
+* peer review
+* separation of duties where applicable
+
+Suggested deliverables:
+
+* security checklist
+* common mistakes handout
+
+⸻
+
+34. Working in Classified / Restricted Environments
+
+Purpose: Teach high-level principles for working safely in sensitive environments.
+
+Topics:
+
+* general handling principles
+* separation of environments
+* approved processes
+* why disconnected workflows exist
+* transfer caution
+* documentation expectations
+* need-to-know mindset
+* avoiding oversharing details
+* common mistakes to avoid
+
+Important note:
+
+This deck should be reviewed before broad use. Keep details sanitized and approved.
+
+⸻
+
+35. STIGs 101
+
+Purpose: Help the team understand what STIGs are and how they affect system work.
+
+Topics:
+
+* what STIGs are
+* why they matter
+* how they affect system configuration
+* common RHEL STIG areas
+* what automation can help with
+* what still requires review/approval
+* evidence and validation
+* exceptions and documentation
+
+Suggested lab:
+
+* Review a mocked STIG finding and identify the remediation/evidence needed.
+
+⸻
+
+36. CVE and Errata Remediation Basics
+
+Purpose: Teach how vulnerability and patch remediation works in practical terms.
+
+Topics:
+
+* what a CVE is
+* what errata means
+* severity vs risk
+* patch availability
+* repo/content flow
+* testing before deployment
+* change windows
+* validation
+* evidence capture
+* how automation can reduce manual effort
+
+Suggested deliverables:
+
+* remediation flow diagram
+* patch validation checklist
+
+⸻
+
+37. Secrets and Credentials in Automation
+
+Purpose: Prevent dangerous mistakes in GitLab, Ansible, scripts, and CI/CD.
+
+Topics:
+
+* what not to commit
+* secrets in GitLab variables
+* vault concepts
+* registry credentials
+* service accounts
+* token handling
+* credential rotation
+* avoiding secrets in logs
+* review practices
+* what to do if a secret is exposed
+
+Suggested deliverables:
+
+* secrets handling checklist
+* examples of safe vs unsafe patterns
+
+⸻
+
+38. SELinux and Firewalls as Security Controls
+
+Purpose: Teach that SELinux and firewalls are not annoyances; they are controls.
+
+Topics:
+
+* why they exist
+* what they protect
+* why disabling them creates risk
+* troubleshooting safely
+* documenting exceptions
+* validating required access
+* balancing functionality and security
+
+⸻
+
+7. Operations / Monitoring / Support Track
+
+This track connects well to DSO maturity, self-healing, and reducing repetitive support work.
+
+39. Operational Support Model
+
+Purpose: Explain how the team handles issues and support responsibilities.
+
+Topics:
+
+* how issues are reported
+* ticket flow
+* prioritization
+* escalation
+* ownership
+* handoffs
+* documentation expectations
+* closing the loop
+* identifying repeat issues
+* when to create a runbook
+* when to create automation
+
+Suggested deliverables:
+
+* support workflow diagram
+* ticket quality checklist
+
+⸻
+
+40. Monitoring 101: Splunk, Prometheus, Nagios
+
+Purpose: Explain the difference between logs, metrics, alerts, and checks.
+
+Topics:
+
+* what Splunk is good at
+* what Prometheus is good at
+* what Nagios is good at
+* logs vs metrics vs health checks
+* alerts
+* dashboards
+* event patterns
+* alert fatigue
+* how monitoring supports automation
+* what data helps us troubleshoot faster
+
+Suggested deliverables:
+
+* monitoring comparison chart
+* alert-to-action workflow
+
+⸻
+
+41. From Alert to Action
+
+Purpose: Show how the team should respond when monitoring detects a problem.
+
+Topics:
+
+* alert received
+* verify the issue
+* determine blast radius
+* gather evidence
+* triage
+* remediate
+* update ticket
+* validate recovery
+* identify root cause
+* decide whether a runbook or automation is needed
+
+Suggested deliverables:
+
+* alert triage checklist
+* incident evidence checklist
+
+⸻
+
+42. Recurring Issues and Automation Opportunities
+
+Purpose: Teach the team how to find patterns that should become automation.
+
+Topics:
+
+* identifying repeated failures
+* collecting issue data
+* looking for trends
+* deciding whether to automate
+* estimating time saved
+* prioritizing automation backlog
+* creating tickets for automation candidates
+* measuring impact after automation is created
+
+Suggested deliverables:
+
+* automation candidate scoring sheet
+* recurring issue review template
+
+⸻
+
+43. Self-Healing Operations
+
+Purpose: Explain self-healing in a practical and safe way.
+
+Topics:
+
+* what self-healing means
+* what should be automated
+* what should require approval
+* what should never be automatic
+* low-risk remediation
+* guardrails
+* audit trails
+* examples:
+    * failed container restart
+    * GitLab runner stuck
+    * disk threshold
+    * certificate approaching expiration
+    * service health check failure
+    * evidence collection before remediation
+
+Key message:
+
+Self-healing should be governed, observable, reversible where possible, and documented.
+
+⸻
+
+44. Post-Incident Reviews for Engineers
+
+Purpose: Teach how incidents should become learning and improvement opportunities.
+
+Topics:
+
+* what happened
+* when it happened
+* how it was detected
+* who was impacted
+* what fixed it
+* why it happened
+* what could detect it earlier
+* what could prevent it next time
+* what should become a runbook
+* what should become automation
+
+Suggested deliverables:
+
+* post-incident review template
+* sample completed PIR
+
+⸻
+
+Additional Decks I Would Add
+
+These would make the program feel more complete and more Level 5.
+
+45. How to Troubleshoot Like a Senior Engineer
+
+This could be one of the best trainings in the whole program.
+
+Topics:
+
+* do not randomly change things
+* form a hypothesis
+* check logs first
+* identify blast radius
+* reproduce the issue when possible
+* change one thing at a time
+* capture evidence
+* understand symptoms vs root cause
+* communicate status clearly
+* know when to escalate
+* document the final fix
+
+Why this matters:
+
+This helps newer team members think more like senior engineers instead of just copying commands.
+
+⸻
+
+46. How to Write Useful Documentation
+
+Purpose: Improve team knowledge sharing and reduce repeated explanations.
+
+Topics:
+
+* runbooks
+* SOPs
+* troubleshooting guides
+* architecture diagrams
+* decision records
+* examples
+* known errors
+* ownership
+* update cadence
+* what makes documentation actually useful
+
+Suggested deliverables:
+
+* documentation template
+* examples of weak vs strong documentation
+
+⸻
+
+47. How to Build a Runbook
+
+Purpose: Standardize how support procedures are documented.
+
+Topics:
+
+* purpose
+* scope
+* prerequisites
+* inputs
+* steps
+* commands
+* expected output
+* validation
+* rollback
+* escalation
+* evidence
+* owner
+* last reviewed date
+
+Suggested deliverables:
+
+* team runbook template
+* sample runbook
+
+⸻
+
+48. Containers for DSO Engineers
+
+Purpose: Help the team understand containers because they affect GitLab, Molecule, AAP, RHEL, and modern automation.
+
+Topics:
+
+* images
+* containers
+* registries
+* tags
+* Podman vs Docker
+* rootless containers
+* volumes
+* networking
+* container logs
+* container lifecycle
+* common issues
+* disconnected registry considerations
+
+Suggested lab:
+
+* Run a container, inspect logs, mount a volume, and troubleshoot a simple container failure.
+
+⸻
+
+49. Disconnected / Offline Engineering Basics
+
+Purpose: Teach one of the most important realities of the team’s environment.
+
+Topics:
+
+* why disconnected environments exist
+* repo mirroring
+* internal registries
+* offline packages
+* dependency control
+* approved source content
+* promotion between networks
+* checksum/signature validation
+* avoiding internet assumptions
+* designing tools that work offline
+
+Suggested deliverables:
+
+* disconnected design checklist
+* offline dependency planning worksheet
+
+⸻
+
+50. Architecture Diagrams for Engineers
+
+Purpose: Improve how the team explains systems and support boundaries.
+
+Topics:
+
+* how to draw useful diagrams
+* system boundaries
+* data flows
+* trust boundaries
+* source-of-truth flows
+* deployment flows
+* troubleshooting diagrams
+* keeping diagrams simple
+* avoiding sensitive details in broad training
+
+Suggested deliverables:
+
+* diagram examples
+* diagram review checklist
+
+⸻
+
+51. What I Learned from Red Hat Summit / Red Hat Conference
+
+Purpose: Turn conference learning into team value.
+
+Topics:
+
+* key Red Hat announcements or themes
+* RHEL direction
+* Ansible Automation Platform direction
+* Event-Driven Ansible
+* Lightspeed / AI-assisted operations concepts
+* image mode / container concepts, if relevant
+* security/compliance themes
+* what could apply to our team
+* what we should investigate further
+
+Suggested deliverables:
+
+* conference summary deck
+* “ideas worth piloting” list
+* recommendations for future research
+
+⸻
+
+52. AI-Assisted Operations for DSO
+
+Purpose: Explain AI in a practical, non-hype way.
+
+Topics:
+
+* what AI can help with
+* log summarization
+* triage assistance
+* documentation drafting
+* playbook suggestions
+* runbook improvement
+* finding patterns in incidents
+* limits of AI
+* human approval
+* data sensitivity
+* why AI should assist, not blindly control
+
+Suggested deliverables:
+
+* AI use case list
+* safe-use guidelines
+* “good candidate / bad candidate” examples
+
+⸻
+
+53. Engineering Ownership and Professional Standards
+
+Purpose: Teach expectations beyond technical skills.
+
+Topics:
+
+* owning the outcome
+* communicating clearly
+* documenting work
+* not hiding uncertainty
+* asking good questions
+* reviewing changes carefully
+* respecting security boundaries
+* leaving systems better than you found them
+* helping the next person
+
+Why this matters:
+
+This is valuable for onboarding and shows leadership maturity.
+
+⸻
+
+Recommended Priority Order
+
+You do not need to create all 50+ decks immediately. That would be too much to start with.
+
+The better strategy is:
+
+1. Build the core curriculum first.
+2. Deliver it.
+3. Collect feedback.
+4. Add advanced/specialized decks over time.
+5. Track impact.
+
+Phase 1 — Core Onboarding
+
+Build these first:
+
+1. Welcome to the Team: What We Support
+2. DSO 101
+3. Lockheed Martin Infrastructure Basics
+4. Source of Truth and Promotion Flows
+5. RHEL 101
+6. Git and GitLab 101
+7. Ansible 101
+
+Purpose:
+
+This creates the baseline onboarding path for every new person.
+
+Outcome:
+
+A new team member can understand what the team supports, how the environment works at a high level, and what core tools they need to start learning.
+
+⸻
+
+Phase 2 — Daily Support Skills
+
+Build these next:
+
+8. RHEL Basics for Daily Support
+9. RHEL Troubleshooting 101
+10. SELinux Without Fear
+11. STIGs 101
+12. GitLab Pipelines 101
+13. Managing GitLab Pipelines from the Compliance Center
+14. Ansible Best Practices
+15. Ansible Roles
+
+Purpose:
+
+This helps team members perform common support and engineering tasks more consistently.
+
+Outcome:
+
+People can troubleshoot basic issues, understand pipelines, read automation, and avoid common mistakes.
+
+⸻
+
+Phase 3 — Automation and DSO Maturity
+
+Build these next:
+
+16. Ansible Collections
+17. Ansible Molecule
+18. Containers for DSO Engineers
+19. Disconnected / Offline Engineering Basics
+20. Monitoring 101
+21. From Alert to Action
+22. Self-Healing Operations
+23. Automation Design: From One-Off Fix to Reusable Capability
+
+Purpose:
+
+This moves the team beyond basic support and toward repeatable, governed automation.
+
+Outcome:
+
+The team can identify recurring issues, design automation, test automation, and connect monitoring to remediation patterns.
+
+⸻
+
+Phase 4 — AeroLIT and Specialized Team Knowledge
+
+Build these after the core material is underway:
+
+24. AeroLIT Overview
+25. Building Blocks of AeroLIT
+26. Using aerolitctl
+27. AeroLIT Server Deployment Walkthrough
+28. AeroLIT Provisioning Walkthrough
+29. AeroLIT Roadmap
+30. AeroLIT as a DSO Capability
+
+Purpose:
+
+This captures specialized knowledge that may currently live mostly with you.
+
+Outcome:
+
+Other team members can understand, support, and eventually contribute to AeroLIT-related work.
+
+⸻
+
+Phase 5 — Sustainment and Advanced Topics
+
+Build these as the program matures:
+
+31. How to Troubleshoot Like a Senior Engineer
+32. How to Write Useful Documentation
+33. How to Build a Runbook
+34. CVE and Errata Remediation Basics
+35. CI/CD Security Best Practices
+36. Secrets and Credentials in Automation
+37. RHEL 7 vs 8 vs 9 vs 10
+38. What I Learned from Red Hat Conference
+39. AI-Assisted Operations for DSO
+40. Post-Incident Reviews for Engineers
+41. Architecture Diagrams for Engineers
+42. Engineering Ownership and Professional Standards
+
+Purpose:
+
+This turns the program into a long-term team development framework.
+
+Outcome:
+
+The team improves not only technically, but also in documentation, communication, ownership, and operational maturity.
+
+⸻
+
+Recommended Structure for Every PowerPoint
+
+Use the same format for every deck so the whole program feels consistent and professional.
+
+Each deck should include:
+
+1. Purpose
+
+Explain what the training teaches and why the team cares.
+
+Example:
+
+This training explains how GitLab pipelines work, how our team uses them, and how to troubleshoot common pipeline failures.
+
+2. Where This Fits
+
+Explain how the topic connects to the team’s real work.
+
+Example:
+
+This matters because pipeline failures can block releases, break automation workflows, and delay promotion between environments.
+
+3. Core Concepts
+
+Explain the key ideas in simple terms.
+
+4. Team-Relevant Examples
+
+Use sanitized examples from the team’s actual work.
+
+5. Common Mistakes
+
+Show what new people or busy engineers commonly get wrong.
+
+6. Demo or Walkthrough
+
+Include commands, screenshots, diagrams, or a process walkthrough.
+
+7. Troubleshooting Checklist
+
+Give people a repeatable way to approach problems.
+
+8. Hands-On Lab
+
+Include at least one small exercise when possible.
+
+9. Knowledge Check
+
+Add 3–5 questions or discussion prompts.
+
+10. References
+
+Link to approved internal docs, vendor docs, team runbooks, or related trainings.
+
+11. Follow-Up Actions
+
+Tell the learner what they should do next.
+
+Example:
+
+* Review the related runbook.
+* Complete the lab.
+* Shadow a pipeline troubleshooting session.
+* Open a merge request using the standard workflow.
+
+⸻
+
+Make It More Than PowerPoint
+
+For Level 5, the supporting artifacts matter almost as much as the decks.
+
+1. Training Tracker
+
+Create a tracker with columns like:
+
+Training	Track	Priority	Status	Audience	Owner	Date Delivered	Recording	Lab	Runbook	Feedback Score	Last Updated
+
+This shows program management and makes the effort measurable.
+
+⸻
+
+2. New Hire Onboarding Checklist
+
+Example:
+
+Timeframe	Training	Expected Outcome
+Week 1	Team Overview, Infrastructure Basics, DSO 101	Understand what the team supports and how the environment works at a high level
+Week 2	RHEL 101, GitLab 101, Ansible 101	Understand core tools and terminology
+Week 3	RHEL Troubleshooting, GitLab Pipelines, STIGs	Assist with basic troubleshooting and support tasks
+Week 4	Compliance Center, AeroLIT Overview, Automation Design	Understand team-specific workflows and automation direction
+Month 2	Molecule, Containers, Disconnected Engineering	Begin contributing to automation and CI/CD improvements
+Month 3	Capstone exercise	Demonstrate practical readiness
+
+⸻
+
+3. Hands-On Labs
+
+Labs make the training much stronger.
+
+Possible labs:
+
+* troubleshoot a failed RHEL service
+* inspect system logs
+* fix a GitLab pipeline syntax issue
+* write a basic Ansible playbook
+* convert a playbook into a role
+* run a Molecule test
+* review a mocked STIG finding
+* troubleshoot a failed repo/package install
+* diagnose a mocked SELinux denial
+* trace a source-of-truth promotion flow
+* identify whether an issue should become a runbook or automation
+
+⸻
+
+4. Runbook Library
+
+Create a runbook for common support situations.
+
+Recommended runbooks:
+
+* GitLab pipeline failed
+* GitLab runner offline
+* registry authentication issue
+* RHEL repo not working
+* package install failure
+* service failed
+* disk full
+* SELinux denial
+* firewall issue
+* certificate expiring
+* Ansible playbook failed
+* Molecule test failed
+* AeroLIT deploy failed
+* AeroLIT provisioning failed
+* source-of-truth promotion issue
+* webhook transfer issue
+* CVE/errata remediation workflow
+
+⸻
+
+5. Feedback Form
+
+After each training, collect feedback.
+
+Questions:
+
+* Was this useful?
+* What was unclear?
+* What should be added?
+* Could you perform this task after the training?
+* Was the lab helpful?
+* What topic should be next?
+* What questions do you still have?
+* Should this training be required for new team members?
+
+This gives you measurable improvement data.
+
+⸻
+
+6. Capstone Exercises
+
+This would make the program much stronger.
+
+Instead of only watching slides, new people should prove basic readiness.
+
+Possible capstones:
+
+New Hire Capstone
+
+The person must:
+
+* read a ticket
+* identify the likely system/tool involved
+* inspect relevant logs or pipeline output
+* explain the root cause
+* suggest next steps
+* document the result
+
+Automation Capstone
+
+The person must:
+
+* take a small manual task
+* write a basic Ansible playbook or role
+* add documentation
+* explain how it could be tested
+* explain how it could be run safely
+
+GitLab Capstone
+
+The person must:
+
+* open a merge request
+* review pipeline output
+* fix a failed job
+* explain the artifact/output
+* identify whether the failure is code, pipeline, runner, or environment related
+
+This helps prove the training is actually working.
+
+⸻
+
+7. Central GitLab Documentation Repo
+
+Create one central place for the program.
+
+Suggested structure:
+
+dso-team-enablement/
+  README.md
+  curriculum-map.md
+  onboarding/
+  slides/
+  labs/
+  runbooks/
+  diagrams/
+  templates/
+  feedback/
+  capstones/
+  references/
+
+Suggested repo sections:
+
+* start here
+* new hire path
+* required trainings
+* optional trainings
+* labs
+* runbooks
+* troubleshooting
+* AeroLIT
+* GitLab/CI/CD
+* Ansible
+* RHEL
+* security/compliance
+* DSO maturity
+
+This makes it feel like a real program, not a folder full of slides.
+
+⸻
+
+Suggested 90-Day Execution Plan
+
+Weeks 1–2: Build the Program Foundation
+
+Deliverables:
+
+* program name and scope
+* curriculum map
+* training tracker
+* slide template
+* runbook template
+* lab template
+* feedback form
+* new hire checklist
+* central GitLab repo structure
+
+Goal:
+
+Create the structure before creating dozens of decks.
+
+⸻
+
+Weeks 3–6: Build and Deliver Core Onboarding
+
+Deliver these trainings:
+
+* Welcome to the Team
+* DSO 101
+* Infrastructure Basics
+* Source of Truth and Promotion Flows
+* RHEL 101
+* GitLab 101
+* Ansible 101
+
+Supporting artifacts:
+
+* onboarding checklist
+* glossary
+* environment concept diagram
+* basic lab exercises
+
+Goal:
+
+Create a repeatable onboarding path for new team members.
+
+⸻
+
+Weeks 7–10: Build Practical Support Material
+
+Deliver these trainings:
+
+* RHEL Basics for Daily Support
+* RHEL Troubleshooting 101
+* SELinux Without Fear
+* STIGs 101
+* GitLab Pipelines 101
+* Compliance Center Pipelines
+* Ansible Best Practices
+* Ansible Roles
+
+Supporting artifacts:
+
+* troubleshooting runbooks
+* pipeline troubleshooting checklist
+* SELinux checklist
+* STIG evidence checklist
+
+Goal:
+
+Help the team perform common support work more consistently.
+
+⸻
+
+Weeks 11–13: Build DSO Maturity Material
+
+Deliver these trainings:
+
+* Ansible Collections
+* Ansible Molecule
+* Containers for DSO Engineers
+* Disconnected Engineering Basics
+* Monitoring 101
+* From Alert to Action
+* Self-Healing Operations
+* Turning Manual Work into Automation
+
+Supporting artifacts:
+
+* automation candidate worksheet
+* incident-to-automation workflow
+* Molecule lab
+* container troubleshooting lab
+
+Goal:
+
+Move the team toward repeatable, governed automation and better operational maturity.
+
+⸻
+
+After 90 Days: Build AeroLIT and Advanced Tracks
+
+Deliver these trainings:
+
+* AeroLIT Overview
+* Building Blocks of AeroLIT
+* Using aerolitctl
+* AeroLIT Server Deployment Walkthrough
+* AeroLIT Provisioning Walkthrough
+* AeroLIT Roadmap
+* AeroLIT as a DSO Capability
+
+Additional topics:
+
+* Red Hat conference lessons learned
+* AI-assisted operations
+* architecture diagrams
+* documentation standards
+* engineering ownership
+
+Goal:
+
+Capture specialized knowledge, reduce dependency on one person, and create long-term team capability.
+
+⸻
+
+Six-Month Program Goal
+
+By the end of six months, the goal should be to have:
+
+* 25–35 PowerPoint decks created
+* 10–15 hands-on labs created
+* 10–20 runbooks created
+* new hire onboarding checklist completed
+* central GitLab documentation repo established
+* at least one training delivered per week or every other week
+* feedback collected from each session
+* recordings stored, if allowed
+* at least one capstone exercise created
+* clear evidence of team adoption
+
+⸻
+
+How to Make This Help the Level 5 Case
+
+Track impact from the beginning.
+
+Use language like:
+
+Built a structured DSO onboarding and training curriculum to reduce knowledge silos, improve new team member ramp-up, standardize support practices, and increase team capability across Linux, GitLab, CI/CD, Ansible, security/compliance, automation, and disconnected environment workflows.
+
+Track measurable items:
+
+* number of trainings created
+* number of trainings delivered
+* number of people trained
+* number of new hires onboarded
+* number of labs created
+* number of runbooks created
+* number of feedback responses collected
+* feedback scores
+* number of recordings created
+* number of common issues documented
+* number of repeated questions reduced
+* number of automation candidates identified
+* number of runbooks converted into automation
+* time for new team members to become productive
+
+The key is to show that the work improved the team, not just that the work was completed.
+
+⸻
+
+Manager-Facing Impact Summary
+
+This is the kind of wording I would eventually give your manager:
+
+I created the DSO Team Enablement Program to capture and standardize critical team knowledge across RHEL, GitLab, CI/CD, Ansible, security/compliance, disconnected environments, AeroLIT, and DSO operations. The program includes structured training decks, hands-on labs, troubleshooting runbooks, onboarding checklists, and feedback tracking. The goal is to reduce tribal knowledge, improve new-hire ramp-up, strengthen support consistency, and move the team toward repeatable, governed automation.
+
+Another version:
+
+This effort turns individual experience into reusable team capability. Instead of relying on informal knowledge transfer, the team now has a structured path for onboarding, practical support training, automation maturity, and specialized platform knowledge. This improves resiliency, reduces repeated explanations, and creates a foundation for long-term DSO growth.
+
+⸻
+
+Strongest Final Package
+
+The strongest version of this effort would include:
+
+1. 25–35 PowerPoint decks
+2. 10–15 hands-on labs
+3. 10–20 troubleshooting runbooks
+4. new-hire onboarding checklist
+5. training tracker
+6. feedback form
+7. central GitLab documentation repo
+8. standard slide template
+9. standard runbook template
+10. standard lab template
+11. capstone exercises
+12. recordings, if allowed
+13. quarterly refresh plan
+14. manager-facing impact summary
+15. roadmap for future trainings
+
+That becomes a serious Level 5 accomplishment because it shows:
+
+* leadership
+* mentoring
+* technical depth
+* team enablement
+* process improvement
+* operational maturity
+* security awareness
+* cross-team reuse potential
+* long-term ownership
+
+⸻
+
+Recommended Program Names
+
+Good options:
+
+* DSO Team Enablement Program
+* DSO Engineering Training Program
+* DSO Onboarding and Automation Academy
+* Mission Systems DSO Training Curriculum
+* Linux, Automation, and CI/CD Enablement Program
+* DSO Knowledge Transfer and Onboarding Framework
+* DSO Engineering Readiness Program
+* DSO Capability Development Program
+
+Best option:
+
+DSO Team Enablement Program
+
+Why:
+
+It sounds professional, broad, and promotion-worthy. It also avoids making it sound like a school project or a pile of presentations. “Enablement” implies you are increasing the capability of the entire team.
+
+⸻
+
+Recommended First Step
+
+Do not start by making 30 decks.
+
+Start by creating these five things:
+
+1. Curriculum map
+2. Training tracker
+3. Slide template
+4. New-hire checklist
+5. First three decks:
+    * DSO 101
+    * Welcome to the Team
+    * RHEL 101
+
+Then show your manager the structure and say:
+
+I started organizing this as a reusable DSO Team Enablement Program rather than just individual slide decks. The idea is to create a structured onboarding and knowledge-transfer path with slides, labs, runbooks, and tracking so the team can reuse it for new people and ongoing training.
+
+That would be a very strong way to show initiative immediately.
+
+⸻
+
+Final Recommendation
+
+This is absolutely worth doing.
+
+The key is to make it look like a program, not a task.
+
+The difference is:
+
+Task: Create PowerPoints.
+Program: Build a reusable team training, onboarding, and enablement framework.
+
+For Level 5, the program framing is much stronger.
+
+The main story should be:
+
+I helped scale the team by converting individual knowledge into reusable training, documentation, labs, and operating standards that improve onboarding, support consistency, and DSO maturity.
+
+That is the story I would build everything around.
+
+
+
+
+
 I’d say back something like this:
 
 Absolutely. I would not frame it as just “DSO pipelines for Java/C++/Python,” because that may sound too narrow. I’d frame it more as applying DSO practices to the Siemens SPDM/Teamcenter environment: treating configurations, workflows, integrations, and automation scripts as version-controlled, tested, repeatable, and deployable software assets.
