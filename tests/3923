@@ -1,3 +1,104 @@
+You’re right. That screenshot does prove UBI7 was working before in the same Molecule matrix. I should not have jumped to “remove UBI7” as the answer.
+
+So the real conclusion is:
+
+UBI7 is not inherently unsupported in your setup.
+Something changed between the passing run and the current run.
+
+Your old passing job shows:
+
+ubi10 ok
+ubi7  ok
+ubi8  ok
+ubi9  ok
+Idempotence completed successfully
+Verifier completed successfully
+Job succeeded
+
+The new failure is specifically:
+
+Container ubi7 exited with code 126
+Error: crun: fchownat `lock/lockdev`: Invalid argument
+
+That points to a runtime/image/storage issue, not your Ansible role.
+
+Most likely causes now
+
+The top suspects are:
+
+1. The UBI7 image changed because it is using :latest.
+2. The local UBI7 image/layer in rootless Podman storage got corrupted or stale.
+3. Podman/crun/rootless storage behavior changed on the VDI.
+4. The runner outage forced fresh container creation and exposed a storage/runtime problem that was already there.
+
+I would not remove UBI7 yet. First prove whether raw Podman can still start the UBI7 image outside Molecule.
+
+Step 1 — Test UBI7 manually on the runner host
+
+Run this on the runner host, not inside the GitLab job:
+
+podman rm -f ubi7-test 2>/dev/null || true
+podman run -d \
+  --name ubi7-test \
+  --privileged \
+  --tmpfs /run:rw \
+  --tmpfs /tmp:rw \
+  -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
+  registry.gitlab.us.lmco.com:443/lit/containers/images/base-images/ubi7-init:latest \
+  /usr/sbin/init
+podman ps --filter name=ubi7-test
+podman logs ubi7-test
+podman rm -f ubi7-test
+
+If this fails with the same lock/lockdev error
+
+Then Molecule is innocent. The UBI7 image/runtime combo is broken on the runner host right now.
+
+Then do:
+
+podman rmi registry.gitlab.us.lmco.com:443/lit/containers/images/base-images/ubi7-init:latest
+podman pull registry.gitlab.us.lmco.com:443/lit/containers/images/base-images/ubi7-init:latest
+
+Then rerun the same ubi7-test.
+
+If this succeeds
+
+Then raw Podman can run UBI7, and the problem is something specific to how Molecule/molecule-plugins[podman] is creating or waiting on the container.
+
+Step 2 — Check whether the UBI7 image changed
+
+Run:
+
+podman image inspect registry.gitlab.us.lmco.com:443/lit/containers/images/base-images/ubi7-init:latest \
+  --format 'ID={{.Id}} Created={{.Created}} Digest={{index .RepoDigests 0}}'
+
+If the image was created or pulled recently, that would explain why the old job passed and the current one fails even though the YAML looks the same.
+
+Step 3 — Capture Podman/crun versions
+
+Since this could be a VDI-managed change, run:
+
+podman version
+crun --version
+rpm -q podman crun fuse-overlayfs slirp4netns
+
+If these changed recently, that strengthens the “VDI/runtime changed under us” theory.
+
+My updated recommendation
+
+Do not remove UBI7 from the matrix yet.
+
+Use this order:
+
+1. Confirm raw Podman can or cannot start ubi7-init.
+2. If raw Podman fails, repull the ubi7-init image and retest.
+3. If raw Podman still fails, this is a runner/Podman/runtime/image issue.
+4. If raw Podman works, then inspect Molecule’s generated create behavior.
+
+Your proof matters: UBI7 worked before, so the right question is not “should we drop UBI7?” yet. The right question is what changed in the image/runtime path between the passing job and now?
+
+
+
 You’re seeing a user-namespace bind-mount permissions problem.
 
 Even though you did:
