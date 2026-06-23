@@ -1,3 +1,96 @@
+You’re seeing a user-namespace bind-mount permissions problem.
+
+Even though you did:
+
+chmod 777 "$HOME/.local/share/gitlab-runner/home"
+
+the container’s gitlab-runner user is not the same as your host user. In rootless Podman, container users are mapped through subordinate UID/GID ranges. So “777 should work” feels logical, but rootless user namespace + bind mounts can still fail depending on how the mount is presented.
+
+Your manual test proved this:
+
+crun: stat /home/gitlab-runner: Permission denied
+
+So the next fix is not more chmod. The next fix is to let Podman shift/chown the bind mount for the container user.
+
+Do this next: test the mount with :U
+
+Stop the runner loop first:
+
+systemctl --user stop gitlab-runner
+systemctl --user reset-failed gitlab-runner
+
+Now run this test:
+
+podman run --rm \
+  --image-volume=ignore \
+  --security-opt label:disable \
+  -v "$HOME/.local/share/gitlab-runner/home:/home/gitlab-runner:U" \
+  --entrypoint /bin/sh \
+  localhost/gitlab-runner-known-good:previous \
+  -lc 'id; ls -ld /home /home/gitlab-runner; cd /home/gitlab-runner && pwd'
+
+If that works, run the same test as the gitlab-runner user:
+
+podman run --rm \
+  --image-volume=ignore \
+  --security-opt label:disable \
+  --user gitlab-runner \
+  -v "$HOME/.local/share/gitlab-runner/home:/home/gitlab-runner:U" \
+  --entrypoint /bin/sh \
+  localhost/gitlab-runner-known-good:previous \
+  -lc 'id; ls -ld /home /home/gitlab-runner; cd /home/gitlab-runner && pwd'
+
+You want it to print:
+
+/home/gitlab-runner
+
+without permission denied.
+
+If the :U test works
+
+Change this line in your Quadlet:
+
+Volume=%h/.local/share/gitlab-runner/home:/home/gitlab-runner
+
+to:
+
+Volume=%h/.local/share/gitlab-runner/home:/home/gitlab-runner:U
+
+Keep this:
+
+PodmanArgs=--image-volume=ignore
+SecurityLabelDisable=true
+
+Then restart:
+
+systemctl --user daemon-reload
+systemctl --user reset-failed gitlab-runner
+systemctl --user restart gitlab-runner
+sleep 10
+systemctl --user status gitlab-runner --no-pager -l
+
+Why this is happening
+
+There were two separate issues:
+
+Issue 1:
+Podman tried to process the image-defined /home/gitlab-runner volume.
+Fix:
+--image-volume=ignore
+Issue 2:
+GitLab Runner then tried to chdir into /home/gitlab-runner.
+But the container user could not access your bind-mounted host directory.
+Likely fix:
+Use :U on the /home/gitlab-runner bind mount.
+
+So your current Quadlet is very close. The specific line I would try changing is only this:
+
+Volume=%h/.local/share/gitlab-runner/home:/home/gitlab-runner:U
+
+If :U still fails, the next fallback is to stop using /home/gitlab-runner as the runner working directory and override the GitLab Runner command to use a directory like /tmp/gitlab-runner. But test :U first because it directly addresses the permission problem.
+
+
+
 podman run --rm \
   --image-volume=ignore \
   --security-opt label:disable \
