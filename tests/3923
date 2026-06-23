@@ -1,3 +1,79 @@
+You’re right to question it. That command failing is actually very important:
+
+podman run --rm \
+  --entrypoint /usr/bin/gitlab-runner \
+  localhost/gitlab-runner-known-good:previous \
+  --version
+
+If that fails, then this is not a GitLab Runner config problem, not Molecule, and not your config.toml volumes list. Podman is failing before it can even run /usr/bin/gitlab-runner.
+
+The clue from your journal is:
+
+Error: calculating destination path to copy up container ... /home/gitlab-runner: permission denied
+
+That means Podman is trying to create the container filesystem and handle /home/gitlab-runner, but rootless Podman cannot copy/access that path correctly. So the binary is probably never even reached.
+
+Why it may have worked before
+
+A few realistic possibilities:
+
+1. The runner service was already running, so you did not notice the image could no longer start fresh until a restart happened.
+2. The latest image changed, and after the restart Podman pulled or used a different image/layer behavior.
+3. Rootless Podman storage got into a bad state under:
+
+/home/e424770/.local/share/containers/storage
+
+4. Something changed on the VDI, like Podman version, SELinux behavior, user namespace/subuid/subgid mapping, home directory mount behavior, or storage permissions.
+
+So yes, an admin-managed VDI change could have caused this, but we do not know that yet. The evidence only says:
+
+rootless Podman cannot start this image because it hits permission denied while handling /home/gitlab-runner
+
+The next test should be targeted
+
+Run this first:
+
+podman image inspect localhost/gitlab-runner-known-good:previous \
+  --format 'User={{.Config.User}} WorkingDir={{.Config.WorkingDir}} Volumes={{json .Config.Volumes}}'
+
+I expect it may show /home/gitlab-runner as an image volume. If so, that explains the “copy up” error.
+
+Then run this version of the test command:
+
+mkdir -p "$HOME/.local/share/gitlab-runner/home"
+chmod 700 "$HOME/.local/share/gitlab-runner/home"
+podman run --rm \
+  --security-opt label:disable \
+  --entrypoint /usr/bin/gitlab-runner \
+  -v "$HOME/.local/share/gitlab-runner/home:/home/gitlab-runner" \
+  localhost/gitlab-runner-known-good:previous \
+  --version
+
+If that works
+
+Then the issue is specifically Podman’s automatic handling of /home/gitlab-runner. The fix is to keep this in the Quadlet:
+
+Volume=%h/.local/share/gitlab-runner/home:/home/gitlab-runner
+
+Then restart the service.
+
+If that still fails
+
+Then the problem is deeper than the GitLab Runner home directory. At that point, test whether any container can start:
+
+podman run --rm registry.gitlab.us.lmco.com:443/lit/containers/images/base-images/ubi8-init:latest /bin/true
+
+or use whatever local UBI image name exists from podman images.
+
+If even a basic UBI container fails, then yes, this points much more strongly to a broken/changed rootless Podman environment on the VDI.
+
+And you’re right about podman ps
+
+For this specific failure, podman ps was a bad next step. The container is failing during creation and the service uses cleanup behavior, so there may be nothing useful to list. The useful command is the journal line with the full permission denied error.
+
+
+
+
 DSO Team Enablement Program
 
 This could be a very strong Level 5 case if it is framed the right way.
