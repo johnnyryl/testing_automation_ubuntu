@@ -1,3 +1,23 @@
+podman run --rm \
+  --image-volume=ignore \
+  --security-opt label:disable \
+  -v "$HOME/.local/share/gitlab-runner/home:/home/gitlab-runner" \
+  --entrypoint /bin/sh \
+  localhost/gitlab-runner-known-good:previous \
+  -lc 'id; ls -ld /home /home/gitlab-runner; cd /home/gitlab-runner && pwd'
+
+
+
+podman run --rm \
+  --image-volume=ignore \
+  --security-opt label:disable \
+  --user gitlab-runner \
+  -v "$HOME/.local/share/gitlab-runner/home:/home/gitlab-runner" \
+  --entrypoint /bin/sh \
+  localhost/gitlab-runner-known-good:previous \
+  -lc 'id; ls -ld /home /home/gitlab-runner; cd /home/gitlab-runner && pwd'
+
+
 You’re right to question it. That command failing is actually very important:
 
 podman run --rm \
