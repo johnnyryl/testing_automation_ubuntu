@@ -1,3 +1,91 @@
+TLDR of what happened:
+
+I had a working rootless Podman GitLab Runner running through systemctl --user / Quadlet, and Molecule testing was working across ubi7, ubi8, ubi9, and ubi10.
+
+I started adding a global AeroLIT Molecule fixture setup so all role tests could access shared runner-side paths like:
+
+/home/e424770/.local/share/aerolit-molecule
+
+That fixture area contains things like:
+
+* hubs/current
+* files/current
+* repos/current
+
+The goal was for the CI job container to see those paths, and eventually for Molecule-created test containers to mount/use them too.
+
+The first issue I hit was a simple config.toml syntax issue in the runner Docker volume list. I added the fixture volume but missed a comma, so GitLab Runner failed to parse config.toml. That was fixed by correcting the TOML volume array.
+
+Then the bigger issue started: the GitLab Runner service container itself stopped starting. It was failing before any Molecule job logic even ran.
+
+The first real error was around /home/gitlab-runner:
+
+crun: mkdir /home/gitlab-runner: permission denied
+
+After testing manually, I found the GitLab Runner image declares /home/gitlab-runner as an image volume. Rootless Podman was trying to process/copy-up that image-defined volume and failing in this VDI/rootless Podman environment.
+
+The fix for that first container-start issue was adding this to the Quadlet file:
+
+PodmanArgs=--image-volume=ignore
+
+That got Podman past the image-defined volume problem.
+
+Then the error changed to:
+
+error=chdir /home/gitlab-runner: permission denied
+
+So Podman could now start the container far enough for GitLab Runner to launch, but GitLab Runner itself was trying to use /home/gitlab-runner as its working directory and could not access it.
+
+I tried mounting a writable /home/gitlab-runner directory from my home path, including testing :Z and :U, but that still failed due to rootless Podman/user namespace permission issues.
+
+The final working fix was to avoid /home/gitlab-runner entirely by overriding the GitLab Runner command in the Quadlet file:
+
+Exec=run --user=gitlab-runner --working-directory=/tmp --config /etc/gitlab-runner/config.toml
+
+So the key working Quadlet changes were:
+
+PodmanArgs=--image-volume=ignore
+
+and
+
+Exec=run --user=gitlab-runner --working-directory=/tmp --config /etc/gitlab-runner/config.toml
+
+After that, the GitLab Runner service started successfully, picked up jobs again, and the Molecule pipeline got past the runner startup problem.
+
+The fixture path also appears to be reaching the job container correctly. The job printed:
+
+AEROLIT_FIXTURE_ROOT=/home/e424770/.local/share/aerolit-molecule
+
+and derived:
+
+AEROLIT_COLLECTION_HUB=/home/e424770/.local/share/aerolit-molecule/hubs/current
+
+AEROLIT_TEST_FILES_DIR=/home/e424770/.local/share/aerolit-molecule/files/current
+
+AEROLIT_TEST_REPOS_DIR=/home/e424770/.local/share/aerolit-molecule/repos/current
+
+So the runner service issue is fixed, and the global fixture variables are making it into the job.
+
+The current remaining issue is now inside Molecule when creating the ubi7 test container. The new error is:
+
+crun: fchownat lock/lockdev: Invalid argument
+
+That is different from the GitLab Runner service issue. It happens during Molecule’s Podman container creation for the ubi7 test instance.
+
+Important note: ubi7 did work before in the same Molecule matrix, so this is not just “UBI7 was never supported.” Something changed in the rootless Podman/runtime/image path, or a new image/layer/runtime behavior is being hit now.
+
+Current status:
+
+* GitLab Runner service starts again.
+* Runner is accepting jobs.
+* Global AeroLIT fixture env vars are reaching the job.
+* Molecule starts and gets into the test flow.
+* The remaining problem is ubi7 container creation failing with a rootless Podman/crun error.
+
+
+
+
+
 You’re right. That screenshot does prove UBI7 was working before in the same Molecule matrix. I should not have jumped to “remove UBI7” as the answer.
 
 So the real conclusion is:
