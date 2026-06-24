@@ -1,3 +1,1005 @@
+Yes — slide 5 is supposed to be the breakout of the whole presentation. I rewrote it so it clearly works as a roadmap.
+
+Below is the cleaner copy/paste-ready slide deck.
+
+⸻
+
+1. Title Slide
+
+RHEL Shortcuts, Tips, and Tricks
+
+Small commands that save real time during troubleshooting, log review, service checks, and daily admin work.
+
+Presenter: Your Name
+Audience: Newer team members and engineers getting faster on the command line
+
+Presenter note:
+Today is about practical command-line habits people can start using immediately.
+
+⸻
+
+2. Purpose
+
+Purpose
+
+Help team members become faster, safer, and more confident on the RHEL command line.
+
+This training focuses on:
+
+* Reducing repetitive typing
+* Finding commands, files, logs, and services faster
+* Troubleshooting with a repeatable flow
+* Building safer habits before making changes
+
+Presenter note:
+This is not about memorizing every command. It is about learning patterns that make daily work easier.
+
+⸻
+
+3. Where This Fits
+
+Where This Fits in Our Work
+
+These shortcuts and tools help during common RHEL tasks such as:
+
+* Checking service health
+* Reviewing logs
+* Troubleshooting access or connectivity issues
+* Looking for files or configuration settings
+* Checking ports, firewall, SELinux, permissions, and disk usage
+* Working faster during incident response or routine maintenance
+
+These commands support approved runbooks and team processes. They do not replace them.
+
+⸻
+
+4. Learning Outcomes
+
+By the end of this session, learners should be able to:
+
+* Edit long commands quickly
+* Reuse command history instead of retyping
+* Navigate directories faster
+* Search logs and files with focused commands
+* Check services, ports, firewall, SELinux, permissions, and disk usage
+* Use safer habits before changing or deleting anything
+
+⸻
+
+5. Roadmap
+
+Today’s Roadmap
+
+Part 1: Make the Shell Feel Fast
+
+* Keyboard shortcuts
+* Command history tricks
+* Directory navigation
+* Tab completion
+* Aliases, functions, and shell expansion
+
+Part 2: Troubleshoot Faster
+
+* systemctl
+* journalctl
+* grep, find, xargs, awk, sed
+* watch, btop, ss
+* Disk, firewall, SELinux, and permissions checks
+
+Part 3: Work Safer Under Pressure
+
+* Safer command habits
+* Demo walkthrough
+* Hands-on lab
+* Knowledge check
+
+⸻
+
+6. Demo Safety and Assumptions
+
+Demo Safety
+
+For this training:
+
+* Use sanitized examples
+* Run demos on lab or approved non-production systems
+* Be careful with commands that restart services, change firewall rules, or delete files
+* Use echo when demonstrating risky history tricks
+* Preview before deleting or changing files
+* Avoid putting passwords, tokens, or secrets into shell commands
+
+Key rule:
+Move fast, but make the safe path your default.
+
+⸻
+
+7. Section Divider
+
+Part 1
+
+Make the Shell Feel Fast
+
+Less typing.
+Fewer mistakes.
+Faster command editing.
+
+⸻
+
+8. Command-Line Editing Shortcuts
+
+Keyboard shortcuts that make the shell feel fast
+
+Shortcut	What it does
+Ctrl + A	Jump to beginning of line
+Ctrl + E	Jump to end of line
+Ctrl + U	Cut everything before the cursor
+Ctrl + K	Cut everything after the cursor
+Ctrl + W	Delete the previous word
+Ctrl + Y	Paste cut text back
+Ctrl + L	Clear the screen
+
+Why this helps:
+These are useful when editing long commands instead of holding the arrow keys.
+
+⸻
+
+9. More Shell Movement Shortcuts
+
+Move around long commands faster
+
+Shortcut	What it does
+Alt + B	Move back one word
+Alt + F	Move forward one word
+Ctrl + _	Undo the last command-line edit
+Ctrl + XX	Toggle between cursor position and beginning of line
+Ctrl + C	Stop the current command
+Ctrl + D	Exit shell or end input
+
+Example use:
+When a command is long, jump by words instead of moving one character at a time.
+
+⸻
+
+10. The Magic Last Argument Trick
+
+Esc + . or Alt + .
+
+What it does:
+Inserts the last argument from the previous command.
+
+Example:
+
+mkdir -p /tmp/rhel-demo/logs
+cd Esc+.
+
+Becomes:
+
+cd /tmp/rhel-demo/logs
+
+Why this matters:
+This is great for reusing paths, filenames, service names, and log locations.
+
+⸻
+
+11. Command History Tricks
+
+Stop retyping commands
+
+Command	What it does
+history	Show command history
+`history	grep ssh`
+!!	Re-run previous command
+sudo !!	Re-run previous command with sudo
+!$	Last argument from previous command
+!*	All arguments from previous command
+!systemctl	Most recent command starting with systemctl
+!?firewalld?	Most recent command containing firewalld
+fc	Edit a previous command before running it
+
+Best demo:
+
+cat /etc/ssh/sshd_config
+sudo !!
+
+⸻
+
+12. Fix the Last Command Without Retyping
+
+The fast replace trick
+
+Example:
+
+sudo systemctl start firewalld.service
+^start^stop
+
+Expands to:
+
+sudo systemctl stop firewalld.service
+
+Safer demo version:
+
+echo systemctl start firewalld.service
+^start^stop
+
+When to use it:
+When the last command was almost right, but one word needs to change.
+
+⸻
+
+13. Reverse History Search
+
+Search the shell’s memory
+
+Press:
+
+Ctrl + R
+
+Then type part of a previous command:
+
+firewall
+
+Press Ctrl + R again to cycle through older matches.
+
+Why this helps:
+You do not need to remember the whole command. You only need to remember one unique word.
+
+⸻
+
+14. Page Up / Page Down History Search
+
+Prefix-based history search
+
+What it does:
+Type the beginning of a command, then press Page Up or Page Down to cycle through matching history.
+
+Example:
+
+systemctl
+
+Then press Page Up to find previous commands that started with systemctl.
+
+Optional setup in ~/.inputrc:
+
+"\e[5~": history-search-backward
+"\e[6~": history-search-forward
+
+Reload:
+
+bind -f ~/.inputrc
+
+⸻
+
+15. Directory Navigation Basics
+
+Move around without losing your place
+
+Command	What it does
+cd -	Go back to previous directory
+cd	Go to your home directory
+cd ..	Go up one level
+cd ../..	Go up two levels
+pwd	Show current directory
+realpath <file>	Show full resolved path
+dirname <path>	Show parent directory
+basename <path>	Show final file or directory name
+
+Key idea:
+Use the shell to remember paths instead of retyping them.
+
+⸻
+
+16. Directory Stack
+
+pushd, popd, and dirs
+
+cd - is great for switching between two places.
+pushd, popd, and dirs are better when you are jumping between multiple locations.
+
+Demo:
+
+pwd
+pushd /var/log
+pushd /etc/ssh
+pushd /tmp
+dirs -v
+popd
+popd
+
+Shortcut aliases:
+
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ....='cd ../../..'
+
+⸻
+
+17. Tab Completion
+
+Stop typing full commands
+
+Examples:
+
+systemctl status fire<Tab>
+cd /var/l<Tab>
+ssh someho<Tab>
+journalctl -u ssh<Tab>
+
+Install completion support if needed:
+
+sudo dnf install bash-completion
+
+Why this matters:
+Tab completion is not just faster. It helps prevent typos.
+
+⸻
+
+18. Aliases and Functions
+
+Save your best commands
+
+Useful aliases:
+
+alias ll='ls -alF'
+alias lh='ls -lh'
+alias grep='grep --color=auto'
+alias ports='ss -tulpen'
+alias failed='systemctl list-units --failed'
+alias jfu='journalctl -f -u'
+
+Example:
+
+jfu sshd
+
+Runs:
+
+journalctl -f -u sshd
+
+Useful function:
+
+mkcd() {
+  mkdir -p "$1" && cd "$1"
+}
+
+⸻
+
+19. Shell Expansion Tricks
+
+Let Bash do repetitive work
+
+Brace expansion:
+
+mkdir -p project/{bin,etc,logs,tmp}
+cp sshd_config{,.bak}
+touch test{1..5}.txt
+
+Globs:
+
+ls *.log
+ls /var/log/*.{log,out}
+
+Command substitution:
+
+mkdir "backup-$(date +%F)"
+tar -czf logs-$(hostname)-$(date +%F).tgz /var/log
+
+Why this helps:
+Shell expansion reduces repetitive typing and creates consistent names.
+
+⸻
+
+20. Section Divider
+
+Part 2
+
+Troubleshoot Faster
+
+Services.
+Logs.
+Processes.
+Ports.
+Firewall.
+SELinux.
+Disk.
+Permissions.
+
+⸻
+
+21. Systemctl Service Basics
+
+Service management shortcuts
+
+Command	Use
+systemctl status firewalld	Check service status
+systemctl start firewalld	Start service now
+systemctl stop firewalld	Stop service now
+systemctl restart firewalld	Restart service
+systemctl reload firewalld	Reload config when supported
+systemctl enable --now firewalld	Enable at boot and start now
+systemctl disable --now firewalld	Disable at boot and stop now
+
+Safe habit:
+Check status before restarting.
+
+⸻
+
+22. Systemctl Triage Commands
+
+Start with what is failed
+
+systemctl list-units --failed
+systemctl status firewalld --no-pager
+systemctl is-active firewalld
+systemctl is-enabled firewalld
+systemctl cat firewalld
+systemctl list-dependencies firewalld
+
+Best one-liner:
+
+systemctl list-units --failed
+
+Why this helps:
+It gives you a quick view of broken units before you dig through logs.
+
+⸻
+
+23. Journalctl Superpower
+
+Filter logs instead of reading everything
+
+Command	What it does
+journalctl -xe	Recent errors with context
+journalctl -xeu sshd	Recent errors for one service
+journalctl -u firewalld	Logs for one service
+journalctl -u firewalld -b	Logs from this boot
+journalctl -f	Follow logs live
+journalctl --disk-usage	Show journal disk usage
+
+Best example:
+
+journalctl -u firewalld -b --since "30 minutes ago"
+
+⸻
+
+24. Quick Log Review
+
+less, tail, and focused searching
+
+Useful commands:
+
+less /var/log/messages
+tail -f /var/log/messages
+tail -F /var/log/messages
+grep -i error /var/log/messages
+grep -i -A3 -B3 error /var/log/messages
+
+Inside less:
+
+Key	Use
+/error	Search
+n	Next match
+N	Previous match
+G	Bottom of file
+g	Top of file
+F	Follow file
+q	Quit
+
+⸻
+
+25. Grep Tricks
+
+Make searches more useful
+
+Command	Use
+grep -i	Case-insensitive search
+grep -v	Exclude matches
+grep -r	Recursive search
+grep -n	Show line numbers
+grep -A3	Show 3 lines after
+grep -B3	Show 3 lines before
+grep -C3	Show 3 lines before and after
+
+Examples:
+
+grep -RIn --color=auto "PermitRootLogin" /etc/ssh
+grep -Ev "^#|^$" /etc/ssh/sshd_config
+
+⸻
+
+26. Find Files Without Guessing
+
+find for files, size, age, and ownership
+
+find /var/log -type f -mtime -1
+find /var/log -type f -size +100M -exec ls -lh {} +
+find /etc -type f -name "*.conf" | head
+find /path -user root
+find /path -perm -4000
+
+Safety habit:
+
+find /tmp -type f -name "*.tmp" -mtime +7 -print
+
+Then only after review:
+
+find /tmp -type f -name "*.tmp" -mtime +7 -delete
+
+Key rule:
+Print before delete.
+
+⸻
+
+27. Xargs
+
+Take a list and do something with it
+
+Basic idea:
+find creates the list. xargs feeds that list into another command.
+
+Example:
+
+find /var/log -type f -name "*.log" | xargs grep -i error
+
+Safer with unusual filenames:
+
+find /var/log -type f -name "*.log" -print0 | xargs -0 grep -i error
+
+Parallel example:
+
+find . -type f -name "*.log" -print0 | xargs -0 -P4 grep -i error
+
+⸻
+
+28. Awk
+
+When the answer is hiding in a column
+
+Examples:
+
+awk '{print $1}' file
+awk '{print $1, $NF}' file
+awk -F: '{print $1, $3}' /etc/passwd
+awk -F: '$3 >= 1000 {print $1, $3, $7}' /etc/passwd
+
+Summarize repeated values:
+
+awk '{print $1}' access.log | sort | uniq -c | sort -nr | head
+
+Why this helps:
+awk is useful when logs or command output have repeated columns.
+
+⸻
+
+29. Sed
+
+Quick stream editing
+
+Examples:
+
+sed 's/old/new/' file
+sed 's/old/new/g' file
+sed -n '20,40p' file
+sed '/^#/d; /^$/d' /etc/ssh/sshd_config
+
+Safer in-place edit:
+
+sed -i.bak 's/old/new/g' file
+
+Safety point:
+Use .bak when changing files so you have a backup.
+
+⸻
+
+30. Watch
+
+Turn a command into a live dashboard
+
+watch -n 2 date
+watch -n 5 'df -h'
+watch -n 5 'systemctl list-units --failed'
+watch -n 2 'ss -tulpen | grep :443'
+watch -n 2 'firewall-cmd --state; firewall-cmd --list-all'
+
+Why this helps:
+watch is useful when you are waiting for a service, port, disk, or firewall state to change.
+
+⸻
+
+31. Process Monitoring
+
+When top feels like a spreadsheet, btop feels like a dashboard
+
+Classic tools:
+
+top
+ps aux --sort=-%mem | head
+ps aux --sort=-%cpu | head
+pgrep -af sshd
+pidof sshd
+
+Better visual tool:
+
+btop
+
+Why btop is useful:
+
+* CPU, memory, disk, and network view
+* Easier process sorting
+* Process tree view
+* More readable for newer admins
+
+Safe habit:
+Use process tools for visibility. Do not kill processes unless you understand what owns them.
+
+⸻
+
+32. Disk and Filesystem Checks
+
+Disk-space triage
+
+df -hT
+du -sh * 2>/dev/null | sort -h
+lsblk
+lsblk -f
+findmnt
+mount | column -t
+sudo lsof +L1
+
+Triage flow:
+
+df -hT
+cd /var
+sudo du -sh * 2>/dev/null | sort -h
+sudo lsof +L1
+
+Cool trick:
+lsof +L1 can show deleted files that are still held open by a process.
+
+⸻
+
+33. Networking Quick Checks
+
+Check address, route, ports, DNS, and connectivity
+
+ip -br addr
+ip route
+ss -tulpen
+ss -tulpen | grep :22
+nmcli con show --active
+getent hosts servername
+curl -vk https://server.example.com
+ping -c 4 servername
+tracepath servername
+
+Key point:
+Use ss instead of guessing whether a port is listening.
+
+⸻
+
+34. Firewalld Practical Checks
+
+Temporary first, permanent after validation
+
+Check current state:
+
+systemctl status firewalld
+firewall-cmd --state
+firewall-cmd --get-active-zones
+firewall-cmd --list-all
+firewall-cmd --list-services
+firewall-cmd --list-ports
+
+Temporary change:
+
+sudo firewall-cmd --add-service=http
+
+Permanent change after validation:
+
+sudo firewall-cmd --add-service=http --permanent
+sudo firewall-cmd --reload
+
+⸻
+
+35. SELinux Quick Checks
+
+Check before disabling
+
+getenforce
+sestatus
+ls -Z
+ps -eZ | grep sshd
+sudo ausearch -m AVC -ts recent
+sudo restorecon -Rv /path
+
+Example:
+
+ls -Z /var/www/html
+sudo restorecon -Rv /var/www/html
+
+Key point:
+Do not immediately disable SELinux. Check the context, check AVCs, then fix the label or policy.
+
+⸻
+
+36. Permissions Troubleshooting
+
+When the file looks fine but access still fails
+
+ls -l
+stat file
+namei -l /path/to/file
+
+Best trick:
+
+namei -l /var/www/html/index.html
+
+Why it matters:
+namei -l shows permissions for every directory in the path.
+
+Other useful commands:
+
+chmod --reference=goodfile badfile
+chown --reference=goodfile badfile
+install -m 0644 file /target/path/
+
+⸻
+
+37. Troubleshooting Checklist
+
+Repeatable RHEL quick-check flow
+
+1. What changed recently?
+2. Is the service active?
+
+systemctl status service
+
+3. What do the logs say?
+
+journalctl -u service -b --since "30 minutes ago"
+
+4. Is the port listening?
+
+ss -tulpen
+
+5. Is firewall involved?
+
+firewall-cmd --list-all
+
+6. Is SELinux involved?
+
+getenforce
+sudo ausearch -m AVC -ts recent
+
+7. Is disk or permission blocking it?
+
+df -h
+namei -l /path/to/file
+
+⸻
+
+38. Section Divider
+
+Part 3
+
+Work Safer Under Pressure
+
+Preview first.
+Backup before changing.
+Use temporary changes before permanent ones.
+Avoid unnecessary blast radius.
+
+⸻
+
+39. Safer Command Habits
+
+Make the safe way the easy way
+
+Habit	Why it matters
+Use --dry-run when available	Preview changes
+Use sed -i.bak	Keep a backup
+Use find ... -print before -delete	Avoid wrong deletes
+Use rm -I	Add confirmation
+Check systemctl status before restart	Know current state
+Use temporary firewall rules first	Validate before permanent
+Use sudo only when needed	Reduce blast radius
+Avoid secrets in commands	Shell history can save them
+
+⸻
+
+40. Safety Examples
+
+Preview, backup, then change
+
+Preview file cleanup:
+
+find /tmp -name "*.tmp" -mtime +7 -print
+
+Then only after review:
+
+find /tmp -name "*.tmp" -mtime +7 -delete
+
+Backup config before editing:
+
+cp important.conf important.conf.$(date +%F).bak
+
+Preview rsync:
+
+rsync -av --dry-run source/ dest/
+
+Key rule:
+Do not make the first command the destructive command.
+
+⸻
+
+41. Best One-Liners
+
+Fast checks worth memorizing
+
+systemctl list-units --failed
+journalctl -u sshd -b --since "1 hour ago"
+ss -tulpen
+ps aux --sort=-%mem | head
+ps aux --sort=-%cpu | head
+du -sh * 2>/dev/null | sort -h
+grep -Ev '^#|^$' file
+find . -type f -mtime -1
+rpm -qf /usr/bin/systemctl
+rpm -V package-name
+
+Why this slide matters:
+These are quick commands that can save time during real troubleshooting.
+
+⸻
+
+42. Live Demo Walkthrough
+
+Scenario: A teammate says a service is not working
+
+Goal: check service state, logs, ports, firewall, and recent failures.
+
+systemctl status firewalld --no-pager
+journalctl -u firewalld -b --since "30 minutes ago" --no-pager
+ss -tulpen
+firewall-cmd --state
+firewall-cmd --list-all
+systemctl list-units --failed
+watch -n 2 'systemctl is-active firewalld; firewall-cmd --state'
+
+Demo message:
+This is a repeatable flow: status, logs, ports, firewall, failed units, monitor.
+
+⸻
+
+43. Demo Wow Moments
+
+Quick tricks to show live
+
+Last argument:
+
+mkdir -p /tmp/rhel-demo/logs
+cd Esc+.
+
+Reverse search:
+
+Ctrl + R
+firewall
+
+Re-run with sudo:
+
+cat /etc/ssh/sshd_config
+sudo !!
+
+Fast replace:
+
+echo systemctl start firewalld.service
+^start^stop
+
+Directory stack:
+
+pushd /var/log
+pushd /etc/ssh
+dirs -v
+popd
+
+⸻
+
+44. Hands-On Lab
+
+Practice: find, check, filter, and monitor
+
+Lab task:
+Use common RHEL tools to find files, search logs, check a service, and monitor a command.
+
+Commands to practice:
+
+systemctl list-units --failed
+journalctl -u sshd -b --since "1 hour ago"
+grep -RIn "PermitRootLogin" /etc/ssh
+find /var/log -type f -mtime -1
+watch -n 5 'df -h'
+
+Stretch task:
+
+pushd /var/log
+pushd /etc/ssh
+dirs -v
+popd
+
+Expected result:
+Learners should be able to explain what each command is checking and when they would use it.
+
+⸻
+
+45. Common Mistakes
+
+What people often get wrong
+
+Mistake	Better habit
+Retyping long commands	Use history, Ctrl + R, !!, and !$
+Restarting before checking logs	Check systemctl status and journalctl first
+Searching entire logs	Filter by service, boot, time, or keyword
+Making firewall changes permanent first	Test temporary rules first
+Running find ... -delete too quickly	Use find ... -print first
+Disabling SELinux immediately	Check labels and AVCs first
+Pasting secrets into commands	Remember shell history may save them
+
+⸻
+
+46. Knowledge Check
+
+Quick review
+
+1. What shortcut jumps to the beginning of the command line?
+2. What does this command do?
+
+sudo !!
+
+3. What command jumps back to the previous directory?
+4. What three commands manage a deeper directory stack?
+5. What command shows failed systemd units?
+6. What does Esc + . or Alt + . do?
+7. Why should you run find ... -print before find ... -delete?
+
+⸻
+
+47. Knowledge Check Answers
+
+Answers
+
+1. Ctrl + A
+2. Re-runs the previous command with sudo
+3. cd -
+4. pushd, popd, and dirs
+5. systemctl list-units --failed
+6. Inserts the last argument from the previous command
+7. It lets you review what will be deleted before making a destructive change
+
+Key takeaway:
+The goal is not just speed. The goal is speed with control.
+
+⸻
+
+48. Follow-Up Actions, References, and Closing
+
+Follow-Up Actions
+
+* Practice Ctrl + R, Esc + ., sudo !!, and cd -
+* Add useful aliases to your shell profile
+* Use journalctl filters instead of reading full logs
+* Try btop on an approved system if available
+* Build a personal command cheat sheet
+* Share useful one-liners with the team
+
+References
+
+* Approved internal RHEL documentation
+* Team runbooks
+* Approved vendor documentation for RHEL, systemd, firewalld, SELinux, and Bash
+
+Closing Takeaway
+
+Small command-line habits can make troubleshooting faster, safer, and more repeatable.
+
+
 TLDR of what happened:
 
 I had a working rootless Podman GitLab Runner running through systemctl --user / Quadlet, and Molecule testing was working across ubi7, ubi8, ubi9, and ubi10.
