@@ -1,4 +1,22 @@
 
+- name: Check files mount inside Molecule target
+  ansible.builtin.stat:
+    path: /opt/aerolit/files/.fixture-ok
+  register: files_fixture
+
+- name: Check repos mount inside Molecule target
+  ansible.builtin.stat:
+    path: /opt/aerolit/repos/.fixture-ok
+  register: repos_fixture
+
+- name: Assert fixture mounts are visible inside target
+  ansible.builtin.assert:
+    that:
+      - files_fixture.stat.exists
+      - repos_fixture.stat.exists
+
+
+
 # 3) make the role discoverable
 mkdir -p "$SCEN_DIR/roles"
 ln -snf "$ROLE_ABS" "$SCEN_DIR/roles/$ROLE_NAME"
