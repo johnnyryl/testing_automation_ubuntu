@@ -1,4 +1,36 @@
 
+# 3) make the role discoverable
+mkdir -p "$SCEN_DIR/roles"
+ln -snf "$ROLE_ABS" "$SCEN_DIR/roles/$ROLE_NAME"
+
+# 3b) build Ansible role/collection dependency search path
+HUB_ROLES_PATH="$(build_hub_roles_path "$AEROLIT_COLLECTION_HUB/roles")"
+
+export ANSIBLE_ROLES_PATH="$SCEN_DIR/roles:$CURRENT_ROLE_PARENT"
+
+if [ -n "$HUB_ROLES_PATH" ]; then
+  export ANSIBLE_ROLES_PATH="$ANSIBLE_ROLES_PATH:$HUB_ROLES_PATH"
+fi
+
+export ANSIBLE_ROLES_PATH="$ANSIBLE_ROLES_PATH:/usr/share/ansible/roles:/etc/ansible/roles"
+
+export ANSIBLE_COLLECTIONS_PATH="$AEROLIT_COLLECTION_HUB/collections:/root/.ansible/collections:/usr/share/ansible/collections"
+export ANSIBLE_COLLECTIONS_PATHS="$ANSIBLE_COLLECTIONS_PATH"
+
+echo "=== AeroLIT Molecule dependency resolution ==="
+echo "Role under test: $ROLE_NAME"
+echo "Scenario dir: $SCEN_DIR"
+echo "Current role parent: $CURRENT_ROLE_PARENT"
+echo "Hub: $AEROLIT_COLLECTION_HUB"
+echo "HUB_ROLES_PATH=$HUB_ROLES_PATH"
+echo "ANSIBLE_ROLES_PATH=$ANSIBLE_ROLES_PATH"
+echo "ANSIBLE_COLLECTIONS_PATH=$ANSIBLE_COLLECTIONS_PATH"
+
+# 4) decide driver: try Podman first, else use Docker
+use_podman=1
+...
+
+
 for ROLE_DIR in "${!ROLESET[@]}"; do
   if [ "$ROLE_DIR" = "." ]; then
     ROLE_NAME="$(basename "$CI_PROJECT_PATH")"
