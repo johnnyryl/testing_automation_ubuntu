@@ -1,4 +1,10 @@
 
+export AEROLIT_REQUIRES_FILES="${AEROLIT_REQUIRES_FILES:-false}"
+export AEROLIT_REQUIRES_REPOS="${AEROLIT_REQUIRES_REPOS:-false}"
+export AEROLIT_PREPARE_ROLES="${AEROLIT_PREPARE_ROLES:-}"
+
+
+
 # 3b) build Ansible role/collection dependency search path
 mkdir -p "$WORK_DIR/.ansible/collections"
 mkdir -p "$WORK_DIR/.ansible/roles"
