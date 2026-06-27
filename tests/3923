@@ -1,3 +1,23 @@
+
+for ROLE_DIR in "${!ROLESET[@]}"; do
+  if [ "$ROLE_DIR" = "." ]; then
+    ROLE_NAME="$(basename "$CI_PROJECT_PATH")"
+    ROLE_ABS="$CI_PROJECT_DIR"
+    CURRENT_ROLE_PARENT="$(dirname "$CI_PROJECT_DIR")"
+  else
+    ROLE_NAME="$(basename "$ROLE_DIR")"
+    ROLE_ABS="$CI_PROJECT_DIR/${ROLE_DIR#./}"
+    CURRENT_ROLE_PARENT="$CI_PROJECT_DIR/$(dirname "$ROLE_DIR")"
+  fi
+
+  export ROLE_NAME ROLE_ABS CURRENT_ROLE_PARENT
+
+  echo
+  echo "==== Role: $ROLE_NAME (scenario: $SCENARIO_NAME) ===="
+  echo "ROLE_ABS=$ROLE_ABS"
+  echo "CURRENT_ROLE_PARENT=$CURRENT_ROLE_PARENT"
+
+
 Yes — slide 5 is supposed to be the breakout of the whole presentation. I rewrote it so it clearly works as a roadmap.
 
 Below is the cleaner copy/paste-ready slide deck.
