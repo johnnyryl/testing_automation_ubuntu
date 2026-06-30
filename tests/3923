@@ -1,3 +1,133 @@
+
+
+
+
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AEROLIT_FIXTURE_ROOT:-$HOME/.local/share/aerolit-molecule}"
+HUBS_DIR="$ROOT/hubs"
+CACHE_DIR="$ROOT/cache"
+
+REPO_URL="${AEROLIT_COLLECTIONS_HUB_REPO_URL:?Set AEROLIT_COLLECTIONS_HUB_REPO_URL}"
+
+mkdir -p "$HUBS_DIR" "$CACHE_DIR"
+
+# Prevent overlapping refreshes.
+LOCK="$CACHE_DIR/aerolit-refresh-collections-hub.lock"
+exec 9>"$LOCK"
+flock -n 9 || {
+  echo "Another collections-hub refresh is already running; exiting."
+  exit 0
+}
+
+echo "=== AeroLIT collections-hub refresh ==="
+echo "ROOT=$ROOT"
+echo "HUBS_DIR=$HUBS_DIR"
+echo "REPO_URL=$REPO_URL"
+
+# Find latest semver-like tag:
+#   1.45.0
+#   v1.45.0
+LATEST_TAG="$(
+  git ls-remote --tags --refs "$REPO_URL" \
+    | awk '{print $2}' \
+    | sed 's#refs/tags/##' \
+    | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
+    | sort -V \
+    | tail -1
+)"
+
+if [ -z "$LATEST_TAG" ]; then
+  echo "ERROR: No semver tags found in $REPO_URL"
+  exit 1
+fi
+
+VERSION="${LATEST_TAG#v}"
+SNAP="collections-hub-$VERSION"
+DEST="$HUBS_DIR/$SNAP"
+
+CURRENT_REAL="$(readlink -f "$HUBS_DIR/current" 2>/dev/null || true)"
+CURRENT_NAME=""
+if [ -n "$CURRENT_REAL" ]; then
+  CURRENT_NAME="$(basename "$CURRENT_REAL")"
+fi
+
+echo "Latest tag: $LATEST_TAG"
+echo "Latest version: $VERSION"
+echo "Target snapshot: $SNAP"
+echo "Current snapshot: ${CURRENT_NAME:-none}"
+
+# If current already points to the latest snapshot and it exists, do nothing.
+if [ "$CURRENT_NAME" = "$SNAP" ] && [ -d "$DEST" ]; then
+  echo "collections-hub already current: $SNAP"
+  readlink -f "$HUBS_DIR/current"
+  exit 0
+fi
+
+# Create the snapshot only if it does not already exist.
+if [ ! -d "$DEST" ]; then
+  TMP="$(mktemp -d "$CACHE_DIR/collections-hub.XXXXXX")"
+
+  cleanup() {
+    rm -rf "$TMP"
+  }
+  trap cleanup EXIT
+
+  echo "Cloning $REPO_URL tag $LATEST_TAG..."
+  git clone --depth 1 --branch "$LATEST_TAG" "$REPO_URL" "$TMP/$SNAP"
+
+  test -d "$TMP/$SNAP/collections/ansible_collections" || {
+    echo "ERROR: cloned repo does not look like a valid collections-hub."
+    echo "Missing: collections/ansible_collections"
+    exit 1
+  }
+
+  COMMIT="$(git -C "$TMP/$SNAP" rev-parse HEAD)"
+
+  cat > "$TMP/$SNAP/metadata.yml" <<EOF
+name: $SNAP
+created_by: $USER
+created_at: $(date -Iseconds)
+source_repo: $REPO_URL
+source_tag: $LATEST_TAG
+source_version: $VERSION
+source_commit: $COMMIT
+purpose: AeroLIT Molecule collections-hub dependency snapshot
+EOF
+
+  echo "Creating snapshot: $DEST"
+  mv "$TMP/$SNAP" "$DEST"
+else
+  echo "Snapshot already exists: $DEST"
+
+  test -d "$DEST/collections/ansible_collections" || {
+    echo "ERROR: existing snapshot does not look like a valid collections-hub."
+    echo "Missing: $DEST/collections/ansible_collections"
+    exit 1
+  }
+fi
+
+# Atomically update current -> collections-hub-X.Y.Z
+TMP_LINK="$HUBS_DIR/.current.$$"
+rm -f "$TMP_LINK"
+ln -s "$SNAP" "$TMP_LINK"
+mv -Tf "$TMP_LINK" "$HUBS_DIR/current"
+
+echo "Updated hubs/current -> $SNAP"
+echo "Resolved current path:"
+readlink -f "$HUBS_DIR/current"
+
+echo "Snapshot metadata:"
+cat "$HUBS_DIR/current/metadata.yml"
+
+
+
+
+
+
+
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=5min
