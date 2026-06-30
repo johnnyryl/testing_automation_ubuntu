@@ -1,4 +1,10 @@
+cat > "$HOME/.netrc" <<'EOF'
+machine gitlab.us.lmco.com
+  login YOUR_GITLAB_USERNAME_OR_DEPLOY_TOKEN_USERNAME
+  password YOUR_READ_ONLY_TOKEN
+EOF
 
+chmod 600 "$HOME/.netrc"
 
 
 
