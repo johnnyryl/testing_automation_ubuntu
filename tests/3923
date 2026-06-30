@@ -1,3 +1,32 @@
+
+
+
+# Freeze moving "current" symlinks for this one job.
+# This gives the job a stable snapshot even if the timer updates current later.
+
+AEROLIT_COLLECTION_HUB_INPUT="$AEROLIT_COLLECTION_HUB"
+AEROLIT_TEST_FILES_DIR_INPUT="$AEROLIT_TEST_FILES_DIR"
+AEROLIT_TEST_REPOS_DIR_INPUT="$AEROLIT_TEST_REPOS_DIR"
+
+export AEROLIT_COLLECTION_HUB="$(readlink -f "$AEROLIT_COLLECTION_HUB_INPUT")"
+export AEROLIT_TEST_FILES_DIR="$(readlink -f "$AEROLIT_TEST_FILES_DIR_INPUT")"
+export AEROLIT_TEST_REPOS_DIR="$(readlink -f "$AEROLIT_TEST_REPOS_DIR_INPUT")"
+
+echo "=== AeroLIT pinned fixture paths ==="
+echo "AEROLIT_COLLECTION_HUB input=$AEROLIT_COLLECTION_HUB_INPUT"
+echo "AEROLIT_COLLECTION_HUB pinned=$AEROLIT_COLLECTION_HUB"
+echo "AEROLIT_TEST_FILES_DIR input=$AEROLIT_TEST_FILES_DIR_INPUT"
+echo "AEROLIT_TEST_FILES_DIR pinned=$AEROLIT_TEST_FILES_DIR"
+echo "AEROLIT_TEST_REPOS_DIR input=$AEROLIT_TEST_REPOS_DIR_INPUT"
+echo "AEROLIT_TEST_REPOS_DIR pinned=$AEROLIT_TEST_REPOS_DIR"
+test -f "$AEROLIT_COLLECTION_HUB/metadata.yml" && cat "$AEROLIT_COLLECTION_HUB/metadata.yml" || true
+
+
+
+
+
+
+
 cat > "$HOME/.netrc" <<'EOF'
 machine gitlab.us.lmco.com
   login YOUR_GITLAB_USERNAME_OR_DEPLOY_TOKEN_USERNAME
