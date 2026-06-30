@@ -1,3 +1,239 @@
+
+
+Yes — you can absolutely do the collections-hub stuff like this, and your understanding is now better than my earlier generic layout.
+
+Your current hub shape is valid:
+
+~/.local/share/aerolit-molecule/
+├── hubs/
+│   ├── collections-hub-1.45.0/
+│   │   ├── ansible/
+│   │   ├── collections/
+│   │   │   └── ansible_collections/
+│   │   ├── docs/
+│   │   ├── scripts/
+│   │   ├── templates/
+│   │   └── README.md
+│   └── current -> collections-hub-1.45.0
+
+Because current is a symlink, these are effectively the same:
+
+hubs/current/collections
+hubs/collections-hub-1.45.0/collections
+
+So yes: there is no meaningful difference as long as current points to that version.
+
+And yes — you are right: there probably should not be a required hubs/current/roles directory for your setup, because your dependency roles live inside Ansible collections under:
+
+hubs/current/collections/ansible_collections/...
+
+The main correction
+
+The compliance script should stop assuming this:
+
+hubs/current/roles
+
+and should instead treat this as the important path:
+
+hubs/current/collections
+
+because Ansible wants ANSIBLE_COLLECTIONS_PATH to point to the directory that contains ansible_collections.
+
+So this is correct:
+
+export ANSIBLE_COLLECTIONS_PATH="$AEROLIT_COLLECTION_HUB/collections:/root/.ansible/collections:/usr/share/ansible/collections"
+
+This is usually wrong:
+
+export ANSIBLE_COLLECTIONS_PATH="$AEROLIT_COLLECTION_HUB/collections/ansible_collections"
+
+because Ansible expects to find:
+
+<collection path>/ansible_collections/<namespace>/<collection>
+
+What to change in the compliance-center script
+
+Anywhere we were hard-checking this, remove it:
+
+test -d "$AEROLIT_COLLECTION_HUB/roles" || {
+  echo "Missing hub roles directory: $AEROLIT_COLLECTION_HUB/roles"
+  exit 1
+}
+
+Replace it with this:
+
+test -d "$AEROLIT_COLLECTION_HUB" || {
+  echo "Missing collection hub root: $AEROLIT_COLLECTION_HUB"
+  exit 1
+}
+test -d "$AEROLIT_COLLECTION_HUB/collections/ansible_collections" || {
+  echo "Missing collections directory: $AEROLIT_COLLECTION_HUB/collections/ansible_collections"
+  exit 1
+}
+
+Then keep HUB_ROLES_PATH optional. It can be blank. That is fine.
+
+For your current architecture, the important part is:
+
+export ANSIBLE_COLLECTIONS_PATH="$SCEN_DIR/.ansible/collections:$AEROLIT_COLLECTION_HUB/collections:/root/.ansible/collections:/usr/share/ansible/collections"
+
+Should we still build HUB_ROLES_PATH?
+
+Maybe, but only as a fallback.
+
+If roles are called like this:
+
+ansible.builtin.include_role:
+  name: some_namespace.some_collection.some_role
+
+then ANSIBLE_COLLECTIONS_PATH is enough.
+
+If roles are called like this:
+
+ansible.builtin.include_role:
+  name: some_role
+
+then Ansible needs ANSIBLE_ROLES_PATH, and collection roles might not resolve unless we add the collection role parent paths too.
+
+So I would use this safer helper:
+
+build_hub_roles_path() {
+  local hub_root="$1"
+  [ -d "$hub_root" ] || return 0
+  find "$hub_root" \
+    -path '*/roles/*/tasks/main.yml' \
+    -type f \
+    -print 2>/dev/null |
+    while read -r main_yml; do
+      role_dir="$(dirname "$(dirname "$main_yml")")"
+      dirname "$role_dir"
+    done |
+    sort -u |
+    paste -sd ':' -
+}
+
+That can discover role parent paths inside collections, like:
+
+hubs/current/collections/ansible_collections/<namespace>/<collection>/roles
+
+Then your path order should be:
+
+HUB_ROLES_PATH="$(build_hub_roles_path "$AEROLIT_COLLECTION_HUB")"
+export ANSIBLE_ROLES_PATH="$SCEN_DIR/roles:$CURRENT_ROLE_PARENT"
+if [ -n "$HUB_ROLES_PATH" ]; then
+  export ANSIBLE_ROLES_PATH="$ANSIBLE_ROLES_PATH:$HUB_ROLES_PATH"
+fi
+export ANSIBLE_ROLES_PATH="$ANSIBLE_ROLES_PATH:/usr/share/ansible/roles:/etc/ansible/roles"
+export ANSIBLE_COLLECTIONS_PATH="$SCEN_DIR/.ansible/collections:$AEROLIT_COLLECTION_HUB/collections:/root/.ansible/collections:/usr/share/ansible/collections"
+
+That gives you both:
+
+FQCN collection roles work
+bare-name fallback roles may also work
+
+About automatically updating hubs/current
+
+You have two realistic options.
+
+Option 1 — Best for now: local pull/update script on the runner
+
+This does not require GitLab trigger magic. The runner host pulls the latest hub itself and updates the symlink.
+
+Create something like:
+
+mkdir -p "$HOME/.local/bin"
+vim "$HOME/.local/bin/aerolit-refresh-collections-hub"
+
+Script shape:
+
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="${AEROLIT_FIXTURE_ROOT:-$HOME/.local/share/aerolit-molecule}"
+HUBS_DIR="$ROOT/hubs"
+CACHE_DIR="$ROOT/cache"
+REPO_URL="${AEROLIT_COLLECTIONS_HUB_REPO_URL:?Set AEROLIT_COLLECTIONS_HUB_REPO_URL}"
+BRANCH="${AEROLIT_COLLECTIONS_HUB_BRANCH:-main}"
+mkdir -p "$HUBS_DIR" "$CACHE_DIR"
+TMP="$(mktemp -d "$CACHE_DIR/collections-hub.XXXXXX")"
+trap 'rm -rf "$TMP"' EXIT
+git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$TMP/collections-hub"
+SHA="$(git -C "$TMP/collections-hub" rev-parse --short=12 HEAD)"
+SNAP="collections-hub-$(date +%Y%m%d)-$SHA"
+DEST="$HUBS_DIR/$SNAP"
+if [ ! -d "$DEST" ]; then
+  mv "$TMP/collections-hub" "$DEST"
+  cat > "$DEST/metadata.yml" <<EOF
+name: $SNAP
+created_by: $USER
+created_at: $(date -Iseconds)
+source_repo: $REPO_URL
+source_branch: $BRANCH
+source_commit: $SHA
+purpose: AeroLIT Molecule collections-hub dependency snapshot
+EOF
+fi
+test -d "$DEST/collections/ansible_collections" || {
+  echo "ERROR: $DEST does not look like a valid collections-hub snapshot."
+  exit 1
+}
+ln -sfn "$SNAP" "$HUBS_DIR/current"
+echo "Updated hubs/current -> $SNAP"
+readlink -f "$HUBS_DIR/current"
+
+Then:
+
+chmod +x "$HOME/.local/bin/aerolit-refresh-collections-hub"
+
+You would need to set the repo URL once:
+
+export AEROLIT_COLLECTIONS_HUB_REPO_URL="https://gitlab.us.lmco.com/whatever/path/to/collections-hub.git"
+
+This gives you versioned snapshots and keeps old ones.
+
+Option 2 — GitLab pipeline updates the runner fixture root
+
+This is possible, but I would not make every normal Molecule job able to write to the fixture root.
+
+For GitLab to update this path on the VDI:
+
+/home/e424770/.local/share/aerolit-molecule
+
+the job container would need that host path mounted read-write. That means a pipeline job could mutate the runner’s shared dependencies. That is powerful but risky.
+
+If you ever do it, I would make it a separate protected/manual “refresh hub” job with a special runner tag, not part of every role test.
+
+What I would do next
+
+Do this in this order:
+
+1. Keep your hub layout exactly like the screenshot:
+
+hubs/collections-hub-1.45.0
+hubs/current -> collections-hub-1.45.0
+
+2. Fix the compliance script so it validates:
+
+hubs/current/collections/ansible_collections
+
+not:
+
+hubs/current/roles
+
+3. Keep ANSIBLE_COLLECTIONS_PATH pointed at:
+
+$AEROLIT_COLLECTION_HUB/collections
+
+4. Make HUB_ROLES_PATH optional/fallback only.
+5. Test a dependency role that uses a collection role by FQCN.
+
+The big takeaway: your current symlink approach is right. The mistake was treating the hub like a flat standalone roles directory. For AeroLIT, the hub is really a collections source, so the collections path is the main dependency path.
+
+
+
+
+
+
+
 You were half right.
 
 The part you changed from checking hubs/current/roles to checking hubs/current/collections/... is the right idea.
