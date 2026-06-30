@@ -1,3 +1,45 @@
+# ----- AeroLIT legacy path_for_ansible compatibility -----
+# Roles commonly resolve their base path from GITLAB_PATH_FOR_ANSIBLE.
+# In Molecule, make that base path look like a normal AeroLIT layout:
+#   /opt/aerolit/files
+#   /opt/aerolit/repos
+
+export AEROLIT_MOLECULE_BASE="${AEROLIT_MOLECULE_BASE:-/opt/aerolit}"
+export GITLAB_PATH_FOR_ANSIBLE="$AEROLIT_MOLECULE_BASE"
+
+case "$AEROLIT_MOLECULE_BASE" in
+  ""|"/"|"/opt")
+    echo "Unsafe AEROLIT_MOLECULE_BASE: $AEROLIT_MOLECULE_BASE"
+    exit 1
+    ;;
+esac
+
+install -d "$AEROLIT_MOLECULE_BASE"
+
+rm -rf -- "$AEROLIT_MOLECULE_BASE/files" "$AEROLIT_MOLECULE_BASE/repos"
+
+ln -s -- "$AEROLIT_TEST_FILES_DIR" "$AEROLIT_MOLECULE_BASE/files"
+ln -s -- "$AEROLIT_TEST_REPOS_DIR" "$AEROLIT_MOLECULE_BASE/repos"
+
+test -d "$GITLAB_PATH_FOR_ANSIBLE/files" || {
+  echo "Missing Molecule files path: $GITLAB_PATH_FOR_ANSIBLE/files"
+  exit 1
+}
+
+test -d "$GITLAB_PATH_FOR_ANSIBLE/repos" || {
+  echo "Missing Molecule repos path: $GITLAB_PATH_FOR_ANSIBLE/repos"
+  exit 1
+}
+
+echo "=== AeroLIT Molecule base path ==="
+echo "AEROLIT_MOLECULE_BASE=$AEROLIT_MOLECULE_BASE"
+echo "GITLAB_PATH_FOR_ANSIBLE=$GITLAB_PATH_FOR_ANSIBLE"
+ls -ld "$AEROLIT_MOLECULE_BASE" "$AEROLIT_MOLECULE_BASE/files" "$AEROLIT_MOLECULE_BASE/repos"
+
+
+
+
+
 
 
 
