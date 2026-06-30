@@ -1,3 +1,109 @@
+    - name: Set AeroLIT repo selection facts for this target
+      ansible.builtin.set_fact:
+        aerolit_repo_os_id: >-
+          {{
+            {
+              'RedHat': 'rhel',
+              'Red Hat Enterprise Linux': 'rhel',
+              'Rocky': 'rocky',
+              'Rocky Linux': 'rocky',
+              'AlmaLinux': 'almalinux',
+              'OracleLinux': 'oraclelinux'
+            }.get(ansible_distribution, ansible_distribution | lower | regex_replace('[^a-z0-9]+', ''))
+          }}
+        aerolit_repo_major: "{{ ansible_distribution_major_version }}"
+        aerolit_repo_arch_dir: >-
+          {{
+            {
+              'x86_64': 'x86-64',
+              'amd64': 'x86-64',
+              'aarch64': 'aarch64',
+              'arm64': 'aarch64'
+            }.get(ansible_architecture, ansible_architecture)
+          }}
+
+    - name: Set AeroLIT selected repo root for this target
+      ansible.builtin.set_fact:
+        aerolit_selected_repo_root: "{{ path_for_ansible }}/repos/{{ aerolit_repo_os_id }}/{{ aerolit_repo_major }}/{{ aerolit_repo_arch_dir }}"
+
+    - name: Show AeroLIT repo selection for this target
+      ansible.builtin.debug:
+        msg:
+          - "inventory_hostname={{ inventory_hostname }}"
+          - "distribution={{ ansible_distribution }}"
+          - "major={{ aerolit_repo_major }}"
+          - "arch={{ ansible_architecture }} -> {{ aerolit_repo_arch_dir }}"
+          - "selected_repo_root={{ aerolit_selected_repo_root }}"
+
+    - name: Check selected AeroLIT repo root for this target
+      ansible.builtin.stat:
+        path: "{{ aerolit_selected_repo_root }}"
+      register: aerolit_selected_repo_root_stat
+
+    - name: Fail if repos are required but selected repo root is missing
+      ansible.builtin.fail:
+        msg: >-
+          AEROLIT_REQUIRES_REPOS=true, but the selected repo root does not exist:
+          {{ aerolit_selected_repo_root }}
+      when:
+        - aerolit_requires_repos
+        - not (aerolit_selected_repo_root_stat.stat.isdir | default(false))
+
+    - name: Find AeroLIT local repo metadata for this target OS
+      ansible.builtin.find:
+        paths: "{{ aerolit_selected_repo_root }}"
+        patterns: "repomd.xml"
+        recurse: true
+        file_type: file
+      register: aerolit_local_repomd
+      when:
+        - aerolit_selected_repo_root_stat.stat.isdir | default(false)
+
+    - name: Save selected AeroLIT repo metadata list
+      ansible.builtin.set_fact:
+        aerolit_local_repomd_files: "{{ aerolit_local_repomd.files | default([]) | sort(attribute='path') }}"
+
+    - name: Fail if repos are required but no repo metadata exists for this target OS
+      ansible.builtin.fail:
+        msg: >-
+          AEROLIT_REQUIRES_REPOS=true, but no repodata/repomd.xml was found under
+          {{ aerolit_selected_repo_root }}.
+          The repo fixture for this OS/version/arch must contain real yum/dnf repo metadata.
+      when:
+        - aerolit_requires_repos
+        - aerolit_local_repomd_files | length == 0
+
+    - name: Configure AeroLIT Molecule local yum/dnf repos for this target OS
+      ansible.builtin.yum_repository:
+        name: "aerolit_molecule_{{ aerolit_repo_os_id }}_{{ aerolit_repo_major }}_{{ aerolit_repo_arch_dir | regex_replace('[^A-Za-z0-9_]+', '_') }}_{{ aerolit_repo_idx }}"
+        description: "AeroLIT Molecule {{ aerolit_repo_os_id }} {{ aerolit_repo_major }} {{ aerolit_repo_arch_dir }} repo {{ aerolit_repo_idx }}"
+        baseurl: "file://{{ item.path | dirname | dirname }}"
+        enabled: true
+        gpgcheck: false
+        repo_gpgcheck: false
+        metadata_expire: 0
+      loop: "{{ aerolit_local_repomd_files }}"
+      loop_control:
+        index_var: aerolit_repo_idx
+        label: "{{ item.path | dirname | dirname }}"
+      when:
+        - aerolit_local_repomd_files | length > 0
+
+    - name: Refresh AeroLIT Molecule local repo metadata for this target OS
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_pkg_mgr }}"
+          - "--disablerepo=*"
+          - "--enablerepo=aerolit_molecule_*"
+          - "makecache"
+      changed_when: false
+      when:
+        - aerolit_local_repomd_files | length > 0
+
+
+
+
+
 # ----- AeroLIT legacy path_for_ansible compatibility -----
 # Roles commonly resolve their base path from GITLAB_PATH_FOR_ANSIBLE.
 # In Molecule, make that base path look like a normal AeroLIT layout:
