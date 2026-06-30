@@ -1,3 +1,138 @@
+You were half right.
+
+The part you changed from checking hubs/current/roles to checking hubs/current/collections/... is the right idea.
+
+The part still wrong is here:
+
+HUB_ROLES_PATH="$(build_hub_roles_path "$AEROLIT_COLLECTION_HUB/roles")"
+
+That still points at a directory you said should not exist. That needs to point into the collection hub.
+
+Fix 1 — Replace the validation block
+
+In the section around your lines 130–158, remove any check for:
+
+$AEROLIT_COLLECTION_HUB/roles
+
+Use this exact block:
+
+test -d "$AEROLIT_FIXTURE_ROOT" || {
+  echo "Missing fixture root: $AEROLIT_FIXTURE_ROOT"
+  exit 1
+}
+test -d "$AEROLIT_COLLECTION_HUB" || {
+  echo "Missing collection hub root: $AEROLIT_COLLECTION_HUB"
+  exit 1
+}
+test -d "$AEROLIT_COLLECTION_HUB/collections" || {
+  echo "Missing hub collections directory: $AEROLIT_COLLECTION_HUB/collections"
+  exit 1
+}
+test -d "$AEROLIT_COLLECTION_HUB/collections/ansible_collections" || {
+  echo "Missing Ansible collections directory: $AEROLIT_COLLECTION_HUB/collections/ansible_collections"
+  exit 1
+}
+test -d "$AEROLIT_TEST_FILES_DIR" || {
+  echo "Missing files fixture directory: $AEROLIT_TEST_FILES_DIR"
+  exit 1
+}
+test -d "$AEROLIT_TEST_REPOS_DIR" || {
+  echo "Missing repos fixture directory: $AEROLIT_TEST_REPOS_DIR"
+  exit 1
+}
+
+Your screenshot shows you added the collections/ansible_collections check. That is good. I would just remove the old roles check completely.
+
+Fix 2 — Replace the helper function
+
+Replace your whole build_hub_roles_path() function with this:
+
+build_hub_roles_path() {
+  local hub_search_root="$1"
+  if [ ! -d "$hub_search_root" ]; then
+    return 0
+  fi
+  find "$hub_search_root" \
+    -type f \
+    -path '*/roles/*/tasks/main.yml' \
+    -print 2>/dev/null \
+  | while read -r main_yml; do
+      role_dir="$(dirname "$(dirname "$main_yml")")"
+      dirname "$role_dir"
+    done \
+  | sort -u \
+  | paste -sd ':' -
+}
+
+This searches inside collection roles like:
+
+hubs/current/collections/ansible_collections/<namespace>/<collection>/roles/<role>/tasks/main.yml
+
+and returns the parent roles directory:
+
+hubs/current/collections/ansible_collections/<namespace>/<collection>/roles
+
+That is the path Ansible needs when a role is referenced by a short name.
+
+Fix 3 — Replace the dependency path block
+
+Around your lines 267–281, replace this:
+
+HUB_ROLES_PATH="$(build_hub_roles_path "$AEROLIT_COLLECTION_HUB/roles")"
+
+with this:
+
+HUB_ROLES_PATH="$(build_hub_roles_path "$AEROLIT_COLLECTION_HUB/collections/ansible_collections")"
+
+Then make that whole section look like this:
+
+# 3b) build Ansible role/collection dependency search path
+mkdir -p "$WORK_DIR/.ansible/collections"
+mkdir -p "$WORK_DIR/.ansible/roles"
+HUB_ROLES_PATH="$(build_hub_roles_path "$AEROLIT_COLLECTION_HUB/collections/ansible_collections")"
+export ANSIBLE_ROLES_PATH="$SCEN_DIR/roles:$CURRENT_ROLE_PARENT"
+if [ -n "$HUB_ROLES_PATH" ]; then
+  export ANSIBLE_ROLES_PATH="$ANSIBLE_ROLES_PATH:$HUB_ROLES_PATH"
+fi
+export ANSIBLE_ROLES_PATH="$ANSIBLE_ROLES_PATH:$WORK_DIR/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles"
+export ANSIBLE_COLLECTIONS_PATH="$WORK_DIR/.ansible/collections:$AEROLIT_COLLECTION_HUB/collections:/root/.ansible/collections:/usr/share/ansible/collections"
+
+That is the main fix.
+
+What this does
+
+ANSIBLE_COLLECTIONS_PATH handles normal collection/FQCN usage:
+
+name: namespace.collection.role_name
+
+ANSIBLE_ROLES_PATH handles old/simple role usage:
+
+name: role_name
+
+Since your hub is really a collections-hub, the important dependency source is:
+
+$AEROLIT_COLLECTION_HUB/collections
+
+not:
+
+$AEROLIT_COLLECTION_HUB/roles
+
+What your log should show after this
+
+In the pipeline log, this is what you want:
+
+Hub: /home/e424770/.local/share/aerolit-molecule/hubs/current
+HUB_ROLES_PATH=/home/e424770/.local/share/aerolit-molecule/hubs/current/collections/ansible_collections/.../roles
+ANSIBLE_COLLECTIONS_PATH=...:/home/e424770/.local/share/aerolit-molecule/hubs/current/collections:...
+
+HUB_ROLES_PATH being non-empty is good, but not always required. The critical one for your architecture is:
+
+ANSIBLE_COLLECTIONS_PATH includes /home/e424770/.local/share/aerolit-molecule/hubs/current/collections
+
+So, yes: your change was in the right direction, but the remaining wrong line is still building HUB_ROLES_PATH from /roles instead of from /collections/ansible_collections.
+
+
+
 
 export AEROLIT_REQUIRES_FILES="${AEROLIT_REQUIRES_FILES:-false}"
 export AEROLIT_REQUIRES_REPOS="${AEROLIT_REQUIRES_REPOS:-false}"
