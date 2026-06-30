@@ -1,5 +1,157 @@
 
 
+Option 1 does not run automatically by itself.
+
+That script is only the mechanism that refreshes the hub. Something still has to run it.
+
+Think of it like this:
+
+aerolit-refresh-collections-hub
+  = the thing that pulls/copies the latest collections-hub
+  = creates a versioned snapshot
+  = repoints hubs/current
+
+But it only runs when one of these happens:
+
+you run it manually
+a user systemd timer runs it
+cron runs it
+some separate maintenance job runs it
+
+Best practical setup for you
+
+Since you do not want the Molecule compliance job updating the hub every time, I would do this:
+
+Manual or scheduled runner refresh
+  updates /home/e424770/.local/share/aerolit-molecule/hubs/current
+Normal Molecule jobs
+  only read hubs/current
+  never update it
+
+That keeps your Molecule jobs stable and read-only.
+
+Option 1A — Manual refresh
+
+You create the script once, then whenever collections-hub changes and you want the runner updated, you run:
+
+$HOME/.local/bin/aerolit-refresh-collections-hub
+
+That is the simplest and safest version.
+
+Flow:
+
+collections-hub gets updated
+you decide you want the runner to use it
+you run aerolit-refresh-collections-hub
+script creates hubs/collections-hub-YYYYMMDD-SHA
+script updates hubs/current -> new snapshot
+next Molecule job uses the new hub
+
+Nothing automatic. No GitLab trigger. No runner job writes to itself.
+
+Option 1B — User systemd timer
+
+Since your whole runner is already systemctl --user, you can make the refresh run on a schedule with a user timer.
+
+Create an env file:
+
+mkdir -p "$HOME/.config/aerolit-molecule"
+cat > "$HOME/.config/aerolit-molecule/collections-hub.env" <<'EOF'
+AEROLIT_FIXTURE_ROOT=/home/e424770/.local/share/aerolit-molecule
+AEROLIT_COLLECTIONS_HUB_REPO_URL=https://gitlab.us.lmco.com/YOUR/PATH/collections-hub.git
+AEROLIT_COLLECTIONS_HUB_BRANCH=main
+EOF
+
+Create the service:
+
+mkdir -p "$HOME/.config/systemd/user"
+cat > "$HOME/.config/systemd/user/aerolit-refresh-collections-hub.service" <<'EOF'
+[Unit]
+Description=Refresh AeroLIT Molecule collections-hub snapshot
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/aerolit-molecule/collections-hub.env
+ExecStart=%h/.local/bin/aerolit-refresh-collections-hub
+EOF
+
+Create the timer:
+
+cat > "$HOME/.config/systemd/user/aerolit-refresh-collections-hub.timer" <<'EOF'
+[Unit]
+Description=Run AeroLIT collections-hub refresh on a schedule
+[Timer]
+OnCalendar=Mon..Fri *-*-* 06:00:00
+Persistent=true
+RandomizedDelaySec=10m
+[Install]
+WantedBy=timers.target
+EOF
+
+Enable it:
+
+systemctl --user daemon-reload
+systemctl --user enable --now aerolit-refresh-collections-hub.timer
+systemctl --user list-timers --all | grep aerolit
+
+Test it manually:
+
+systemctl --user start aerolit-refresh-collections-hub.service
+journalctl --user -u aerolit-refresh-collections-hub.service -n 80 --no-pager
+
+That would refresh it every weekday morning, but only while your user systemd session is active. On a VDI, that usually means it runs when your user session exists. Without admin control, you probably cannot rely on it running forever while fully logged out.
+
+Another good option: pinned manual snapshots
+
+This might actually fit your situation best.
+
+Instead of trying to always chase “latest,” you can keep snapshots and manually decide when to promote one:
+
+hubs/
+  collections-hub-1.45.0/
+  collections-hub-1.46.0/
+  collections-hub-20260629-abc123/
+  current -> collections-hub-1.45.0
+
+Then when you want to move forward:
+
+cd "$HOME/.local/share/aerolit-molecule/hubs"
+ln -sfn collections-hub-1.46.0 current
+readlink -f current
+
+That is not automatic, but it is very reproducible. If something breaks, you can instantly go back:
+
+ln -sfn collections-hub-1.45.0 current
+
+The option I would avoid right now
+
+I would avoid having every ansible_molecule compliance job update hubs/current.
+
+That creates this risk:
+
+job A starts using hub version 1
+job B updates hubs/current to hub version 2
+job A is now harder to reason about
+
+Even if symlink updates are mostly safe, it makes debugging messier.
+
+The clean middle ground
+
+Use this pattern:
+
+Normal Molecule job:
+  read-only
+  uses whatever hubs/current points to
+Refresh process:
+  manual command now
+  optional user systemd timer later
+  creates versioned snapshots
+  updates hubs/current intentionally
+
+So yes, something has to trigger the script. The script itself is not magic. The simplest trigger is you running it manually; the more automated trigger is a systemctl --user timer.
+
+
+
+
 Yes — you can absolutely do the collections-hub stuff like this, and your understanding is now better than my earlier generic layout.
 
 Your current hub shape is valid:
