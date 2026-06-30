@@ -1,4 +1,8 @@
-
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=1min
+RandomizedDelaySec=30s
 
 Option 1 does not run automatically by itself.
 
