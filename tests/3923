@@ -1,3 +1,52 @@
+
+
+    - name: Create disabled repo directory
+      ansible.builtin.file:
+        path: /etc/yum.repos.d/aerolit-disabled
+        state: directory
+        mode: "0755"
+      when:
+        - aerolit_local_repomd_files | length > 0
+
+    - name: Find image-provided yum/dnf repo files
+      ansible.builtin.find:
+        paths: /etc/yum.repos.d
+        patterns: "*.repo"
+        file_type: file
+        recurse: false
+      register: aerolit_existing_repo_files
+      when:
+        - aerolit_local_repomd_files | length > 0
+
+    - name: Disable image-provided yum/dnf repos while using AeroLIT local repos
+      ansible.builtin.command:
+        argv:
+          - mv
+          - "{{ item.path }}"
+          - "/etc/yum.repos.d/aerolit-disabled/{{ item.path | basename }}"
+      loop: "{{ aerolit_existing_repo_files.files | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+      changed_when: true
+      when:
+        - aerolit_local_repomd_files | length > 0
+        - not (item.path | basename | regex_search('^aerolit_molecule_.*\.repo$'))
+
+
+
+
+    - name: Clean yum/dnf metadata after repo changes
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_pkg_mgr }}"
+          - "clean"
+          - "all"
+      changed_when: false
+      when:
+        - aerolit_local_repomd_files | length > 0
+
+
+
     - name: Set AeroLIT repo selection facts for this target
       ansible.builtin.set_fact:
         aerolit_repo_os_id: >-
