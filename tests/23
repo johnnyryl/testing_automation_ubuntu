@@ -1,0 +1,1539 @@
+Use this as your recording/demo plan. It gives you real commands for the command-heavy slides and tells you what to type, what key to press, and what the audience should notice.
+
+Run the setup once before recording.
+
+⸻
+
+0. One-Time Demo Setup
+
+Run this in your demo VM before you start recording. It creates safe files under /tmp/rhel-demo so you are not touching real application data.
+
+rm -rf /tmp/rhel-demo
+mkdir -p /tmp/rhel-demo/{logs,config,tmp,nav/a/b/c,project,find-demo/logs,find-demo/configs,perm/level1/level2,rsync-src,rsync-dst}
+cat > /tmp/rhel-demo/logs/app.log <<'EOF'
+2026-07-05 12:00:01 web01 app[1001]: INFO service started
+2026-07-05 12:00:03 web01 app[1001]: INFO listening on port 8080
+2026-07-05 12:00:10 web01 app[1001]: WARN retrying database connection
+2026-07-05 12:00:15 web01 app[1001]: ERROR failed to connect to database
+2026-07-05 12:00:18 web01 app[1001]: INFO retry successful
+2026-07-05 12:01:02 web01 app[1001]: WARN disk usage above threshold
+2026-07-05 12:01:10 web01 app[1001]: ERROR request timeout from client
+2026-07-05 12:01:30 web01 app[1001]: INFO health check passed
+EOF
+cat > /tmp/rhel-demo/logs/access.log <<'EOF'
+10.10.1.5 - - [05/Jul/2026:12:01:01 -0400] "GET /health HTTP/1.1" 200 123
+10.10.1.8 - - [05/Jul/2026:12:01:02 -0400] "GET /login HTTP/1.1" 200 941
+10.10.1.5 - - [05/Jul/2026:12:01:03 -0400] "POST /api/job HTTP/1.1" 500 222
+10.10.1.9 - - [05/Jul/2026:12:01:04 -0400] "GET /api/status HTTP/1.1" 200 321
+10.10.1.8 - - [05/Jul/2026:12:01:05 -0400] "GET /missing HTTP/1.1" 404 87
+10.10.1.5 - - [05/Jul/2026:12:01:06 -0400] "POST /api/job HTTP/1.1" 500 222
+EOF
+cat > /tmp/rhel-demo/config/app.conf <<'EOF'
+# Demo application config
+# This file is safe to edit during training
+port=8080
+mode=dev
+log_level=info
+# End of file
+EOF
+cp /tmp/rhel-demo/config/app.conf /tmp/rhel-demo/find-demo/configs/app.conf
+cp /tmp/rhel-demo/logs/app.log /tmp/rhel-demo/find-demo/logs/app.log
+cp /tmp/rhel-demo/logs/access.log /tmp/rhel-demo/find-demo/logs/access.log
+touch /tmp/rhel-demo/nav/a/b/c/demo.conf
+touch /tmp/rhel-demo/tmp/new-cleanup.tmp
+touch -d "10 days ago" /tmp/rhel-demo/tmp/old-cleanup.tmp
+truncate -s 2M /tmp/rhel-demo/find-demo/logs/big.log
+echo "rsync demo file 1" > /tmp/rhel-demo/rsync-src/file1.txt
+echo "rsync demo file 2" > /tmp/rhel-demo/rsync-src/file2.txt
+touch /tmp/rhel-demo/perm/level1/level2/demo.txt
+chmod 700 /tmp/rhel-demo/perm/level1
+cd /tmp/rhel-demo
+
+Optional before recording, if you are going to run commands with sudo:
+
+sudo -v
+
+⸻
+
+1. Preload History for the History Slides
+
+Run this in the same terminal tab where you will demo Ctrl + R and Page Up.
+
+history -s 'systemctl status sshd --no-pager'
+history -s 'systemctl status firewalld --no-pager'
+history -s 'systemctl restart firewalld'
+history -s 'systemctl list-units --failed --no-pager'
+history -s 'journalctl -u sshd -b --since "1 hour ago" --no-pager'
+history -s 'journalctl -u firewalld -b --since "30 minutes ago" --no-pager'
+history -s 'firewall-cmd --state'
+history -s 'firewall-cmd --list-all'
+history -s 'ss -tulpen | grep :22'
+history -s 'grep -RIn "PermitRootLogin" /etc/ssh'
+
+This makes your history demos flow without hunting around.
+
+⸻
+
+Slide 8: Command-Line Editing Shortcuts
+
+Demo 1: Ctrl + A and Ctrl + E
+
+Type this but do not press Enter yet:
+
+echo "checking firewalld status in the lab"
+
+Then demo:
+
+1. Press Ctrl + A.
+2. Type:
+
+time 
+
+3. Press Ctrl + E.
+4. Add:
+
+ with shortcuts
+
+5. Press Enter.
+
+What it shows:
+Ctrl + A jumps to the beginning. Ctrl + E jumps to the end.
+
+⸻
+
+Demo 2: Ctrl + U and Ctrl + Y
+
+Type this but do not press Enter:
+
+echo "Ctrl+U will clear this whole line"
+
+Then:
+
+1. Press Ctrl + U.
+    The line disappears.
+2. Press Ctrl + Y.
+    The line comes back.
+3. Press Enter.
+
+What it shows:
+Ctrl + U cuts everything before the cursor. Since the cursor is at the end, it cuts the whole line. Ctrl + Y pastes it back.
+
+⸻
+
+Demo 3: Ctrl + W
+
+Type this but do not press Enter:
+
+echo alpha bravo charlie
+
+Then:
+
+1. Press Ctrl + W.
+    charlie disappears.
+2. Press Enter.
+
+What it shows:
+Ctrl + W deletes the previous word.
+
+⸻
+
+Demo 4: Ctrl + K
+
+Type this but do not press Enter:
+
+echo keep_this_part remove_this_part
+
+Then:
+
+1. Move the cursor to right before remove_this_part.
+2. Press Ctrl + K.
+3. Press Enter.
+
+What it shows:
+Ctrl + K cuts everything after the cursor.
+
+⸻
+
+Demo 5: Ctrl + L
+
+Run:
+
+ls -l /tmp/rhel-demo
+
+Then press:
+
+Ctrl + L
+
+What it shows:
+Ctrl + L clears the screen without closing the terminal.
+
+⸻
+
+Slide 9: More Shell Movement Shortcuts
+
+Demo 1: Alt + B and Alt + F
+
+Type this but do not press Enter:
+
+echo alpha bravo charlie delta
+
+Then:
+
+1. Press Alt + B a few times.
+2. Press Alt + F a few times.
+3. Press Enter.
+
+What it shows:
+Alt + B and Alt + F move backward and forward by word.
+
+If Alt does not work in your terminal, use Esc, then b or f.
+
+⸻
+
+Demo 2: Ctrl + _ Undo
+
+Type this but do not press Enter:
+
+echo alpha bravo charlie
+
+Then:
+
+1. Press Ctrl + W.
+    It deletes charlie.
+2. Press Ctrl + _.
+    It brings charlie back.
+3. Press Enter.
+
+What it shows:
+Ctrl + _ can undo a command-line edit.
+
+⸻
+
+Demo 3: Ctrl + C and echo $?
+
+Run:
+
+sleep 60
+
+Then press:
+
+Ctrl + C
+
+Now run:
+
+echo $?
+
+What it shows:
+Ctrl + C stops the running command. echo $? shows the exit status of the last command. After Ctrl + C, you will usually see 130.
+
+Talking point:
+
+0 means success. Non-zero usually means something failed or was interrupted.
+
+⸻
+
+Demo 4: Ctrl + D
+
+Start a nested shell so you do not close your real terminal tab:
+
+bash --noprofile --norc
+
+Then press:
+
+Ctrl + D
+
+What it shows:
+Ctrl + D exits the current shell or ends input.
+
+⸻
+
+Slide 10: Esc + . / Alt + .
+
+Demo 1: Reuse a path
+
+Run:
+
+mkdir -p /tmp/rhel-demo/esc-dot/logs
+
+Then type:
+
+cd 
+
+Now press:
+
+Esc + .
+
+It should become:
+
+cd /tmp/rhel-demo/esc-dot/logs
+
+Press Enter, then run:
+
+pwd
+
+What it shows:
+Esc + . inserts the last argument from the previous command.
+
+⸻
+
+Demo 2: Reuse a filename
+
+Run:
+
+ls -l /etc/ssh/sshd_config
+
+Then type:
+
+stat 
+
+Press:
+
+Esc + .
+
+It becomes:
+
+stat /etc/ssh/sshd_config
+
+Press Enter.
+
+⸻
+
+Slide 11: Command History Tricks
+
+Demo 1: Show and search history
+
+history | tail -10
+history | grep -i systemctl
+
+Demo 2: !!
+
+Run:
+
+echo "this is the previous command"
+
+Then run:
+
+!!
+
+What it shows:
+!! reruns the previous command.
+
+⸻
+
+Demo 3: !$
+
+Run:
+
+echo first second third
+
+Then run:
+
+echo !$
+
+What it shows:
+!$ reuses the last argument from the previous command.
+
+Expected result:
+
+third
+
+⸻
+
+Demo 4: !*
+
+Run:
+
+echo alpha bravo charlie
+
+Then run:
+
+printf '%s\n' !*
+
+What it shows:
+!* reuses all arguments from the previous command.
+
+⸻
+
+Demo 5: sudo !!
+
+Use a safe command. This one often needs sudo on RHEL:
+
+tail -n 5 /var/log/messages
+
+If it says permission denied, run:
+
+sudo !!
+
+What it shows:
+sudo !! reruns the previous command with sudo.
+
+⸻
+
+Slide 12: Fix the Last Command Without Retyping
+
+Demo 1: Safe ^old^new replacement
+
+Run:
+
+echo systemctl start firewalld.service
+
+Then run:
+
+^start^stop
+
+Expected output:
+
+systemctl stop firewalld.service
+
+What it shows:
+Bash reruns the previous command but replaces the first start with stop.
+
+⸻
+
+Demo 2: Another practical example
+
+Run:
+
+echo journalctl -u firewalld --since "30 minutes ago"
+
+Then run:
+
+^firewalld^sshd
+
+Expected output:
+
+journalctl -u sshd --since 30 minutes ago
+
+The quotes may display differently after expansion. That is fine.
+
+⸻
+
+Slide 13: Reverse History Search
+
+Make sure you already ran the history preload commands.
+
+Press:
+
+Ctrl + R
+
+Then type:
+
+firewall
+
+Press Ctrl + R again to cycle through older matches.
+
+When you find a good command, press Enter.
+
+Good commands to have preloaded:
+
+firewall-cmd --state
+firewall-cmd --list-all
+journalctl -u firewalld -b --since "30 minutes ago" --no-pager
+systemctl status firewalld --no-pager
+
+What it shows:
+You only need to remember one word from the command.
+
+⸻
+
+Slide 14: Page Up / Page Down History Search
+
+Remove the ~/.inputrc box from this slide.
+
+Demo
+
+Type:
+
+systemctl
+
+Do not press Enter.
+
+Press:
+
+Page Up
+
+Keep pressing Page Up.
+
+You should cycle through commands like:
+
+systemctl list-units --failed --no-pager
+systemctl restart firewalld
+systemctl status firewalld --no-pager
+systemctl status sshd --no-pager
+
+Press:
+
+Page Down
+
+to move forward through the matching commands.
+
+When done, press:
+
+Ctrl + U
+
+to clear the line.
+
+What it shows:
+Page Up searches command history based on what you already typed. It is faster than pressing Up Arrow through everything.
+
+⸻
+
+Slide 15: Directory Navigation Basics
+
+Run:
+
+cd /tmp/rhel-demo/nav/a/b/c
+pwd
+
+Then:
+
+cd ..
+pwd
+
+Then:
+
+cd ../..
+pwd
+
+Then:
+
+cd -
+pwd
+
+Now show path helpers:
+
+realpath /tmp/rhel-demo/nav/a/b/c/demo.conf
+dirname /tmp/rhel-demo/nav/a/b/c/demo.conf
+basename /tmp/rhel-demo/nav/a/b/c/demo.conf
+
+What it shows:
+
+* cd - jumps back to the previous directory
+* realpath shows the full path
+* dirname shows the parent directory
+* basename shows the final file name
+
+⸻
+
+Tree Slide: tree
+
+Use this after the directory navigation slide.
+
+cd /tmp/rhel-demo
+tree -L 2
+
+If you want to show directories only:
+
+tree -d -L 3 /tmp/rhel-demo
+
+If tree is not installed:
+
+command -v tree || echo "tree is not installed on this lab image"
+
+What it shows:
+tree gives a visual layout of directories and files.
+
+Best talking point:
+
+tree -L 2 is useful because it gives structure without flooding the screen.
+
+⸻
+
+Slide 16: Directory Stack
+
+Run:
+
+cd /tmp/rhel-demo
+pwd
+pushd /var/log
+pushd /etc/ssh
+pushd /tmp
+dirs -v
+popd
+pwd
+popd
+pwd
+
+What it shows:
+
+* pushd changes directories and saves the old location
+* dirs -v shows the stack
+* popd returns to the previous saved location
+
+Keep the alias section off this slide. It belongs on the aliases slide.
+
+⸻
+
+Slide 17: Tab Completion
+
+Use commands where completion is likely to work.
+
+Type this, then press Tab:
+
+cd /var/lo
+
+It should complete to:
+
+cd /var/log
+
+Type this, then press Tab:
+
+ls /etc/ssh/ssh
+
+It should complete toward files like:
+
+ssh_config
+sshd_config
+
+Try service completion:
+
+systemctl status ssh
+
+Then press Tab.
+
+Try journalctl completion:
+
+journalctl -u ssh
+
+Then press Tab.
+
+What it shows:
+Tab completion saves typing and reduces typos.
+
+⸻
+
+Man Slide: Help Without Leaving the Terminal
+
+Run:
+
+man systemctl
+
+Inside the man page, type:
+
+/--failed
+
+Then press:
+
+n
+
+Then quit:
+
+q
+
+Run:
+
+man 5 sshd_config
+
+Search inside it:
+
+/PermitRootLogin
+
+Quit:
+
+q
+
+Also show quick help:
+
+systemctl --help | head -30
+man -k firewall
+apropos selinux
+
+What it shows:
+You do not need to memorize everything. You need to know how to find the answer quickly.
+
+⸻
+
+Vimtutor Slide
+
+Run:
+
+vimtutor
+
+Do not spend long here. Just show that it opens an interactive lesson, then quit with:
+
+:q!
+
+Then show a safe file:
+
+vim /tmp/rhel-demo/config/app.conf
+
+In Vim, demonstrate:
+
+:set number
+
+Then:
+
+/port
+
+Then:
+
+:q!
+
+What it shows:
+vimtutor is a safe way to practice before editing real config files.
+
+⸻
+
+Slide 18: Aliases and Functions
+
+Demo 1: Aliases
+
+Run:
+
+alias ports='ss -tulpen'
+alias failed='systemctl list-units --failed --no-pager'
+alias jfu='journalctl -f -u'
+
+Show what the alias is:
+
+type ports
+type failed
+type jfu
+
+Run:
+
+ports | head
+failed
+
+For jfu, run:
+
+jfu sshd
+
+Then press:
+
+Ctrl + C
+
+⸻
+
+Demo 2: Directory aliases
+
+Run:
+
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ....='cd ../../..'
+
+Then:
+
+cd /tmp/rhel-demo/nav/a/b/c
+pwd
+...
+pwd
+
+What it shows:
+... runs cd ../...
+
+⸻
+
+Demo 3: Function
+
+Run:
+
+mkcd() {
+  mkdir -p "$1" && cd "$1"
+}
+
+Then:
+
+mkcd /tmp/rhel-demo/new/project/logs
+pwd
+
+What it shows:
+Aliases are good for short substitutions. Functions are better when arguments are involved.
+
+⸻
+
+Slide 19: Shell Expansion Tricks
+
+Run:
+
+cd /tmp/rhel-demo
+mkdir -p project/{bin,etc,logs,tmp}
+tree project -L 2
+
+Create a config file and back it up:
+
+printf 'port=8080\nmode=dev\n' > project/etc/app.conf
+cp project/etc/app.conf{,.bak}
+ls -l project/etc
+
+Create numbered files:
+
+touch project/tmp/test{1..5}.txt
+ls project/tmp/test*.txt
+
+Globs:
+
+ls /tmp/rhel-demo/logs/*.log
+
+Command substitution:
+
+mkdir -p "backup-$(date +%F)"
+ls -ld backup-*
+
+Tar example:
+
+tar -czf "logs-$(hostname)-$(date +%F).tgz" logs
+ls -lh logs-*.tgz
+
+What it shows:
+Bash can generate repeated paths, filenames, and backup names for you.
+
+⸻
+
+Slide 21: Systemctl Service Basics
+
+Use mostly status checks and echo for changes.
+
+systemctl status firewalld --no-pager
+systemctl is-active firewalld
+systemctl is-enabled firewalld
+
+Safe examples for start/stop/restart:
+
+echo "sudo systemctl start firewalld"
+echo "sudo systemctl stop firewalld"
+echo "sudo systemctl restart firewalld"
+echo "sudo systemctl enable --now firewalld"
+echo "sudo systemctl disable --now firewalld"
+
+What it shows:
+You can teach the commands without actually changing service state during the recording.
+
+⸻
+
+Slide 22: Systemctl Triage Commands
+
+Run:
+
+systemctl list-units --failed --no-pager
+systemctl status firewalld --no-pager
+systemctl is-active firewalld
+echo $?
+systemctl is-enabled firewalld
+echo $?
+systemctl cat firewalld --no-pager
+systemctl list-dependencies firewalld --no-pager | head -30
+
+What echo $? shows:
+It prints the exit code from the previous command.
+
+Example talking point:
+
+systemctl is-active is script-friendly because the command output is useful, and the exit code is useful too.
+
+⸻
+
+Slide 23: Journalctl Superpower
+
+Run:
+
+journalctl -xe --no-pager | tail -30
+
+Service-specific logs:
+
+journalctl -u sshd -b --since "1 hour ago" --no-pager | tail -30
+
+Current boot:
+
+journalctl -b --no-pager | tail -30
+
+Warnings and higher:
+
+journalctl -b -p warning..alert --no-pager | tail -30
+
+Follow live logs:
+
+journalctl -f
+
+Then press:
+
+Ctrl + C
+
+What it shows:
+Filter by service, boot, time, and priority instead of reading everything.
+
+⸻
+
+Slide 24: Quick Log Review
+
+Use your demo log so the output is predictable.
+
+less /tmp/rhel-demo/logs/app.log
+
+Inside less:
+
+/ERROR
+n
+N
+G
+g
+q
+
+Tail:
+
+tail -n 5 /tmp/rhel-demo/logs/app.log
+
+Follow logs:
+
+tail -f /tmp/rhel-demo/logs/app.log
+
+In another terminal tab, append a line:
+
+printf '%s web01 app[9999]: ERROR simulated live log line\n' "$(date '+%F %T')" >> /tmp/rhel-demo/logs/app.log
+
+Back in the tail tab, press:
+
+Ctrl + C
+
+Grep with context:
+
+grep -i error /tmp/rhel-demo/logs/app.log
+grep -i -A2 -B2 error /tmp/rhel-demo/logs/app.log
+
+⸻
+
+Slide 25: Grep Tricks
+
+Run:
+
+grep -i error /tmp/rhel-demo/logs/app.log
+grep -n error /tmp/rhel-demo/logs/app.log
+grep -v INFO /tmp/rhel-demo/logs/app.log
+grep -C2 ERROR /tmp/rhel-demo/logs/app.log
+
+Recursive search:
+
+grep -RIn --color=auto "port" /tmp/rhel-demo
+
+Real config example:
+
+grep -RIn --color=auto "PermitRootLogin" /etc/ssh
+
+Show config without comments or blanks:
+
+grep -Ev '^#|^$' /tmp/rhel-demo/config/app.conf
+
+What it shows:
+grep becomes much more useful when you add line numbers, context, recursive search, or exclusion.
+
+⸻
+
+Slide 26: Find Files Without Guessing
+
+Run:
+
+find /tmp/rhel-demo -type f -mtime -1
+find /tmp/rhel-demo -type f -name "*.conf"
+find /tmp/rhel-demo -type f -size +1M -exec ls -lh {} +
+find /tmp/rhel-demo -type f -user "$USER" | head
+
+Safe cleanup preview:
+
+find /tmp/rhel-demo/tmp -type f -name "*.tmp" -mtime +7 -print
+
+Then delete only after review:
+
+find /tmp/rhel-demo/tmp -type f -name "*.tmp" -mtime +7 -delete
+
+Confirm:
+
+find /tmp/rhel-demo/tmp -type f -name "*.tmp" -print
+
+What it shows:
+Print before delete.
+
+⸻
+
+Slide 27: Xargs
+
+Basic example:
+
+find /tmp/rhel-demo/logs -type f -name "*.log" | xargs grep -nHi error
+
+Safer with unusual filenames:
+
+find /tmp/rhel-demo/logs -type f -name "*.log" -print0 | xargs -0 grep -nHi error
+
+One file at a time:
+
+find /tmp/rhel-demo/logs -type f -name "*.log" -print0 | xargs -0 -n1 wc -l
+
+Parallel example:
+
+find /tmp/rhel-demo/logs -type f -name "*.log" -print0 | xargs -0 -n1 -P4 wc -l
+
+What it shows:
+find builds the list. xargs runs another command against that list.
+
+⸻
+
+Slide 28: Awk
+
+Print first column:
+
+awk '{print $1}' /tmp/rhel-demo/logs/access.log
+
+Count repeated client IPs:
+
+awk '{print $1}' /tmp/rhel-demo/logs/access.log | sort | uniq -c | sort -nr
+
+Print fields from /etc/passwd:
+
+awk -F: '{print $1, $3}' /etc/passwd | head
+
+Show normal user accounts:
+
+awk -F: '$3 >= 1000 {print $1, $3, $7}' /etc/passwd
+
+Find HTTP 500s in the access log:
+
+awk '$9 == 500 {print $1, $7, $9}' /tmp/rhel-demo/logs/access.log
+
+What it shows:
+awk is great when the useful data is in columns.
+
+⸻
+
+Slide 29: Sed
+
+View the config:
+
+cat /tmp/rhel-demo/config/app.conf
+
+Replace in output only:
+
+sed 's/8080/9090/' /tmp/rhel-demo/config/app.conf
+
+Replace all matches in output only:
+
+sed 's/dev/prod/g' /tmp/rhel-demo/config/app.conf
+
+Print only certain lines:
+
+sed -n '1,5p' /tmp/rhel-demo/config/app.conf
+
+Remove comments and blanks:
+
+sed '/^#/d; /^$/d' /tmp/rhel-demo/config/app.conf
+
+Safe in-place edit with backup:
+
+cp /tmp/rhel-demo/config/app.conf /tmp/rhel-demo/config/app.conf.work
+sed -i.bak 's/mode=dev/mode=prod/' /tmp/rhel-demo/config/app.conf.work
+diff -u /tmp/rhel-demo/config/app.conf.work.bak /tmp/rhel-demo/config/app.conf.work
+
+What it shows:
+Use .bak when editing files in place.
+
+⸻
+
+Slide 30: Watch
+
+Run:
+
+watch -n 2 date
+
+Then press:
+
+Ctrl + C
+
+Disk monitor:
+
+watch -n 5 'df -h /tmp'
+
+Then Ctrl + C.
+
+Failed units:
+
+watch -n 5 'systemctl list-units --failed --no-pager'
+
+Then Ctrl + C.
+
+Port monitor:
+
+watch -n 2 'ss -tulpen | grep -E ":22|:9090" || echo "no matching ports"'
+
+Then Ctrl + C.
+
+What it shows:
+watch reruns a command repeatedly so you can monitor changes.
+
+⸻
+
+Slide 31: Process Monitoring
+
+Run:
+
+top
+
+Inside top, press:
+
+1
+P
+M
+c
+q
+
+Then run:
+
+ps aux --sort=-%mem | head
+ps aux --sort=-%cpu | head
+pgrep -af sshd
+pidof sshd || echo "sshd PID not found"
+
+For btop:
+
+command -v btop && btop || echo "btop is not installed on this lab image"
+
+What it shows:
+top is the reliable fallback. btop is a nicer dashboard when available.
+
+⸻
+
+Cockpit Slide
+
+Status check:
+
+systemctl status cockpit.socket --no-pager
+systemctl is-enabled cockpit.socket
+
+Check if port 9090 is listening:
+
+ss -tulpen | grep :9090 || echo "cockpit is not currently listening on 9090"
+
+Show the URL format:
+
+echo "https://$(hostname -f 2>/dev/null || hostname):9090"
+
+Optional lab-only enable command:
+
+echo "sudo systemctl enable --now cockpit.socket"
+
+What it shows:
+Cockpit is useful for visibility, but the command line is still important for troubleshooting.
+
+⸻
+
+Slide 32: Disk and Filesystem Checks
+
+Run:
+
+df -hT
+du -sh /tmp/rhel-demo/* 2>/dev/null | sort -h
+lsblk
+lsblk -f
+findmnt | head -25
+mount | column -t | head -25
+
+Deleted files still held open:
+
+sudo lsof +L1 2>/dev/null | head
+
+What it shows:
+Start broad with df, drill down with du, then check for deleted files still held open.
+
+⸻
+
+Slide 33: Networking Quick Checks
+
+Run:
+
+ip -br addr
+ip route
+ss -tulpen | head
+ss -tulpen | grep ':22' || echo "SSH is not listening on port 22"
+nmcli con show --active
+getent hosts localhost
+ping -c 4 127.0.0.1
+tracepath 127.0.0.1
+
+Optional local HTTPS check for Cockpit:
+
+curl -vk https://localhost:9090 2>&1 | head -25 || true
+
+What it shows:
+Check address, route, listening ports, name resolution, and connectivity.
+
+⸻
+
+Slide 34: Firewalld Practical Checks
+
+Run:
+
+systemctl status firewalld --no-pager
+firewall-cmd --state
+firewall-cmd --get-active-zones
+firewall-cmd --list-all
+firewall-cmd --list-services
+firewall-cmd --list-ports
+
+Safe demo of change commands:
+
+echo "sudo firewall-cmd --add-service=http"
+echo "sudo firewall-cmd --add-service=http --permanent"
+echo "sudo firewall-cmd --reload"
+
+What it shows:
+Temporary first, permanent after validation.
+
+⸻
+
+Slide 35: SELinux Quick Checks
+
+Run:
+
+getenforce
+sestatus
+ls -Z /etc/ssh/sshd_config
+ls -Zd /tmp/rhel-demo
+ps -eZ | grep sshd || echo "sshd process not found"
+
+AVC search:
+
+sudo ausearch -m AVC -ts recent | tail -20 || true
+
+Safe restorecon preview:
+
+sudo restorecon -nRv /tmp/rhel-demo 2>/dev/null | head
+
+What it shows:
+Check SELinux state, labels, processes, and AVCs before changing anything.
+
+⸻
+
+Slide 36: Permissions Troubleshooting
+
+Start with the intentionally restricted path from setup:
+
+ls -l /tmp/rhel-demo/perm/level1/level2/demo.txt
+stat /tmp/rhel-demo/perm/level1/level2/demo.txt
+namei -l /tmp/rhel-demo/perm/level1/level2/demo.txt
+
+Then fix the parent directory permission in the demo area:
+
+chmod 755 /tmp/rhel-demo/perm/level1
+namei -l /tmp/rhel-demo/perm/level1/level2/demo.txt
+
+Reference permissions:
+
+touch /tmp/rhel-demo/perm/goodfile /tmp/rhel-demo/perm/badfile
+chmod 640 /tmp/rhel-demo/perm/goodfile
+chmod --reference=/tmp/rhel-demo/perm/goodfile /tmp/rhel-demo/perm/badfile
+ls -l /tmp/rhel-demo/perm/goodfile /tmp/rhel-demo/perm/badfile
+
+What it shows:
+namei -l catches parent directory permission problems.
+
+⸻
+
+Slide 37: Troubleshooting Checklist
+
+Use a variable so the flow looks clean.
+
+SERVICE=sshd
+
+Then run:
+
+systemctl status "$SERVICE" --no-pager
+journalctl -u "$SERVICE" -b --since "30 minutes ago" --no-pager | tail -20
+ss -tulpen | grep ':22' || echo "port 22 not listening"
+firewall-cmd --list-all 2>/dev/null || echo "firewalld unavailable or not running"
+getenforce
+df -h /
+namei -l /etc/ssh/sshd_config
+
+What it shows:
+This is a repeatable quick-check flow.
+
+⸻
+
+Slide 39: Safer Command Habits
+
+Preview cleanup:
+
+find /tmp/rhel-demo/tmp -name "*.tmp" -print
+
+Backup before editing:
+
+cp /tmp/rhel-demo/config/app.conf /tmp/rhel-demo/config/app.conf.$(date +%F).bak
+ls -l /tmp/rhel-demo/config
+
+Safe sed:
+
+cp /tmp/rhel-demo/config/app.conf /tmp/rhel-demo/config/app-safe.conf
+sed -i.bak 's/log_level=info/log_level=debug/' /tmp/rhel-demo/config/app-safe.conf
+ls -l /tmp/rhel-demo/config/app-safe.conf*
+
+Interactive remove demo:
+
+touch /tmp/rhel-demo/tmp/remove-{1..4}.tmp
+rm -I /tmp/rhel-demo/tmp/remove-*.tmp
+
+At the prompt, answer:
+
+n
+
+What it shows:
+Preview and backup before destructive actions.
+
+⸻
+
+Slide 40: Safety Examples
+
+Preview cleanup:
+
+find /tmp/rhel-demo/tmp -name "*.tmp" -mtime +7 -print
+
+Backup config:
+
+cp /tmp/rhel-demo/config/app.conf /tmp/rhel-demo/config/app.conf.$(date +%F).bak
+
+Preview rsync:
+
+rsync -av --dry-run /tmp/rhel-demo/rsync-src/ /tmp/rhel-demo/rsync-dst/
+
+Then show what the real command would be:
+
+echo "rsync -av /tmp/rhel-demo/rsync-src/ /tmp/rhel-demo/rsync-dst/"
+
+What it shows:
+Do not make your first command the destructive command.
+
+⸻
+
+Slide 41: Best One-Liners
+
+Run only a few live so the slide does not drag.
+
+systemctl list-units --failed --no-pager
+journalctl -u sshd -b --since "1 hour ago" --no-pager | tail -20
+ss -tulpen | head
+ps aux --sort=-%mem | head
+ps aux --sort=-%cpu | head
+du -sh /tmp/rhel-demo/* 2>/dev/null | sort -h
+grep -Ev '^#|^$' /tmp/rhel-demo/config/app.conf
+find /tmp/rhel-demo -type f -mtime -1 | head
+rpm -qf /usr/bin/systemctl
+rpm -V systemd | head
+
+What it shows:
+Fast checks that are useful during troubleshooting.
+
+⸻
+
+Slide 42: Live Demo Walkthrough
+
+Use this as your clean recorded flow.
+
+SERVICE=sshd
+
+Then:
+
+systemctl status "$SERVICE" --no-pager
+journalctl -u "$SERVICE" -b --since "30 minutes ago" --no-pager | tail -30
+ss -tulpen | grep ':22' || echo "SSH port not listening"
+firewall-cmd --state 2>/dev/null || echo "firewalld unavailable or not running"
+firewall-cmd --list-all 2>/dev/null || true
+systemctl list-units --failed --no-pager
+watch -n 2 "systemctl is-active $SERVICE; ss -tulpen | grep ':22' || echo port not listening"
+
+Then press:
+
+Ctrl + C
+
+What it shows:
+Status → logs → ports → firewall → failed units → monitor.
+
+⸻
+
+Slide 43: Demo Wow Moments
+
+Run these quickly as a highlight reel.
+
+Last argument
+
+mkdir -p /tmp/rhel-demo/wow/logs
+
+Then type:
+
+cd 
+
+Press:
+
+Esc + .
+
+Then Enter:
+
+pwd
+
+Reverse search
+
+Press:
+
+Ctrl + R
+
+Type:
+
+firewall
+
+Press Enter when you find a command.
+
+Re-run with sudo
+
+Use a safe command:
+
+tail -n 5 /var/log/messages
+sudo !!
+
+Fast replace
+
+echo systemctl start firewalld.service
+^start^stop
+
+Directory stack
+
+pushd /var/log
+pushd /etc/ssh
+dirs -v
+popd
+
+⸻
+
+Slide 44: Hands-On Lab
+
+Use these as learner commands or record yourself doing them.
+
+systemctl list-units --failed --no-pager
+journalctl -u sshd -b --since "1 hour ago" --no-pager | tail -20
+grep -RIn "PermitRootLogin" /etc/ssh
+find /var/log -type f -mtime -1 2>/dev/null | head
+watch -n 5 'df -h /'
+
+Then press Ctrl + C to exit watch.
+
+Stretch:
+
+pushd /var/log
+pushd /etc/ssh
+dirs -v
+popd
+
+⸻
+
+Slide 45: Common Mistakes
+
+This slide is mostly talking, but you can demo two quick mistakes safely.
+
+Mistake: Searching too broadly
+
+Bad:
+
+grep -R error /var/log 2>/dev/null | head
+
+Better:
+
+journalctl -u sshd -b --since "1 hour ago" --no-pager | tail -20
+
+Mistake: Deleting before previewing
+
+Bad, do not run live:
+
+echo "find /tmp -name '*.tmp' -delete"
+
+Better:
+
+find /tmp/rhel-demo/tmp -name "*.tmp" -print
+
+What it shows:
+The better habit is usually just as easy as the risky habit.
+
+⸻
+
+Slide 46 / 47: Knowledge Check
+
+You can demo the answers quickly.
+
+# Ctrl+A jumps to beginning of line
+echo "demo command for Ctrl+A"
+echo "previous command"
+!!
+cd /tmp
+cd /etc
+cd -
+pushd /var/log
+pushd /etc/ssh
+dirs -v
+popd
+systemctl list-units --failed --no-pager
+mkdir -p /tmp/rhel-demo/kc/path
+cd 
+
+Then press:
+
+Esc + .
+
+⸻
+
+Good Terminal Tab Setup for Recording
+
+I would set up tabs like this:
+
+Tab 1: Shell shortcuts
+
+cd /tmp/rhel-demo
+
+Use for Ctrl + U, Ctrl + C, Esc + ., Alt + B, etc.
+
+Tab 2: History demos
+
+cd /tmp/rhel-demo
+
+Run the history preload commands here.
+
+Tab 3: Directory demos
+
+cd /tmp/rhel-demo
+
+Use for cd, tree, pushd, popd, dirs.
+
+Tab 4: Log follow
+
+tail -f /tmp/rhel-demo/logs/app.log
+
+Tab 5: Log append
+
+printf '%s web01 app[9999]: ERROR simulated live log line\n' "$(date '+%F %T')" >> /tmp/rhel-demo/logs/app.log
+
+Tab 6: System checks
+
+cd /tmp/rhel-demo
+
+Use for systemctl, journalctl, ss, df, firewall-cmd, getenforce.
+
+⸻
+
+Best Tiny Demos to Include No Matter What
+
+These are the ones that will feel the most useful on recording:
+
+sleep 60
+Ctrl + C
+echo $?
+mkdir -p /tmp/rhel-demo/demo/logs
+cd Esc+.
+pwd
+echo systemctl start firewalld.service
+^start^stop
+Ctrl + R
+firewall
+systemctl
+Page Up
+systemctl is-active sshd
+echo $?
+journalctl -u sshd -b --since "1 hour ago" --no-pager | tail -20
+find /tmp/rhel-demo/tmp -name "*.tmp" -print
+namei -l /tmp/rhel-demo/perm/level1/level2/demo.txt
+watch -n 2 'df -h /tmp'
+
+Those will make the presentation feel practical instead of theoretical.
