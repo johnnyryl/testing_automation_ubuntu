@@ -1,3 +1,735 @@
+Yes — I’d use this revised version. I tightened it so it sounds more natural, less like you’re reading a script, and more like you’re explaining things as you demo them.
+
+You can paste this into speaker notes.
+
+⸻
+
+1. Title Slide — RHEL Shortcuts, Tips, and Tricks
+
+“Today I’m going to walk through some RHEL shortcuts, tips, and tricks that can make command-line work faster, cleaner, and safer.
+
+This is not meant to be a deep dive into every Linux command. The goal is to show practical habits that help with real tasks like checking services, reviewing logs, moving around the filesystem, and troubleshooting under pressure.”
+
+⸻
+
+2. Purpose
+
+“The purpose of this session is to help newer team members get more comfortable and efficient on the RHEL command line.
+
+A lot of these commands are small, but they save time because they reduce repetitive typing, help avoid mistakes, and give us a more repeatable way to troubleshoot.
+
+The goal is for this to feel useful right away, not like a random list of commands to memorize.”
+
+⸻
+
+3. Where This Fits
+
+“These shortcuts fit into the kind of work we already do.
+
+When we’re checking service health, reviewing logs, troubleshooting connectivity, checking firewall rules, SELinux, ports, permissions, or disk space, the command line is usually part of the process.
+
+These commands do not replace approved runbooks or team procedures. They help us move through those procedures faster and more consistently.”
+
+⸻
+
+4. Learning Outcomes
+
+“By the end of this session, the goal is that you can edit long commands faster, reuse old commands instead of retyping them, move around directories more easily, and search logs and files in a more focused way.
+
+I also want everyone to leave with a few safer habits, like checking status before restarting something, previewing before deleting files, and testing temporary changes before making them permanent.”
+
+⸻
+
+5. Roadmap
+
+“This is how the session is organized.
+
+First, we’ll focus on making the shell feel faster with keyboard shortcuts, command history, navigation, tab completion, aliases, and shell expansion.
+
+Then we’ll move into troubleshooting commands like systemctl, journalctl, grep, find, awk, sed, watch, top, btop, and ss.
+
+The last section is about working safer under pressure, with a demo flow, common mistakes, and a quick knowledge check.”
+
+⸻
+
+6. Demo Safety and Assumptions
+
+“For the demos, I’m going to use sanitized examples and lab-safe commands.
+
+Some commands in this deck can restart services, change firewall rules, or delete files. When I show those, I’ll either use a safe path under /tmp, or I’ll use echo to show what the command would look like without actually making the change.
+
+The main rule for the demos is simple: move fast, but make the safe path your default.”
+
+⸻
+
+7. Part 1 — Make the Shell Feel Fast
+
+“This first section is about getting more comfortable in the shell.
+
+These are small keyboard shortcuts and habits that make the command line feel less clunky. Once they become muscle memory, they save a lot of time.”
+
+⸻
+
+8. Command-Line Editing Shortcuts
+
+“These shortcuts help when you’re editing a command you already typed.
+
+Instead of holding the arrow key or deleting everything manually, you can jump around and cut parts of the line quickly.
+
+Ctrl+A jumps to the beginning of the line, Ctrl+E jumps to the end, Ctrl+U cuts everything before the cursor, and Ctrl+K cuts everything after the cursor.”
+
+Demo line:
+“I’ll type a long command and show how quickly I can move around it. I’ll use Ctrl+A to jump to the beginning, Ctrl+E to jump back to the end, Ctrl+U to clear the line, and Ctrl+Y to paste it back.”
+
+Transition:
+“The point is that the shell already has editing tools built in, so we do not always need to retype the command.”
+
+⸻
+
+9. More Shell Movement Shortcuts
+
+“These are a few more shortcuts that are useful when a command is long or when something is running.
+
+Alt+B and Alt+F move backward and forward by word. Ctrl+C stops a running command. Ctrl+D exits the current shell or ends input.
+
+One useful command to pair with this is echo $?, which shows the exit code from the last command.”
+
+Demo line:
+“I’ll run sleep 60, then stop it with Ctrl+C. After that, I’ll run echo $?. A zero usually means success, and a non-zero value means the command failed, was interrupted, or returned some other status.”
+
+Transition:
+“That little exit code can be useful when you’re troubleshooting or writing scripts.”
+
+⸻
+
+10. The Magic Last Argument Trick
+
+“This is one of my favorite shortcuts because it feels like magic the first time you use it.
+
+Esc + . or Alt + . inserts the last argument from the previous command. That is really useful when the last thing you typed was a path, a filename, or a service name.”
+
+Demo line:
+“I’ll create a directory with mkdir -p /tmp/rhel-demo/logs. Now instead of retyping that path, I’ll type cd, press Esc then ., and Bash inserts the path for me.”
+
+Transition:
+“This is especially helpful with long paths, because long paths are easy to mistype.”
+
+⸻
+
+11. Command History Tricks
+
+“This slide is about reusing work you already did.
+
+history shows previous commands. !! reruns the previous command. sudo !! reruns the previous command with sudo. !$ grabs the last argument from the previous command, and !* grabs all the arguments.”
+
+Demo line:
+“I’ll run a simple command, then use !! to run it again. Then I’ll show !$, which grabs just the last argument from the previous command.”
+
+Transition:
+“A lot of command-line work is repeating something with one small change, and these shortcuts help with that.”
+
+⸻
+
+12. Fix the Last Command Without Retyping
+
+“This one is useful when the last command was almost right, but one word needs to change.
+
+The ^old^new syntax reruns the previous command and replaces the first matching word.”
+
+Demo line:
+“I’ll use echo so this is safe. I’ll run echo systemctl start firewalld.service. Then I’ll type ^start^stop. Bash reruns the previous command, but swaps start for stop.”
+
+Transition:
+“In real troubleshooting, this saves time when the command is long and only one piece needs to change.”
+
+⸻
+
+13. Reverse History Search
+
+“Reverse history search is another way to avoid retyping.
+
+Press Ctrl+R, type part of a previous command, and Bash searches backward through your command history. You do not need to remember the full command. You only need to remember one unique word.”
+
+Demo line:
+“I’ll press Ctrl+R and type firewall. Bash brings up a previous command that had firewall in it. If I press Ctrl+R again, it keeps cycling through older matches.”
+
+Transition:
+“When I find the command I want, I can run it as-is or edit it first.”
+
+⸻
+
+14. Page Up / Page Down History Search
+
+“Page Up and Page Down are another useful history feature on RHEL.
+
+If I type the beginning of a command, like systemctl, and press Page Up, it cycles through previous commands that started with systemctl.
+
+That is different from the Up Arrow, because the Up Arrow walks through command history one command at a time.”
+
+Demo line:
+“I’ll type systemctl and press Page Up. Now it is pulling previous systemctl commands from history. I can keep pressing Page Up to go farther back, or Page Down to move forward through the matches.”
+
+Transition:
+“This is helpful when you remember the command family, but not the exact command.”
+
+⸻
+
+15. Tree — See the Directory Layout at a Glance
+
+“tree is useful when you want to quickly understand a directory layout.
+
+ls gives you a flat list, but tree shows the structure visually. I like tree -L 2 because it limits the output to two levels, so you get a useful view without flooding the screen.”
+
+Demo line:
+“I’ll run tree -L 2 /tmp/rhel-demo. That gives us a quick visual of what is under that directory. If I only want directories, I can use tree -d.”
+
+Transition:
+“This is also useful when you are explaining a folder structure to someone else.”
+
+⸻
+
+16. Directory Navigation Basics
+
+“This slide covers basic navigation.
+
+cd - is one of the most useful ones because it takes you back to the previous directory. pwd tells you where you are. realpath, dirname, and basename are useful when you’re working with full paths and want to break them apart.”
+
+Demo line:
+“I’ll move into a nested path, run pwd, then use cd .. and cd ../.. to move up. Then I’ll use cd - to jump back. After that, I’ll show realpath, dirname, and basename on a file path.”
+
+Transition:
+“The main idea is to let the shell help you manage paths instead of retyping everything.”
+
+⸻
+
+17. Directory Stack
+
+“cd - is great when you are switching between two directories.
+
+But when you are jumping between multiple locations, pushd, popd, and dirs are better. Think of it like a directory stack that Bash remembers for you.”
+
+Demo line:
+“I’ll run pushd /var/log, then pushd /etc/ssh, then pushd /tmp. Now dirs -v shows the stack. When I run popd, Bash moves me back through the saved locations.”
+
+Transition:
+“This is useful during troubleshooting because you often jump between logs, config files, and temporary work areas.”
+
+⸻
+
+18. Tab Completion
+
+“Tab completion is one of the easiest ways to save time and avoid typos.
+
+If I start typing a path, command, service name, or file name and press Tab, Bash can complete it or show possible matches.”
+
+Demo line:
+“I’ll type cd /var/lo and press Tab, and it completes /var/log. I can also try something like systemctl status ssh and press Tab to complete service names.”
+
+Transition:
+“The big point is: do not type full names if the shell can safely complete them for you.”
+
+⸻
+
+19. Help Without Leaving the Terminal
+
+“This slide is about finding help quickly without leaving the terminal.
+
+Good admins do not memorize everything. They know how to find the right answer quickly. command --help is usually good for quick syntax, and man pages are better when you need more detail.”
+
+Demo line:
+“I’ll open man systemctl, then search inside the man page using /--failed. Inside a man page, / searches, n goes to the next match, and q quits.”
+
+Transition:
+“I can also use man -k firewall or apropos selinux when I know the topic but not the exact command.”
+
+⸻
+
+20. Vim Survival and vimtutor
+
+“Vim can be intimidating if you do not use it often, but on RHEL it is useful to know enough to survive.
+
+You do not need to be a Vim expert. The basics are: enter insert mode, leave insert mode, search, save, and quit.”
+
+Demo line:
+“I’ll run vimtutor just to show that it exists. It is a safe interactive lesson for learning Vim. Then I’ll open a demo config file, use :set number, search with /port, and quit with :q!.”
+
+Transition:
+“The main thing is: if Vim opens, do not panic. Press Esc, then use :q! if you need to leave without saving.”
+
+⸻
+
+21. Aliases and Functions
+
+“Aliases let you save short names for commands you type often.
+
+For example, ports can run ss -tulpen, and failed can run systemctl list-units --failed. Functions are better when you need arguments or a little bit of logic.”
+
+Demo line:
+“I’ll define an alias called ports, then use type ports to show what it expands to. Then I’ll run it. I’ll also show a small function called mkcd, which creates a directory and moves into it.”
+
+Transition:
+“That is a good example of when a function is better than an alias, because it uses an argument.”
+
+⸻
+
+22. Shell Expansion Tricks
+
+“Shell expansion lets Bash do repetitive typing for us.
+
+Brace expansion can create several directories or files at once. Command substitution lets us put the output of one command inside another command, which is great for dated backup names.”
+
+Demo line:
+“I’ll run mkdir -p project/{bin,etc,logs,tmp} and show the result with tree. Then I’ll use cp app.conf{,.bak} to quickly make a backup. Finally, I’ll create a directory named backup-$(date +%F).”
+
+Transition:
+“These tricks make names more consistent and reduce repetitive typing.”
+
+⸻
+
+23. Part 2 — Troubleshoot Faster
+
+“Now we’re moving into troubleshooting.
+
+This section is about checking system state quickly: services, logs, processes, ports, firewall, SELinux, disk, and permissions.
+
+The goal is to build a flow, not just memorize individual commands.”
+
+⸻
+
+24. Systemctl Service Basics
+
+“systemctl is one of the first places we usually go when checking services.
+
+status tells us what the service is doing. start, stop, restart, and reload control the service. enable --now is useful because it enables a service at boot and starts it immediately.”
+
+Demo line:
+“I’ll check systemctl status firewalld --no-pager. For the start, stop, and restart examples, I’ll show them with echo so I’m not changing service state during the demo.”
+
+Transition:
+“The safe habit here is to check status before restarting something.”
+
+⸻
+
+25. Systemctl Triage Commands
+
+“This slide is about service triage.
+
+systemctl list-units --failed is one of the quickest checks because it shows failed units right away. is-active and is-enabled are useful because they are script-friendly and return meaningful exit codes.”
+
+Demo line:
+“I’ll run systemctl list-units --failed --no-pager. Then I’ll run systemctl is-active firewalld and echo $? so you can see the exit code.”
+
+Transition:
+“The command output is useful for people, and the exit code is useful for scripts.”
+
+⸻
+
+26. Journalctl Superpower
+
+“journalctl lets us filter logs instead of reading everything.
+
+That is the big takeaway. We can filter by service, boot, time, priority, and we can follow logs live.”
+
+Demo line:
+“I’ll run journalctl -u sshd -b --since "1 hour ago" --no-pager. That gives me logs for one service, from this boot, within a time window.”
+
+Transition:
+“The idea is to ask the logs a focused question instead of scrolling through a huge file hoping to spot the issue.”
+
+⸻
+
+27. Quick Log Review
+
+“This slide covers classic log tools: less, tail, and grep.
+
+less is good for reading and searching a file. tail -f is good when you want to watch new log lines come in. grep helps pull out the lines that match what you care about.”
+
+Demo line:
+“I’ll open a demo log with less, search for ERROR, and use n and N to move between matches. Then I’ll show tail -f and append a new line from another tab so you can see it update live.”
+
+Transition:
+“After that, grep -A and grep -B help show context around the matching lines.”
+
+⸻
+
+28. Grep Tricks
+
+“grep becomes much more useful when you add options.
+
+-i ignores case, -n shows line numbers, -r searches recursively, and -A, -B, or -C show context around a match.”
+
+Demo line:
+“I’ll search the demo log for error, show line numbers with -n, and show context with -C2. Then I’ll use grep -Ev '^#|^$' to hide comments and blank lines in a config file.”
+
+Transition:
+“That makes config files much easier to review.”
+
+⸻
+
+29. Find Files Without Guessing
+
+“find helps when you do not know exactly where something is.
+
+You can search by name, type, size, modified time, owner, permissions, and then run another command on the results.”
+
+Demo line:
+“I’ll use find under /tmp/rhel-demo so this is safe. I’ll find recently modified files, config files, and larger files.”
+
+Transition:
+“The safety habit here is important: use -print first so you can review the results before doing anything destructive like -delete.”
+
+⸻
+
+30. Xargs
+
+“xargs takes a list and feeds it into another command.
+
+A common pattern is: find creates the list, and xargs runs a command against each item in that list.”
+
+Demo line:
+“I’ll find log files, then pipe them into xargs grep to search for errors. Then I’ll show the safer version using -print0 and xargs -0, which handles unusual filenames better.”
+
+Transition:
+“The main idea is that xargs connects one command’s output to another command’s input.”
+
+⸻
+
+31. Awk
+
+“awk is useful when the answer is hiding in columns.
+
+You can print specific fields, filter rows based on field values, and do quick summaries. It can look intimidating, but the simple uses are very approachable.”
+
+Demo line:
+“I’ll start with awk '{print $1}' against an access log to print the client IPs. Then I’ll pipe that into sort, uniq -c, and sort -nr to count repeated IPs.”
+
+Transition:
+“That pattern is really useful for summarizing log data.”
+
+⸻
+
+32. Sed
+
+“sed is useful for quick text edits and quick text filtering.
+
+I like to teach it in two stages: first, preview the change in the output only. Then, if you need to edit the file, use -i.bak so you get a backup.”
+
+Demo line:
+“I’ll run sed 's/8080/9090/' against a demo config so we can see the replacement without changing the file. Then I’ll show sed -n '1,5p' to print only certain lines.”
+
+Transition:
+“Finally, I’ll make a safe copy and use sed -i.bak, then show the backup.”
+
+⸻
+
+33. Watch
+
+“watch turns a normal command into a live dashboard.
+
+It reruns the command every few seconds. This is useful when you’re waiting for a service, port, disk state, or firewall state to change.”
+
+Demo line:
+“I’ll run watch -n 2 date first because it is simple and you can see it refresh. Then I’ll stop it with Ctrl+C.”
+
+Transition:
+“A more practical example would be watching df -h, failed units, or a port check.”
+
+⸻
+
+34. Process Monitoring
+
+“top is the classic process monitor.
+
+It may not be pretty, but it is usually available. ps is good when you want a quick sorted list, like top memory or CPU users. pgrep and pidof help locate processes by name.”
+
+Demo line:
+“I’ll open top and use a few keys: P to sort by CPU, M to sort by memory, c to show full command lines, and q to quit.”
+
+Transition:
+“Then I’ll show ps aux --sort=-%mem | head and ps aux --sort=-%cpu | head for quick one-line checks.”
+
+⸻
+
+35. btop
+
+“btop is a friendlier dashboard-style process and resource monitor.
+
+Where top can feel like a spreadsheet, btop gives a more visual view of CPU, memory, disks, network, and processes.”
+
+Demo line:
+“I’ll open btop if it is available on the lab system. The main thing I want to show is how quickly you can see CPU, memory, disk, network, and process activity in one place.”
+
+Transition:
+“I still treat this as a visibility tool first. I do not kill processes unless I understand what owns them and what depends on them.”
+
+⸻
+
+36. Cockpit Web Console
+
+“Cockpit is a web-based RHEL management console.
+
+It gives a visual view of system health, services, logs, storage, networking, accounts, and updates if enabled. I think of it as a useful visibility tool, not a replacement for command-line troubleshooting.”
+
+Demo line:
+“I’ll check systemctl status cockpit.socket, then show the URL format: https://server-name:9090.”
+
+Transition:
+“The command line still matters because it is scriptable, repeatable, and usually what we use for deeper troubleshooting.”
+
+⸻
+
+37. Disk and Filesystem Checks
+
+“This slide is a disk-space triage flow.
+
+df -hT tells us filesystem usage and type. du -sh helps us drill into what is using space. lsblk, findmnt, and mount help us understand devices and mounts.”
+
+Demo line:
+“I’ll start with df -hT to see filesystem usage. Then I’ll use du -sh /tmp/rhel-demo/* | sort -h to see what is taking space in the demo directory.”
+
+Transition:
+“The cool trick here is lsof +L1, which can show deleted files that are still held open by a process.”
+
+⸻
+
+38. Networking Quick Checks
+
+“This slide is about checking the basics: IP address, route, listening ports, DNS, and connectivity.
+
+ip -br addr gives a clean address view. ip route shows routing. ss -tulpen shows listening ports and connections. getent hosts checks name resolution.”
+
+Demo line:
+“I’ll run ip -br addr, then ip route, then ss -tulpen. If I’m checking SSH, I can grep for port 22.”
+
+Transition:
+“The key point is: use ss instead of guessing whether a port is listening.”
+
+⸻
+
+39. Firewalld Practical Checks
+
+“For firewalld, I like to separate checking from changing.
+
+First check the service, state, active zones, services, and ports. Then, if a change is needed, test temporary first. Only make it permanent after validation.”
+
+Demo line:
+“I’ll run firewall-cmd --state, --get-active-zones, and --list-all. For adding services, I’ll show the commands with echo so we do not change the lab state.”
+
+Transition:
+“The professional habit here is temporary first, permanent after validation.”
+
+⸻
+
+40. SELinux Quick Checks
+
+“SELinux is very RHEL-relevant.
+
+The important message is: do not immediately disable SELinux. Check the current mode, check labels, check processes, and look for AVC denials.”
+
+Demo line:
+“I’ll run getenforce and sestatus, then show labels with ls -Z. I’ll also show ausearch -m AVC -ts recent if available.”
+
+Transition:
+“Often the fix is a label or policy issue, not turning SELinux off.”
+
+⸻
+
+41. Permissions Troubleshooting
+
+“Sometimes the file permissions look fine, but access still fails because a parent directory blocks access.
+
+That is where namei -l is really useful. It shows permissions for every part of the path.”
+
+Demo line:
+“I’ll run ls -l and stat on a demo file, then namei -l on the full path. This shows each directory in the path and its permissions.”
+
+Transition:
+“That makes it easier to spot when the problem is not the file itself, but one of the parent directories.”
+
+⸻
+
+42. Troubleshooting Checklist
+
+“This is the quick-check flow I want people to remember.
+
+Start with what changed. Then check the service, logs, ports, firewall, SELinux, disk, and permissions. You do not always need every step, but this gives you a repeatable path instead of randomly trying commands.”
+
+Demo line:
+“I’ll set a service variable, like SERVICE=sshd, and walk through the checks: systemctl status, journalctl, ss, firewall state, SELinux state, disk space, and namei.”
+
+Transition:
+“The point is not that this exact checklist solves everything. The point is that it gives you a structured starting point.”
+
+⸻
+
+43. Part 3 — Work Safer Under Pressure
+
+“The last section is about safety.
+
+A lot of mistakes happen when we’re moving quickly. The goal is to make the safe way easy: preview first, backup before changing, use temporary changes before permanent ones, and avoid increasing the blast radius.”
+
+⸻
+
+44. Safer Command Habits
+
+“These habits are small, but they prevent big mistakes.
+
+Use --dry-run when available. Use sed -i.bak instead of editing with no backup. Use find ... -print before -delete. Check service status before restarting. Use temporary firewall rules first. And avoid putting secrets into commands, because shell history can save them.”
+
+Demo line:
+“I’ll show a few examples under /tmp/rhel-demo. The important idea is that the safe version of the command is usually only slightly longer than the risky version.”
+
+⸻
+
+45. Safety Examples
+
+“This slide puts the safety habits into examples.
+
+Before deleting files, print what would be deleted. Before editing a config, make a backup. Before syncing files, use rsync --dry-run.”
+
+Demo line:
+“I’ll run a find command with -print first, then show what the delete command would look like. Then I’ll make a dated backup copy of a config file. Finally, I’ll run rsync --dry-run so we can preview the sync without changing anything.”
+
+Transition:
+“The key rule is: do not make the first command the destructive command.”
+
+⸻
+
+46. Best One-Liners
+
+“These are fast checks worth memorizing or keeping in a personal cheat sheet.
+
+They are not magic; they are just high-value commands that answer common questions quickly: what failed, what do the logs say, what ports are listening, what is using CPU or memory, what is using disk, and what package owns a file.”
+
+Demo line:
+“I won’t run every one of these live, but I’ll show a few: systemctl list-units --failed, journalctl -u sshd -b --since "1 hour ago", ss -tulpen, and du -sh * | sort -h.”
+
+Transition:
+“These are the kinds of commands that are useful during real troubleshooting.”
+
+⸻
+
+47. Live Demo Walkthrough
+
+“This is the full troubleshooting flow put together.
+
+The scenario is: a teammate says a service is not working. Instead of guessing, we’ll check service status, logs, ports, firewall, failed units, and then monitor state.”
+
+Demo line:
+“I’ll start with systemctl status, then check recent logs with journalctl, then check whether the port is listening with ss. After that, I’ll check firewall state and failed units. Finally, I’ll use watch to monitor the service state.”
+
+Transition:
+“This is meant to show a repeatable troubleshooting pattern.”
+
+⸻
+
+48. Demo — Quick Tricks to Show Live
+
+“This slide is a quick highlight reel of the shortcuts that usually feel immediately useful: last argument, fast replace, reverse search, rerun with sudo, and directory stack.”
+
+Demo line:
+“I’ll go quickly through these. First, I’ll create a directory and use Esc + . to reuse the path. Then I’ll use ^start^stop to fix the previous command. Then I’ll use Ctrl+R to search history. Then I’ll show sudo !!, and finally pushd, dirs, and popd.”
+
+Transition:
+“These are the shortcuts I’d recommend practicing first.”
+
+⸻
+
+49. Hands-On Lab
+
+“This lab is meant to let people practice the flow.
+
+The commands here cover failed services, recent logs, config searching, finding recently changed files, and monitoring disk. The stretch task is directory stack navigation.”
+
+Presenter line:
+“If this were a hands-on session, I’d have everyone run these commands and explain what each one is checking. The goal is not just to copy and paste. The goal is to understand what question each command answers.”
+
+⸻
+
+50. Common Mistakes
+
+“These are common mistakes that are easy to make when people are new or moving fast.
+
+Retyping long commands instead of using history. Restarting services before checking status and logs. Searching entire logs instead of filtering. Making firewall changes permanent before testing. Running destructive find commands before reviewing the results.”
+
+Presenter line:
+“The better habits on the right are usually not complicated. They just require slowing down for a second before doing something destructive or disruptive.”
+
+⸻
+
+51. Knowledge Check
+
+“This is a quick review.
+
+These are not trick questions. They are meant to reinforce the shortcuts and commands that are most useful from this session.”
+
+Presenter line:
+“I’ll give everyone a few seconds to think through these. The main ones I’d want you to remember are Ctrl+A, sudo !!, cd -, pushd/popd/dirs, systemctl list-units --failed, Esc + ., and why we preview before deleting.”
+
+⸻
+
+52. Knowledge Check Answers
+
+“Here are the answers.
+
+Ctrl+A jumps to the beginning of the line. sudo !! reruns the previous command with sudo. cd - jumps back to the previous directory. pushd, popd, and dirs manage a directory stack. systemctl list-units --failed shows failed units. Esc + . inserts the last argument from the previous command.”
+
+Closing line:
+“The goal is not just speed. The goal is speed with control.”
+
+⸻
+
+53. Follow-Up Actions, References, and Closing
+
+“To follow up, I’d recommend practicing a small set of these first: Ctrl+R, Esc + ., sudo !!, cd -, journalctl filters, and systemctl list-units --failed.
+
+Add aliases only for things you actually use. Build a personal cheat sheet. And when you find a useful one-liner, share it with the team.”
+
+Closing line:
+“The main takeaway is that small command-line habits can make troubleshooting faster, safer, and more repeatable.”
+
+⸻
+
+54. Final Logo Slide
+
+“Thanks everyone. That’s all I have. I hope there are at least a few commands or shortcuts in here that make your next troubleshooting session faster and easier.”
+
+Pause for questions.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Use this as your recording/demo plan. It gives you real commands for the command-heavy slides and tells you what to type, what key to press, and what the audience should notice.
 
 Run the setup once before recording.
