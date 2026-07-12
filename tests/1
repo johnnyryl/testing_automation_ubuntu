@@ -1,0 +1,529 @@
+I need to correct one technical point from my previous answer: UBI containers cannot be registered normally with subscription-manager; Red Hat disables registration while it is running in container mode. The files below accomplish the result you actually need by permanently including a version-specific Satellite repository configuration and entitlement certificate bundle. Downstream Dockerfiles can immediately run yum install or dnf install without registering again.  
+
+Red Hat normally recommends supplying the repository configuration and entitlement keys as build secrets rather than putting them in the published image. Because you specifically need reusable internal builder images, keep this project and its container registry tightly restricted.  
+
+Project layout
+
+image-builder/
+├── .dockerignore
+├── .gitignore
+├── .gitlab-ci.yml
+├── Dockerfile
+├── README.md
+└── scripts/
+    ├── create-satellite-bundle.sh
+    └── verify-satellite.sh
+
+⸻
+
+1. .gitlab-ci.yml
+
+Replace your current template with this:
+
+stages:
+  - build
+variables:
+  KANIKO_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/kaniko/kaniko:v1.23.0-debug"
+  SATELLITE_HOST: "orecchiette.external.lmco.com"
+.build_satellite_image:
+  stage: build
+  image:
+    name: "$KANIKO_IMAGE"
+    entrypoint: [""]
+  before_script:
+    - |
+      set -eu
+      test -n "${RELEASE_TOKEN:-}" || {
+        echo "ERROR: RELEASE_TOKEN is not available."
+        exit 1
+      }
+      test -f "${CA_CERT:-}" || {
+        echo "ERROR: CA_CERT must be configured as a GitLab File variable."
+        exit 1
+      }
+      mkdir -p \
+        /kaniko/.docker \
+        "$CI_PROJECT_DIR/build-inputs"
+      # Make the internal CA available to Kaniko and other HTTPS clients.
+      if [ -f /kaniko/ssl/certs/ca-certificates.crt ]; then
+        cat "$CA_CERT" >> /kaniko/ssl/certs/ca-certificates.crt
+      fi
+      if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+        cat "$CA_CERT" >> /etc/ssl/certs/ca-certificates.crt
+      fi
+      cp "$CA_CERT" "$CI_PROJECT_DIR/build-inputs/lm-ca.pem"
+      # Authenticate Kaniko to the internal GitLab registry.
+      AUTH_VALUE="$(
+        printf 'RELEASE_TOKEN:%s' "$RELEASE_TOKEN" |
+        /busybox/base64 |
+        /busybox/tr -d '\n'
+      )"
+      printf '{"auths":{"%s":{"auth":"%s"}}}\n' \
+        "$CI_REGISTRY" \
+        "$AUTH_VALUE" \
+        > /kaniko/.docker/config.json
+      chmod 0600 /kaniko/.docker/config.json
+      # Select the permanent RHSM/Satellite bundle for this RHEL major.
+      case "$RHEL_MAJOR" in
+        7)
+          RHSM_SECURE_FILE_ID="${RHSM_UBI7_SECURE_FILE_ID:-}"
+          ;;
+        8)
+          RHSM_SECURE_FILE_ID="${RHSM_UBI8_SECURE_FILE_ID:-}"
+          ;;
+        9)
+          RHSM_SECURE_FILE_ID="${RHSM_UBI9_SECURE_FILE_ID:-}"
+          ;;
+        10)
+          RHSM_SECURE_FILE_ID="${RHSM_UBI10_SECURE_FILE_ID:-}"
+          ;;
+        *)
+          echo "ERROR: Unsupported RHEL_MAJOR: $RHEL_MAJOR"
+          exit 1
+          ;;
+      esac
+      test -n "$RHSM_SECURE_FILE_ID" || {
+        echo "ERROR: Secure File ID is not configured for RHEL $RHEL_MAJOR."
+        exit 1
+      }
+      # Download the protected entitlement bundle from this project's
+      # GitLab Secure Files storage.
+      /busybox/wget \
+        --header="JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        --output-document="$CI_PROJECT_DIR/build-inputs/rhsm-bundle.tar.gz" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/secure_files/${RHSM_SECURE_FILE_ID}/download"
+      test -s "$CI_PROJECT_DIR/build-inputs/rhsm-bundle.tar.gz" || {
+        echo "ERROR: RHSM bundle download was empty."
+        exit 1
+      }
+      chmod 0600 "$CI_PROJECT_DIR/build-inputs/rhsm-bundle.tar.gz"
+  script:
+    - |
+      set -eu
+      IMAGE_REPOSITORY="${CI_REGISTRY_IMAGE}/ubi${RHEL_MAJOR}-init-satellite"
+      DESTINATIONS="
+        --destination=${IMAGE_REPOSITORY}:sha-${CI_COMMIT_SHORT_SHA}
+        --destination=${IMAGE_REPOSITORY}:pipeline-${CI_PIPELINE_IID}
+      "
+      if [ "${CI_COMMIT_BRANCH:-}" = "${CI_DEFAULT_BRANCH}" ]; then
+        DESTINATIONS="${DESTINATIONS}
+          --destination=${IMAGE_REPOSITORY}:latest
+        "
+      elif [ -n "${CI_COMMIT_REF_SLUG:-}" ]; then
+        DESTINATIONS="${DESTINATIONS}
+          --destination=${IMAGE_REPOSITORY}:${CI_COMMIT_REF_SLUG}
+        "
+      fi
+      /kaniko/executor \
+        --context="$CI_PROJECT_DIR" \
+        --dockerfile="$CI_PROJECT_DIR/Dockerfile" \
+        --build-arg="BASE_IMAGE=${BASE_IMAGE}" \
+        --build-arg="RHEL_MAJOR=${RHEL_MAJOR}" \
+        --build-arg="SATELLITE_HOST=${SATELLITE_HOST}" \
+        --build-arg="SOURCE_URL=${CI_PROJECT_URL}" \
+        --build-arg="VCS_REF=${CI_COMMIT_SHA}" \
+        --build-arg="BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        $DESTINATIONS \
+        --cache=false \
+        --cleanup
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+build_satellite_images:
+  extends: .build_satellite_image
+  parallel:
+    matrix:
+      - RHEL_MAJOR: "7"
+        BASE_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/base-images/ubi7-init:latest"
+      - RHEL_MAJOR: "8"
+        BASE_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/base-images/ubi8-init:latest"
+      - RHEL_MAJOR: "9"
+        BASE_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/base-images/ubi9-init:latest"
+      - RHEL_MAJOR: "10"
+        BASE_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/base-images/ubi10-init:latest"
+
+This creates four separate registry repositories:
+
+image-builder/ubi7-init-satellite
+image-builder/ubi8-init-satellite
+image-builder/ubi9-init-satellite
+image-builder/ubi10-init-satellite
+
+A main-branch build publishes tags such as:
+
+ubi8-init-satellite:latest
+ubi8-init-satellite:sha-a1b2c3d4
+ubi8-init-satellite:pipeline-27
+
+A feature branch also gets:
+
+ubi8-init-satellite:create-builder-images
+
+⸻
+
+2. Dockerfile
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ARG BASE_IMAGE
+ARG RHEL_MAJOR
+ARG SATELLITE_HOST
+ARG SOURCE_URL
+ARG VCS_REF
+ARG BUILD_DATE
+LABEL org.opencontainers.image.title="UBI ${RHEL_MAJOR} Init Satellite Builder" \
+      org.opencontainers.image.description="Internal UBI init image with persistent Lockheed Martin Satellite repository access" \
+      org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.base.name="${BASE_IMAGE}" \
+      com.lmco.image.rhel-major="${RHEL_MAJOR}" \
+      com.lmco.image.satellite-host="${SATELLITE_HOST}" \
+      com.lmco.image.satellite-enabled="true" \
+      com.lmco.image.purpose="internal-builder"
+ENV SATELLITE_HOST="${SATELLITE_HOST}"
+USER 0
+# Corporate CA trust.
+COPY build-inputs/lm-ca.pem \
+     /etc/pki/ca-trust/source/anchors/lm-ca.pem
+# This archive contains:
+#
+#   /etc/pki/entitlement
+#   /etc/pki/rpm-gpg
+#   /etc/rhsm/ca
+#   /etc/yum.repos.d/redhat.repo
+#
+# ADD automatically extracts a local tar.gz archive.
+ADD build-inputs/rhsm-bundle.tar.gz /
+COPY scripts/verify-satellite.sh \
+     /usr/local/sbin/verify-satellite
+RUN set -eux; \
+    \
+    chmod 0755 /usr/local/sbin/verify-satellite; \
+    \
+    # UBI images normally look for subscription data mounted from the
+    # container host. This image intentionally uses its embedded,
+    # dedicated Satellite repository credentials instead.
+    rm -rf /etc/rhsm-host; \
+    \
+    # Disable public/default UBI repository files. The image should use
+    # only the redhat.repo captured from the dedicated Satellite host.
+    for repo_file in /etc/yum.repos.d/*.repo; do \
+        [ -e "${repo_file}" ] || continue; \
+        [ "${repo_file}" = "/etc/yum.repos.d/redhat.repo" ] && continue; \
+        rm -f "${repo_file}.disabled"; \
+        mv "${repo_file}" "${repo_file}.disabled"; \
+    done; \
+    \
+    # Prevent the subscription-manager package-manager plugin from trying
+    # to replace or regenerate the static redhat.repo file.
+    for plugin_file in \
+        /etc/yum/pluginconf.d/subscription-manager.conf \
+        /etc/dnf/plugins/subscription-manager.conf; \
+    do \
+        [ -f "${plugin_file}" ] || continue; \
+        if grep -Eq '^[[:space:]]*enabled[[:space:]]*=' "${plugin_file}"; then \
+            sed -ri \
+                's/^[[:space:]]*enabled[[:space:]]*=.*/enabled=0/' \
+                "${plugin_file}"; \
+        else \
+            printf '\nenabled=0\n' >> "${plugin_file}"; \
+        fi; \
+    done; \
+    \
+    update-ca-trust extract; \
+    \
+    # Fail the image build if the embedded Satellite repositories cannot
+    # actually be reached.
+    /usr/local/sbin/verify-satellite; \
+    \
+    if command -v dnf >/dev/null 2>&1; then \
+        dnf clean all; \
+    elif command -v yum >/dev/null 2>&1; then \
+        yum clean all; \
+    fi; \
+    \
+    rm -rf \
+        /var/cache/dnf \
+        /var/cache/yum \
+        /tmp/*
+# The original command/entrypoint is inherited from the UBI init base.
+
+⸻
+
+3. scripts/verify-satellite.sh
+
+#!/bin/sh
+set -eu
+SATELLITE_HOST="${SATELLITE_HOST:-orecchiette.external.lmco.com}"
+REPO_FILE="/etc/yum.repos.d/redhat.repo"
+ENTITLEMENT_DIRECTORY="/etc/pki/entitlement"
+SATELLITE_CA_DIRECTORY="/etc/rhsm/ca"
+fail()
+{
+    echo "ERROR: $*" >&2
+    exit 1
+}
+test -s "$REPO_FILE" ||
+    fail "Missing or empty $REPO_FILE"
+test -d "$ENTITLEMENT_DIRECTORY" ||
+    fail "Missing $ENTITLEMENT_DIRECTORY"
+test -d "$SATELLITE_CA_DIRECTORY" ||
+    fail "Missing $SATELLITE_CA_DIRECTORY"
+ls "$ENTITLEMENT_DIRECTORY"/*.pem >/dev/null 2>&1 ||
+    fail "No entitlement certificate was found"
+ls "$ENTITLEMENT_DIRECTORY"/*-key.pem >/dev/null 2>&1 ||
+    fail "No entitlement private key was found"
+grep -Fq "$SATELLITE_HOST" "$REPO_FILE" ||
+    fail "$REPO_FILE does not reference $SATELLITE_HOST"
+grep -Eq \
+    '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*1' \
+    "$REPO_FILE" ||
+    fail "No enabled repositories were found in $REPO_FILE"
+echo "Checking Satellite repository access through $SATELLITE_HOST"
+if command -v dnf >/dev/null 2>&1; then
+    dnf -q repolist --enabled
+    dnf -q makecache --refresh
+elif command -v yum >/dev/null 2>&1; then
+    yum -q repolist enabled
+    yum -q makecache fast
+else
+    fail "Neither dnf nor yum is installed"
+fi
+echo "Satellite repository verification succeeded."
+
+⸻
+
+4. scripts/create-satellite-bundle.sh
+
+This script is run once on a real registered RHEL system, not inside a UBI container.
+
+Run it separately on RHEL 7, 8, 9, and 10.
+
+#!/usr/bin/env bash
+set -euo pipefail
+EXPECTED_MAJOR="${1:-}"
+OUTPUT_FILE="${2:-}"
+if [[ -z "$EXPECTED_MAJOR" ]]; then
+    echo "Usage: sudo $0 <7|8|9|10> [output-file]" >&2
+    exit 1
+fi
+case "$EXPECTED_MAJOR" in
+    7|8|9|10)
+        ;;
+    *)
+        echo "ERROR: Major version must be 7, 8, 9, or 10." >&2
+        exit 1
+        ;;
+esac
+if [[ "$EUID" -ne 0 ]]; then
+    echo "ERROR: Run this script with sudo or as root." >&2
+    exit 1
+fi
+if [[ ! -r /etc/os-release ]]; then
+    echo "ERROR: Cannot read /etc/os-release." >&2
+    exit 1
+fi
+# shellcheck disable=SC1091
+source /etc/os-release
+ACTUAL_MAJOR="${VERSION_ID%%.*}"
+if [[ "$ACTUAL_MAJOR" != "$EXPECTED_MAJOR" ]]; then
+    echo "ERROR: This is RHEL $ACTUAL_MAJOR, but RHEL $EXPECTED_MAJOR was requested." >&2
+    exit 1
+fi
+if [[ -z "$OUTPUT_FILE" ]]; then
+    OUTPUT_FILE="rhsm-ubi${EXPECTED_MAJOR}.tar.gz"
+fi
+command -v subscription-manager >/dev/null 2>&1 || {
+    echo "ERROR: subscription-manager is not installed." >&2
+    exit 1
+}
+subscription-manager identity >/dev/null 2>&1 || {
+    echo "ERROR: This RHEL system is not registered." >&2
+    exit 1
+}
+echo "Refreshing registration and repository information..."
+subscription-manager refresh
+echo
+echo "Enabled repositories:"
+subscription-manager repos --list-enabled
+if command -v dnf >/dev/null 2>&1; then
+    dnf -q makecache --refresh
+else
+    yum -q makecache fast
+fi
+REPO_FILE="/etc/yum.repos.d/redhat.repo"
+if [[ ! -s "$REPO_FILE" ]]; then
+    echo "ERROR: Missing or empty $REPO_FILE." >&2
+    exit 1
+fi
+if ! grep -Eq \
+    '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*1' \
+    "$REPO_FILE"; then
+    echo "ERROR: No enabled repositories exist in $REPO_FILE." >&2
+    exit 1
+fi
+if ! compgen -G '/etc/pki/entitlement/*.pem' >/dev/null; then
+    echo "ERROR: No entitlement certificates were found." >&2
+    exit 1
+fi
+if ! compgen -G '/etc/pki/entitlement/*-key.pem' >/dev/null; then
+    echo "ERROR: No entitlement private key was found." >&2
+    exit 1
+fi
+if [[ ! -d /etc/rhsm/ca ]]; then
+    echo "ERROR: /etc/rhsm/ca does not exist." >&2
+    exit 1
+fi
+TEMP_DIRECTORY="$(mktemp -d)"
+cleanup()
+{
+    rm -rf "$TEMP_DIRECTORY"
+}
+trap cleanup EXIT
+install -d -m 0755 \
+    "$TEMP_DIRECTORY/etc/pki/entitlement" \
+    "$TEMP_DIRECTORY/etc/pki/rpm-gpg" \
+    "$TEMP_DIRECTORY/etc/rhsm/ca" \
+    "$TEMP_DIRECTORY/etc/yum.repos.d"
+cp -a \
+    /etc/pki/entitlement/. \
+    "$TEMP_DIRECTORY/etc/pki/entitlement/"
+cp -a \
+    /etc/rhsm/ca/. \
+    "$TEMP_DIRECTORY/etc/rhsm/ca/"
+if [[ -d /etc/pki/rpm-gpg ]]; then
+    cp -a \
+        /etc/pki/rpm-gpg/. \
+        "$TEMP_DIRECTORY/etc/pki/rpm-gpg/"
+fi
+install -m 0644 \
+    "$REPO_FILE" \
+    "$TEMP_DIRECTORY/etc/yum.repos.d/redhat.repo"
+tar \
+    --numeric-owner \
+    -C "$TEMP_DIRECTORY" \
+    -czf "$OUTPUT_FILE" \
+    .
+chmod 0600 "$OUTPUT_FILE"
+echo
+echo "Created:"
+ls -lh "$OUTPUT_FILE"
+echo
+echo "Upload this file to the image-builder project's GitLab Secure Files:"
+echo "  $OUTPUT_FILE"
+
+This intentionally does not copy /etc/pki/consumer. The image receives only what yum or dnf needs to authenticate to the repositories, rather than pretending every container is the registered host.
+
+⸻
+
+5. .gitignore
+
+build-inputs/
+rhsm-ubi*.tar.gz
+*.key
+*.pem
+*.crt
+
+⸻
+
+6. .dockerignore
+
+.git
+.gitignore
+README.md
+rhsm-ubi*.tar.gz
+
+Do not add build-inputs/ to this file. The pipeline creates that directory immediately before the Kaniko build.
+
+⸻
+
+7. README.md
+
+# Image Builder
+Builds internal UBI init images with persistent access to the Lockheed Martin
+Red Hat Satellite repositories.
+## Images
+- `ubi7-init-satellite`
+- `ubi8-init-satellite`
+- `ubi9-init-satellite`
+- `ubi10-init-satellite`
+## Tags
+Main-branch builds publish:
+- `latest`
+- `sha-<commit>`
+- `pipeline-<pipeline-number>`
+Feature-branch builds additionally publish:
+- `<branch-name>`
+## Important security restriction
+These images contain Satellite entitlement certificate material.
+The GitLab project, container registry, and all child images must remain private
+and restricted to approved internal users and systems.
+Do not push these images to an external registry.
+## Creating the RHSM bundles
+Run the bundle-generation script on a registered RHEL system matching each
+major version:
+```bash
+sudo ./scripts/create-satellite-bundle.sh 7
+sudo ./scripts/create-satellite-bundle.sh 8
+sudo ./scripts/create-satellite-bundle.sh 9
+sudo ./scripts/create-satellite-bundle.sh 10
+
+This creates:
+
+rhsm-ubi7.tar.gz
+rhsm-ubi8.tar.gz
+rhsm-ubi9.tar.gz
+rhsm-ubi10.tar.gz
+
+Upload the four archives under:
+
+Settings
+→ CI/CD
+→ Secure Files
+
+The archives must never be committed to Git.
+
+## One-time setup after pasting the files
+On one real RHEL system for each major release, install the Katello consumer RPM and register it using the activation key you found. Give the four Satellite hosts recognizable names such as:
+```text
+lit-image-builder-rhel7
+lit-image-builder-rhel8
+lit-image-builder-rhel9
+lit-image-builder-rhel10
+
+After verifying the correct repositories are enabled, run:
+
+sudo ./scripts/create-satellite-bundle.sh 7
+
+Repeat on 8, 9, and 10.
+
+Upload the resulting four .tar.gz files under:
+
+image-builder
+→ Settings
+→ CI/CD
+→ Secure Files
+→ Upload File
+
+GitLab Secure Files supports binary files up to 5 MB, stores them outside the repository, and makes them available to CI jobs.  
+
+Then add these CI/CD variables:
+
+RHSM_UBI7_SECURE_FILE_ID
+RHSM_UBI8_SECURE_FILE_ID
+RHSM_UBI9_SECURE_FILE_ID
+RHSM_UBI10_SECURE_FILE_ID
+
+Each value is the numeric GitLab Secure File ID for its corresponding archive.
+
+Also verify these existing variables:
+
+RELEASE_TOKEN
+CA_CERT
+
+CA_CERT should remain a File variable.
+
+Once those are present, commit the files to create-builder-images. Your existing merge request will stop saying “contains no changes,” and the pipeline should create four parallel build jobs.
+
+One limitation remains: the embedded entitlement certificate can eventually be revoked or expire. Normal image rebuilds will not require registration, but the corresponding Secure File bundle must be replaced when Satellite rotates that credential. There is no reliable way to make a copied Satellite entitlement credential valid forever.
