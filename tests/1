@@ -1,3 +1,270 @@
+
+
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+SATELLITE_URL="${SATELLITE_URL:-https://orecchiette.external.lmco.com}"
+SATELLITE_HOST="${SATELLITE_HOST:-orecchiette.external.lmco.com}"
+SATELLITE_ORG="${SATELLITE_ORG:-lmco}"
+
+EXPECTED_MAJOR="${1:-}"
+OUTPUT_FILE="${2:-}"
+
+usage()
+{
+    echo "Usage: sudo $0 <7|8|9|10> [output-file]" >&2
+    exit 1
+}
+
+[[ -n "$EXPECTED_MAJOR" ]] || usage
+
+case "$EXPECTED_MAJOR" in
+    7|8|9|10)
+        ;;
+    *)
+        usage
+        ;;
+esac
+
+if [[ "$EUID" -ne 0 ]]; then
+    echo "ERROR: Run this script with sudo or as root." >&2
+    exit 1
+fi
+
+if [[ ! -r /etc/os-release ]]; then
+    echo "ERROR: Cannot read /etc/os-release." >&2
+    exit 1
+fi
+
+# shellcheck disable=SC1091
+source /etc/os-release
+
+ACTUAL_MAJOR="${VERSION_ID%%.*}"
+
+if [[ "$ACTUAL_MAJOR" != "$EXPECTED_MAJOR" ]]; then
+    echo "ERROR: This system is version $ACTUAL_MAJOR, not $EXPECTED_MAJOR." >&2
+    exit 1
+fi
+
+if [[ "$ID" != "rhel" ]]; then
+    echo "ERROR: This must run on an actual RHEL system, not UBI or $ID." >&2
+    exit 1
+fi
+
+if [[ -z "$OUTPUT_FILE" ]]; then
+    OUTPUT_FILE="/tmp/rhsm-ubi${EXPECTED_MAJOR}.tar.gz"
+fi
+
+if command -v dnf >/dev/null 2>&1; then
+    PACKAGE_MANAGER="dnf"
+elif command -v yum >/dev/null 2>&1; then
+    PACKAGE_MANAGER="yum"
+else
+    echo "ERROR: Neither dnf nor yum is installed." >&2
+    exit 1
+fi
+
+KATELLO_RPM="/tmp/katello-ca-consumer-latest.noarch.rpm"
+KATELLO_URL="${SATELLITE_URL}/pub/katello-ca-consumer-latest.noarch.rpm"
+
+echo
+echo "RHEL major:       $EXPECTED_MAJOR"
+echo "Package manager:  $PACKAGE_MANAGER"
+echo "Satellite:        $SATELLITE_HOST"
+echo "Output:           $OUTPUT_FILE"
+echo
+
+echo "Downloading the Katello consumer RPM..."
+
+if command -v curl >/dev/null 2>&1; then
+    curl \
+        --fail \
+        --location \
+        --show-error \
+        --silent \
+        --insecure \
+        --output "$KATELLO_RPM" \
+        "$KATELLO_URL"
+elif command -v wget >/dev/null 2>&1; then
+    wget \
+        --no-check-certificate \
+        --output-document="$KATELLO_RPM" \
+        "$KATELLO_URL"
+else
+    echo "ERROR: curl or wget must be installed." >&2
+    exit 1
+fi
+
+test -s "$KATELLO_RPM" || {
+    echo "ERROR: Katello consumer RPM was not downloaded." >&2
+    exit 1
+}
+
+echo "Installing the Katello consumer RPM..."
+
+"$PACKAGE_MANAGER" install -y "$KATELLO_RPM"
+
+grep -Fq "$SATELLITE_HOST" /etc/rhsm/rhsm.conf || {
+    echo "ERROR: /etc/rhsm/rhsm.conf does not reference $SATELLITE_HOST." >&2
+    exit 1
+}
+
+if subscription-manager identity >/dev/null 2>&1; then
+    echo
+    echo "This system is already registered."
+    subscription-manager identity
+else
+    echo
+    read -r -s -p "Enter the Satellite activation key: " ACTIVATION_KEY
+    echo
+
+    if [[ -z "$ACTIVATION_KEY" ]]; then
+        echo "ERROR: No activation key was entered." >&2
+        exit 1
+    fi
+
+    CONSUMER_NAME="lit-image-builder-rhel${EXPECTED_MAJOR}"
+
+    subscription-manager register \
+        --org="$SATELLITE_ORG" \
+        --activationkey="$ACTIVATION_KEY" \
+        --name="$CONSUMER_NAME"
+
+    unset ACTIVATION_KEY
+fi
+
+echo
+echo "Refreshing Satellite registration..."
+
+subscription-manager refresh
+
+echo
+echo "Installing the support packages listed by the internal instructions..."
+
+"$PACKAGE_MANAGER" install -y \
+    katello-host-tools-tracer \
+    katello-pull-transport-migrate \
+    lmpki-lockheed \
+    lmpki-usgov
+
+echo
+echo "Enabled Satellite repositories:"
+
+subscription-manager repos --list-enabled
+
+echo
+echo "Testing repository access..."
+
+if [[ "$PACKAGE_MANAGER" == "dnf" ]]; then
+    dnf -q makecache --refresh
+else
+    yum -q makecache fast
+fi
+
+REPO_FILE="/etc/yum.repos.d/redhat.repo"
+
+test -s "$REPO_FILE" || {
+    echo "ERROR: Missing or empty $REPO_FILE." >&2
+    exit 1
+}
+
+grep -Eq \
+    '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*1' \
+    "$REPO_FILE" || {
+        echo "ERROR: No enabled repositories were found in $REPO_FILE." >&2
+        exit 1
+    }
+
+compgen -G '/etc/pki/entitlement/*.pem' >/dev/null || {
+    echo "ERROR: No entitlement certificates were found." >&2
+    exit 1
+}
+
+compgen -G '/etc/pki/entitlement/*-key.pem' >/dev/null || {
+    echo "ERROR: No entitlement private key was found." >&2
+    exit 1
+}
+
+test -d /etc/rhsm/ca || {
+    echo "ERROR: Missing /etc/rhsm/ca." >&2
+    exit 1
+}
+
+TEMP_DIRECTORY="$(mktemp -d)"
+
+cleanup()
+{
+    rm -rf "$TEMP_DIRECTORY"
+    rm -f "$KATELLO_RPM"
+}
+
+trap cleanup EXIT
+
+install -d -m 0755 \
+    "$TEMP_DIRECTORY/etc/pki/entitlement" \
+    "$TEMP_DIRECTORY/etc/pki/rpm-gpg" \
+    "$TEMP_DIRECTORY/etc/rhsm/ca" \
+    "$TEMP_DIRECTORY/etc/yum.repos.d"
+
+cp -a \
+    /etc/pki/entitlement/. \
+    "$TEMP_DIRECTORY/etc/pki/entitlement/"
+
+cp -a \
+    /etc/rhsm/ca/. \
+    "$TEMP_DIRECTORY/etc/rhsm/ca/"
+
+if [[ -d /etc/pki/rpm-gpg ]]; then
+    cp -a \
+        /etc/pki/rpm-gpg/. \
+        "$TEMP_DIRECTORY/etc/pki/rpm-gpg/"
+fi
+
+install -m 0644 \
+    "$REPO_FILE" \
+    "$TEMP_DIRECTORY/etc/yum.repos.d/redhat.repo"
+
+rm -f "$OUTPUT_FILE"
+
+tar \
+    --numeric-owner \
+    --create \
+    --gzip \
+    --file="$OUTPUT_FILE" \
+    --directory="$TEMP_DIRECTORY" \
+    .
+
+chmod 0600 "$OUTPUT_FILE"
+
+echo
+echo "Bundle created successfully:"
+ls -lh "$OUTPUT_FILE"
+echo
+echo "Upload it to GitLab Secure Files with this filename:"
+echo "rhsm-ubi${EXPECTED_MAJOR}.tar.gz"
+echo
+echo "IMPORTANT: Do not unregister this Satellite consumer while images use its credentials."
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 I need to correct one technical point from my previous answer: UBI containers cannot be registered normally with subscription-manager; Red Hat disables registration while it is running in container mode. The files below accomplish the result you actually need by permanently including a version-specific Satellite repository configuration and entitlement certificate bundle. Downstream Dockerfiles can immediately run yum install or dnf install without registering again.  
 
 Red Hat normally recommends supplying the repository configuration and entitlement keys as build secrets rather than putting them in the published image. Because you specifically need reusable internal builder images, keep this project and its container registry tightly restricted.  
