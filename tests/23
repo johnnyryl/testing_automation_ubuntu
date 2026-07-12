@@ -1,3 +1,175 @@
+Yes — this is exactly something the role meta/main.yml should control.
+
+The Podman role says:
+
+platforms:
+  - name: EL
+    versions:
+      - "8"
+      - "9"
+      - "10"
+
+So the shared Molecule component should not run the role on UBI7.
+
+Do it in two places:
+
+1. template.yml reads the role’s meta/main.yml and exports supported EL versions.
+2. converge.yml skips the role on unsupported targets.
+
+⸻
+
+1. Add this in template.yml inside the per-role loop
+
+Put this inside the for ROLE_DIR in ... loop, after you have set:
+
+ROLE_ABS=...
+ROLE_NAME=...
+CURRENT_ROLE_PARENT=...
+
+and before molecule test.
+
+# ----- Detect supported EL versions from role meta/main.yml -----
+# Example result for podman: AEROLIT_SUPPORTED_EL_VERSIONS=8,9,10
+# Empty means no restriction was found, so run on all Molecule targets.
+export AEROLIT_SUPPORTED_EL_VERSIONS="$(
+python3 - "$ROLE_ABS/meta/main.yml" <<'PY'
+import os
+import re
+import sys
+try:
+    import yaml
+except Exception:
+    print("")
+    sys.exit(0)
+meta_file = sys.argv[1]
+try:
+    with open(meta_file, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+except FileNotFoundError:
+    print("")
+    sys.exit(0)
+galaxy_info = data.get("galaxy_info") or {}
+platforms = galaxy_info.get("platforms") or []
+el_names = {
+    "el",
+    "rhel",
+    "redhat",
+    "red hat",
+    "red hat enterprise linux",
+}
+versions = []
+for platform in platforms:
+    if not isinstance(platform, dict):
+        continue
+    name = str(platform.get("name", "")).strip().lower()
+    if name not in el_names:
+        continue
+    raw_versions = platform.get("versions") or []
+    if isinstance(raw_versions, (str, int, float)):
+        raw_versions = [raw_versions]
+    for version in raw_versions:
+        version_text = str(version).strip()
+        match = re.search(r"(\d+)", version_text)
+        if match:
+            versions.append(match.group(1))
+deduped = list(dict.fromkeys(versions))
+print(",".join(deduped))
+PY
+)"
+if [ -n "$AEROLIT_SUPPORTED_EL_VERSIONS" ]; then
+  echo "Role supported EL versions from meta/main.yml: $AEROLIT_SUPPORTED_EL_VERSIONS"
+else
+  echo "No EL version restriction found in meta/main.yml; running all Molecule targets."
+fi
+
+For Podman, this should print:
+
+Role supported EL versions from meta/main.yml: 8,9,10
+
+⸻
+
+2. Update converge.yml
+
+Your converge.yml should look like this:
+
+# UNCLASSIFIED
+- name: Converge
+  hosts: all
+  gather_facts: true
+  become: "{{ lookup('env', 'AEROLIT_BECOME') | default('false', true) | bool }}"
+  vars:
+    path_for_ansible: "{{ lookup('env', 'GITLAB_PATH_FOR_ANSIBLE') | default('/opt/aerolit', true) }}"
+    aerolit_supported_el_versions: "{{ lookup('env', 'AEROLIT_SUPPORTED_EL_VERSIONS') | default('', true) | split(',') | map('trim') | reject('equalto', '') | list }}"
+  tasks:
+    - name: Determine whether role supports this target
+      ansible.builtin.set_fact:
+        aerolit_role_supported_on_target: >-
+          {{
+            (aerolit_supported_el_versions | length == 0)
+            or
+            ((ansible_distribution_major_version | string) in aerolit_supported_el_versions)
+          }}
+    - name: Show role platform decision
+      ansible.builtin.debug:
+        msg:
+          - "role={{ lookup('env', 'ROLE_NAME') }}"
+          - "target={{ inventory_hostname }}"
+          - "target_major={{ ansible_distribution_major_version }}"
+          - "supported_el_versions={{ aerolit_supported_el_versions | default([]) }}"
+          - "run_role={{ aerolit_role_supported_on_target }}"
+    - name: Skip unsupported target
+      ansible.builtin.debug:
+        msg: >-
+          Skipping {{ lookup('env', 'ROLE_NAME') }} on {{ inventory_hostname }}
+          because this role supports EL {{ aerolit_supported_el_versions | join(', ') }},
+          and this target is EL {{ ansible_distribution_major_version }}.
+      when:
+        - not aerolit_role_supported_on_target
+    - name: Run role under test
+      ansible.builtin.include_role:
+        name: "{{ lookup('env', 'ROLE_NAME') }}"
+      when:
+        - aerolit_role_supported_on_target
+# UNCLASSIFIED
+
+That fixes the immediate Podman problem. UBI7 may still be created, but the Podman role will not run against it.
+
+⸻
+
+3. Also guard repo-required failures in prepare.yml
+
+Since unsupported targets should not fail just because repos/packages are missing, update your repo/files fail tasks to include this condition:
+
+- aerolit_role_supported_on_target
+
+For example:
+
+when:
+  - aerolit_requires_repos
+  - aerolit_role_supported_on_target
+  - not (aerolit_selected_repo_root_stat.stat.isdir | default(false))
+
+And your local repo configure/makecache tasks should also only run when the role supports the target:
+
+when:
+  - aerolit_role_supported_on_target
+  - aerolit_local_repomd_files | length > 0
+
+The simple goal is:
+
+Podman supports EL 8, 9, 10
+UBI7 target exists
+prepare does not fail UBI7 for Podman
+converge skips Podman on UBI7
+UBI8/9/10 run normally
+
+So yes: use meta/main.yml as the source of truth. For now, this skips the role execution on unsupported versions. Later, you can optimize it further so Molecule does not even create unsupported containers, but this is the cleanest first fix.
+
+
+
+
+
+
 Here’s the strongest way I’d frame it:
 
 Main message to open with
