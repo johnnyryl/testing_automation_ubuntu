@@ -1,4 +1,267 @@
 # ----- Detect supported EL versions from role meta/main.yml -----
+# Example for Podman: AEROLIT_SUPPORTED_EL_VERSIONS=8,9,10
+# Empty means no EL restriction was declared.
+
+AEROLIT_SUPPORTED_EL_VERSIONS="$(
+  python3 -c '
+import re
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError as exc:
+    print("PyYAML is required to read role metadata: {}".format(exc), file=sys.stderr)
+    raise SystemExit(2)
+
+meta_path = Path(sys.argv[1])
+
+if not meta_path.is_file():
+    print("")
+    raise SystemExit(0)
+
+try:
+    data = yaml.safe_load(meta_path.read_text(encoding="utf-8")) or {}
+except (OSError, yaml.YAMLError) as exc:
+    print("Unable to parse {}: {}".format(meta_path, exc), file=sys.stderr)
+    raise SystemExit(2)
+
+platforms = (data.get("galaxy_info") or {}).get("platforms") or []
+versions = []
+
+for platform in platforms:
+    if not isinstance(platform, dict):
+        continue
+
+    platform_name = str(platform.get("name", "")).strip().lower()
+
+    if platform_name not in {
+        "el",
+        "rhel",
+        "redhat",
+        "red hat",
+        "red hat enterprise linux",
+    }:
+        continue
+
+    raw_versions = platform.get("versions") or []
+
+    if not isinstance(raw_versions, list):
+        raw_versions = [raw_versions]
+
+    for value in raw_versions:
+        match = re.search(r"\d+", str(value))
+
+        if match:
+            versions.append(match.group(0))
+
+print(",".join(dict.fromkeys(versions)))
+' "$ROLE_ABS/meta/main.yml"
+)"
+
+export AEROLIT_SUPPORTED_EL_VERSIONS
+
+if [ -n "$AEROLIT_SUPPORTED_EL_VERSIONS" ]; then
+  echo "Role supported EL versions from meta/main.yml: $AEROLIT_SUPPORTED_EL_VERSIONS"
+else
+  echo "No EL version restriction found in meta/main.yml; running all Molecule targets."
+fi
+
+
+
+    - name: Fail if files are required but not mounted
+      ansible.builtin.assert:
+        that:
+          - aerolit_files_mount.stat.exists
+          - aerolit_files_mount.stat.isdir
+        fail_msg: "This role requires /opt/aerolit/files, but the files fixture is not mounted."
+      when:
+        - aerolit_requires_files
+        - aerolit_role_supported_on_target
+
+    - name: Fail if repos are required but not mounted
+      ansible.builtin.assert:
+        that:
+          - aerolit_repos_mount.stat.exists
+          - aerolit_repos_mount.stat.isdir
+        fail_msg: "This role requires /opt/aerolit/repos, but the repos fixture is not mounted."
+      when:
+        - aerolit_requires_repos
+        - aerolit_role_supported_on_target
+
+
+
+    - name: Configure AeroLIT repositories for supported target
+      when:
+        - aerolit_role_supported_on_target
+      block:
+        - name: Set AeroLIT repo selection facts for this target
+          ansible.builtin.set_fact:
+            aerolit_repo_os_id: >-
+              {{
+                {
+                  'RedHat': 'rhel',
+                  'Red Hat Enterprise Linux': 'rhel',
+                  'Rocky': 'rocky',
+                  'Rocky Linux': 'rocky',
+                  'AlmaLinux': 'almalinux',
+                  'OracleLinux': 'oraclelinux'
+                }.get(
+                  ansible_distribution,
+                  ansible_distribution
+                  | lower
+                  | regex_replace('[^a-z0-9]+', '')
+                )
+              }}
+            aerolit_repo_major: "{{ ansible_distribution_major_version }}"
+            aerolit_repo_arch_dir: >-
+              {{
+                {
+                  'x86_64': 'x86-64',
+                  'amd64': 'x86-64',
+                  'aarch64': 'aarch64',
+                  'arm64': 'aarch64'
+                }.get(ansible_architecture, ansible_architecture)
+              }}
+
+        - name: Set AeroLIT selected repo root for this target
+          ansible.builtin.set_fact:
+            aerolit_selected_repo_root: >-
+              {{ path_for_ansible }}/repos/{{ aerolit_repo_os_id }}/{{ aerolit_repo_major }}/{{ aerolit_repo_arch_dir }}
+
+        - name: Show AeroLIT repo selection for this target
+          ansible.builtin.debug:
+            msg:
+              - "inventory_hostname={{ inventory_hostname }}"
+              - "distribution={{ ansible_distribution }}"
+              - "major={{ aerolit_repo_major }}"
+              - "arch={{ ansible_architecture }} -> {{ aerolit_repo_arch_dir }}"
+              - "selected_repo_root={{ aerolit_selected_repo_root }}"
+
+        - name: Check selected AeroLIT repo root for this target
+          ansible.builtin.stat:
+            path: "{{ aerolit_selected_repo_root }}"
+          register: aerolit_selected_repo_root_stat
+
+        - name: Fail if repos are required but selected repo root is missing
+          ansible.builtin.fail:
+            msg: >-
+              AEROLIT_REQUIRES_REPOS=true, but the selected repo root does not exist:
+              {{ aerolit_selected_repo_root }}
+          when:
+            - aerolit_requires_repos
+            - not (aerolit_selected_repo_root_stat.stat.isdir | default(false))
+
+        - name: Find AeroLIT local repo metadata for this target OS
+          ansible.builtin.find:
+            paths: "{{ aerolit_selected_repo_root }}"
+            patterns: "repomd.xml"
+            recurse: true
+            file_type: file
+          register: aerolit_local_repomd
+          when:
+            - aerolit_selected_repo_root_stat.stat.isdir | default(false)
+
+        - name: Save selected AeroLIT repo metadata list
+          ansible.builtin.set_fact:
+            aerolit_local_repomd_files: >-
+              {{
+                aerolit_local_repomd.files
+                | default([])
+                | sort(attribute='path')
+              }}
+
+        - name: Fail if repos are required but no repo metadata exists
+          ansible.builtin.fail:
+            msg: >-
+              AEROLIT_REQUIRES_REPOS=true, but no repodata/repomd.xml was found under
+              {{ aerolit_selected_repo_root }}.
+          when:
+            - aerolit_requires_repos
+            - aerolit_local_repomd_files | length == 0
+
+        - name: Create disabled repo directory
+          ansible.builtin.file:
+            path: /etc/yum.repos.d/aerolit-disabled
+            state: directory
+            mode: "0755"
+          when:
+            - aerolit_local_repomd_files | length > 0
+
+        - name: Find image-provided yum/dnf repo files
+          ansible.builtin.find:
+            paths: /etc/yum.repos.d
+            patterns: "*.repo"
+            file_type: file
+            recurse: false
+          register: aerolit_existing_repo_files
+          when:
+            - aerolit_local_repomd_files | length > 0
+
+        - name: Disable image-provided yum/dnf repos
+          ansible.builtin.command:
+            argv:
+              - mv
+              - "{{ item.path }}"
+              - "/etc/yum.repos.d/aerolit-disabled/{{ item.path | basename }}"
+          loop: "{{ aerolit_existing_repo_files.files | default([]) }}"
+          loop_control:
+            label: "{{ item.path }}"
+          changed_when: true
+          when:
+            - aerolit_local_repomd_files | length > 0
+            - not (item.path | basename | regex_search('^aerolit_molecule_.*\.repo$'))
+
+        - name: Configure AeroLIT local yum/dnf repos for this target OS
+          ansible.builtin.yum_repository:
+            name: >-
+              aerolit_molecule_{{ aerolit_repo_os_id }}_{{ aerolit_repo_major }}_{{ aerolit_repo_arch_dir | regex_replace('[^A-Za-z0-9_]+', '_') }}_{{ aerolit_repo_idx }}
+            description: >-
+              AeroLIT Molecule {{ aerolit_repo_os_id }} {{ aerolit_repo_major }} {{ aerolit_repo_arch_dir }} repo {{ aerolit_repo_idx }}
+            baseurl: "file://{{ item.path | dirname | dirname }}"
+            enabled: true
+            gpgcheck: false
+            repo_gpgcheck: false
+            metadata_expire: 0
+          loop: "{{ aerolit_local_repomd_files }}"
+          loop_control:
+            index_var: aerolit_repo_idx
+            label: "{{ item.path | dirname | dirname }}"
+          when:
+            - aerolit_local_repomd_files | length > 0
+
+        - name: Clean yum/dnf metadata after repo changes
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_pkg_mgr }}"
+              - "clean"
+              - "all"
+          changed_when: false
+          when:
+            - aerolit_local_repomd_files | length > 0
+
+        - name: Refresh AeroLIT local repo metadata for this target OS
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_pkg_mgr }}"
+              - "--disablerepo=*"
+              - "--enablerepo=aerolit_molecule_*"
+              - "makecache"
+          changed_when: false
+          when:
+            - aerolit_local_repomd_files | length > 0
+
+
+
+
+
+
+
+
+
+
+
+# ----- Detect supported EL versions from role meta/main.yml -----
 # Example result for podman: AEROLIT_SUPPORTED_EL_VERSIONS=8,9,10
 # Empty means no EL restriction was found, so run on all Molecule targets.
 
