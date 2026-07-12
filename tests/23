@@ -1,3 +1,98 @@
+
+# ----- Detect supported EL versions from role meta/main.yml -----
+# Example for Podman: AEROLIT_SUPPORTED_EL_VERSIONS=8,9,10
+# Empty means no EL restriction was declared.
+
+AEROLIT_SUPPORTED_EL_VERSIONS="$(
+  python3 -c 'import textwrap; exec(textwrap.dedent("""
+    import re
+    import sys
+    from pathlib import Path
+
+    try:
+        import yaml
+    except ImportError as exc:
+        print(
+            "PyYAML is required to read role metadata: {}".format(exc),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    meta_path = Path(sys.argv[1])
+
+    if not meta_path.is_file():
+        print("")
+        raise SystemExit(0)
+
+    try:
+        data = yaml.safe_load(
+            meta_path.read_text(encoding="utf-8")
+        ) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        print(
+            "Unable to parse {}: {}".format(meta_path, exc),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    platforms = (
+        (data.get("galaxy_info") or {}).get("platforms")
+        or []
+    )
+
+    supported_el_names = {
+        "el",
+        "rhel",
+        "redhat",
+        "red hat",
+        "red hat enterprise linux",
+    }
+
+    versions = []
+
+    for platform in platforms:
+        if not isinstance(platform, dict):
+            continue
+
+        platform_name = str(
+            platform.get("name", "")
+        ).strip().lower()
+
+        if platform_name not in supported_el_names:
+            continue
+
+        raw_versions = platform.get("versions") or []
+
+        if not isinstance(raw_versions, list):
+            raw_versions = [raw_versions]
+
+        for value in raw_versions:
+            match = re.search(r"\d+", str(value))
+
+            if match:
+                versions.append(match.group(0))
+
+    print(",".join(dict.fromkeys(versions)))
+  """))' "$ROLE_ABS/meta/main.yml"
+)"
+
+export AEROLIT_SUPPORTED_EL_VERSIONS
+
+if [ -n "$AEROLIT_SUPPORTED_EL_VERSIONS" ]; then
+  echo "Role supported EL versions from meta/main.yml: $AEROLIT_SUPPORTED_EL_VERSIONS"
+else
+  echo "No EL version restriction found in meta/main.yml; running all Molecule targets."
+fi
+
+
+
+
+
+
+
+
+
+
 # ----- Detect supported EL versions from role meta/main.yml -----
 # Example for Podman: AEROLIT_SUPPORTED_EL_VERSIONS=8,9,10
 # Empty means no EL restriction was declared.
