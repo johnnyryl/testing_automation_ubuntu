@@ -1,3 +1,79 @@
+# ----- Detect supported EL versions from role meta/main.yml -----
+# Example result for podman: AEROLIT_SUPPORTED_EL_VERSIONS=8,9,10
+# Empty means no EL restriction was found, so run on all Molecule targets.
+
+SUPPORTED_EL_FILE="$WORK_DIR/supported-el-versions.txt"
+
+python3 - "$ROLE_ABS/meta/main.yml" > "$SUPPORTED_EL_FILE" <<'PY'
+import re
+import sys
+
+try:
+    import yaml
+except Exception:
+    print("")
+    sys.exit(0)
+
+meta_file = sys.argv[1]
+
+try:
+    with open(meta_file, "r", encoding="utf-8") as file_handle:
+        data = yaml.safe_load(file_handle) or {}
+except (FileNotFoundError, OSError, yaml.YAMLError):
+    print("")
+    sys.exit(0)
+
+galaxy_info = data.get("galaxy_info") or {}
+platforms = galaxy_info.get("platforms") or []
+
+el_names = {
+    "el",
+    "rhel",
+    "redhat",
+    "red hat",
+    "red hat enterprise linux",
+}
+
+versions = []
+
+for platform in platforms:
+    if not isinstance(platform, dict):
+        continue
+
+    platform_name = str(platform.get("name", "")).strip().lower()
+
+    if platform_name not in el_names:
+        continue
+
+    raw_versions = platform.get("versions") or []
+
+    if isinstance(raw_versions, (str, int, float)):
+        raw_versions = [raw_versions]
+
+    for version in raw_versions:
+        match = re.search(r"(\d+)", str(version).strip())
+
+        if match:
+            versions.append(match.group(1))
+
+print(",".join(dict.fromkeys(versions)))
+PY
+
+AEROLIT_SUPPORTED_EL_VERSIONS="$(
+  tr -d '\r\n' < "$SUPPORTED_EL_FILE"
+)"
+export AEROLIT_SUPPORTED_EL_VERSIONS
+
+if [ -n "$AEROLIT_SUPPORTED_EL_VERSIONS" ]; then
+  echo "Role supported EL versions from meta/main.yml: $AEROLIT_SUPPORTED_EL_VERSIONS"
+else
+  echo "No EL version restriction found in meta/main.yml; running all Molecule targets."
+fi
+
+
+
+
+
 Right — but there is one missing piece: aerolit_role_supported_on_target must also be calculated inside prepare.yml. A fact created in converge.yml does not exist yet during the earlier prepare phase.
 
 Make these exact changes.
