@@ -1,3 +1,201 @@
+Right — but there is one missing piece: aerolit_role_supported_on_target must also be calculated inside prepare.yml. A fact created in converge.yml does not exist yet during the earlier prepare phase.
+
+Make these exact changes.
+
+1. Add this under vars: in prepare.yml
+
+You currently have:
+
+vars:
+  path_for_ansible: ...
+  aerolit_requires_files: ...
+  aerolit_requires_repos: ...
+  aerolit_prepare_roles_raw: ...
+  aerolit_prepare_roles: ...
+
+Add:
+
+  aerolit_supported_el_versions: >-
+    {{
+      lookup('env', 'AEROLIT_SUPPORTED_EL_VERSIONS')
+      | default('', true)
+      | split(',')
+      | map('trim')
+      | reject('equalto', '')
+      | list
+    }}
+
+So it becomes approximately:
+
+vars:
+  path_for_ansible: "{{ lookup('env', 'GITLAB_PATH_FOR_ANSIBLE') | default('/opt/aerolit', true) }}"
+  aerolit_requires_files: "{{ lookup('env', 'AEROLIT_REQUIRES_FILES') | default('false', true) | bool }}"
+  aerolit_requires_repos: "{{ lookup('env', 'AEROLIT_REQUIRES_REPOS') | default('false', true) | bool }}"
+  aerolit_prepare_roles_raw: "{{ lookup('env', 'AEROLIT_PREPARE_ROLES') | default('', true) }}"
+  aerolit_prepare_roles: "{{ aerolit_prepare_roles_raw.split(',') | map('trim') | reject('equalto', '') | list }}"
+  aerolit_supported_el_versions: >-
+    {{
+      lookup('env', 'AEROLIT_SUPPORTED_EL_VERSIONS')
+      | default('', true)
+      | split(',')
+      | map('trim')
+      | reject('equalto', '')
+      | list
+    }}
+
+2. Add this as the first task in prepare.yml
+
+Put it immediately under tasks:, before the mount checks:
+
+- name: Determine whether role supports this target
+  ansible.builtin.set_fact:
+    aerolit_role_supported_on_target: >-
+      {{
+        (aerolit_supported_el_versions | length == 0)
+        or
+        ((ansible_distribution_major_version | string) in aerolit_supported_el_versions)
+      }}
+
+Optional but helpful directly below it:
+
+- name: Show prepare platform decision
+  ansible.builtin.debug:
+    msg:
+      - "target={{ inventory_hostname }}"
+      - "target_major={{ ansible_distribution_major_version }}"
+      - "supported_el_versions={{ aerolit_supported_el_versions }}"
+      - "prepare_target={{ aerolit_role_supported_on_target }}"
+
+3. Update your two mount-failure tasks
+
+Files failure
+
+Change:
+
+when: aerolit_requires_files
+
+to:
+
+when:
+  - aerolit_requires_files
+  - aerolit_role_supported_on_target
+
+Full task:
+
+- name: Fail if files are required but not mounted
+  ansible.builtin.assert:
+    that:
+      - aerolit_files_mount.stat.exists
+      - aerolit_files_mount.stat.isdir
+    fail_msg: "This role requires /opt/aerolit/files, but the files fixture is not mounted."
+  when:
+    - aerolit_requires_files
+    - aerolit_role_supported_on_target
+
+Repos failure
+
+Change:
+
+when: aerolit_requires_repos
+
+to:
+
+when:
+  - aerolit_requires_repos
+  - aerolit_role_supported_on_target
+
+Full task:
+
+- name: Fail if repos are required but not mounted
+  ansible.builtin.assert:
+    that:
+      - aerolit_repos_mount.stat.exists
+      - aerolit_repos_mount.stat.isdir
+    fail_msg: "This role requires /opt/aerolit/repos, but the repos fixture is not mounted."
+  when:
+    - aerolit_requires_repos
+    - aerolit_role_supported_on_target
+
+4. Guard prerequisite roles
+
+Change:
+
+when: aerolit_prepare_roles | length > 0
+
+to:
+
+when:
+  - aerolit_role_supported_on_target
+  - aerolit_prepare_roles | length > 0
+
+5. Guard the entire repo setup
+
+Add this condition to every repo-selection/configuration task after Run prerequisite roles:
+
+- aerolit_role_supported_on_target
+
+For example, the first repo-selection task becomes:
+
+- name: Set AeroLIT repo selection facts for this target
+  ansible.builtin.set_fact:
+    aerolit_repo_os_id: >-
+      {{
+        {
+          'RedHat': 'rhel',
+          'Red Hat Enterprise Linux': 'rhel',
+          'Rocky': 'rocky',
+          'Rocky Linux': 'rocky',
+          'AlmaLinux': 'almalinux',
+          'OracleLinux': 'oraclelinux'
+        }.get(ansible_distribution, ansible_distribution | lower | regex_replace('[^a-z0-9]+', ''))
+      }}
+    aerolit_repo_major: "{{ ansible_distribution_major_version }}"
+    aerolit_repo_arch_dir: >-
+      {{
+        {
+          'x86_64': 'x86-64',
+          'amd64': 'x86-64',
+          'aarch64': 'aarch64',
+          'arm64': 'aarch64'
+        }.get(ansible_architecture, ansible_architecture)
+      }}
+  when:
+    - aerolit_role_supported_on_target
+
+Then apply the same first condition to the later tasks. Examples:
+
+when:
+  - aerolit_role_supported_on_target
+  - aerolit_requires_repos
+  - not (aerolit_selected_repo_root_stat.stat.isdir | default(false))
+when:
+  - aerolit_role_supported_on_target
+  - aerolit_selected_repo_root_stat.stat.isdir | default(false)
+when:
+  - aerolit_role_supported_on_target
+  - aerolit_local_repomd_files | length > 0
+
+For your Podman example, the resulting behavior will be:
+
+UBI7:
+  supported versions = 8,9,10
+  aerolit_role_supported_on_target = false
+  no prerequisite roles
+  no repo setup
+  no required-repo failure
+  converge skips Podman
+UBI8/9/10:
+  aerolit_role_supported_on_target = true
+  matching repos configured
+  Podman role runs
+
+The important correction is that the support decision must be calculated separately in both prepare.yml and converge.yml.
+
+
+
+
+
+
 Yes — this is exactly something the role meta/main.yml should control.
 
 The Podman role says:
