@@ -1,4 +1,26 @@
 
+echo "Installing or refreshing the Katello consumer RPM..."
+
+KATELLO_PACKAGE_NAME="$(
+    rpm -qp --queryformat '%{NAME}' "$KATELLO_RPM"
+)"
+
+if rpm -q "$KATELLO_PACKAGE_NAME" >/dev/null 2>&1; then
+    echo "$KATELLO_PACKAGE_NAME is already installed; reinstalling the downloaded package."
+    rpm -Uvh --replacepkgs "$KATELLO_RPM"
+else
+    "$PACKAGE_MANAGER" install -y "$KATELLO_RPM"
+fi
+
+
+
+
+
+
+
+
+
+
 
 stages:
   - build
