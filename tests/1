@@ -1,3 +1,31 @@
+RUN dnf install -y --allowerasing \
+      python3-pip \
+      git \
+      curl \
+      jq \
+      podman \
+      findutils \
+      which \
+      shadow-utils \
+      sudo && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
+RUN dnf install -y --allowerasing --skip-broken \
+      python312 \
+      python312-pip \
+      gettext && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
+# Confirm that the Podman client was installed.
+# Do not run "podman --version" here because CONTAINER_HOST puts
+# Podman into remote mode and the runner socket is unavailable during Kaniko builds.
+RUN test -x /usr/bin/podman
+
+
+
+
 
 echo "Installing or refreshing the Katello consumer RPM..."
 
