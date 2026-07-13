@@ -1,4 +1,255 @@
 
+stages:
+  - build
+
+variables:
+  # Used by GitLab Runner before the job starts so it can pull
+  # the private Kaniko job image.
+  DOCKER_AUTH_CONFIG: '{"auths":{"registry.gitlab.us.lmco.com":{"username":"RELEASE_TOKEN","password":"$RELEASE_TOKEN"}}}'
+
+  KANIKO_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/kaniko/kaniko:v1.23.0-debug"
+  SATELLITE_HOST: "orecchiette.external.lmco.com"
+
+.build_satellite_image:
+  stage: build
+
+  image:
+    name: "$KANIKO_IMAGE"
+    entrypoint: [""]
+
+  before_script:
+    - |
+      set -eu
+
+      test -n "${RELEASE_TOKEN:-}" || {
+        echo "ERROR: RELEASE_TOKEN is not available."
+        exit 1
+      }
+
+      test -n "${SECURE_FILES_TOKEN:-}" || {
+        echo "ERROR: SECURE_FILES_TOKEN is not available."
+        exit 1
+      }
+
+      test -f "${CA_CERT:-}" || {
+        echo "ERROR: CA_CERT must be configured as a GitLab File variable."
+        exit 1
+      }
+
+      case "${RHEL_MAJOR}" in
+        7|8|9|10)
+          RHSM_SECURE_FILE_NAME="rhsm-ubi${RHEL_MAJOR}.tar.gz"
+          ;;
+        *)
+          echo "ERROR: Unsupported RHEL_MAJOR: ${RHEL_MAJOR}"
+          exit 1
+          ;;
+      esac
+
+      mkdir -p \
+        /kaniko/.docker \
+        "${CI_PROJECT_DIR}/build-inputs"
+
+      # Add the internal CA to the Kaniko trust store so Kaniko can
+      # contact the internal GitLab registry and API.
+      if [ -f /kaniko/ssl/certs/ca-certificates.crt ]; then
+        cat "${CA_CERT}" >> /kaniko/ssl/certs/ca-certificates.crt
+      fi
+
+      if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+        cat "${CA_CERT}" >> /etc/ssl/certs/ca-certificates.crt
+      fi
+
+      # This copy becomes the corporate CA installed inside the output image.
+      cp \
+        "${CA_CERT}" \
+        "${CI_PROJECT_DIR}/build-inputs/lm-ca.pem"
+
+      # Authenticate Kaniko for:
+      #   1. Pulling the UBI init base image.
+      #   2. Pushing the completed Satellite-enabled image.
+      AUTH_VALUE="$(
+        printf 'RELEASE_TOKEN:%s' "${RELEASE_TOKEN}" |
+        /busybox/base64 |
+        /busybox/tr -d '\n'
+      )"
+
+      printf '{"auths":{"%s":{"auth":"%s"}}}\n' \
+        "${CI_REGISTRY}" \
+        "${AUTH_VALUE}" \
+        > /kaniko/.docker/config.json
+
+      chmod 0600 /kaniko/.docker/config.json
+
+      echo "Locating GitLab Secure File: ${RHSM_SECURE_FILE_NAME}"
+
+      SECURE_FILES_METADATA="${CI_PROJECT_DIR}/build-inputs/secure-files.json"
+
+      # Retrieve Secure File metadata so the correct numeric ID can be
+      # resolved automatically from the filename.
+      /busybox/wget \
+        -q \
+        --header="PRIVATE-TOKEN: ${SECURE_FILES_TOKEN}" \
+        --output-document="${SECURE_FILES_METADATA}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/secure_files?per_page=100"
+
+      test -s "${SECURE_FILES_METADATA}" || {
+        echo "ERROR: GitLab returned no Secure File metadata."
+        exit 1
+      }
+
+      # GitLab's download endpoint requires a numeric Secure File ID.
+      # Resolve that ID from the known filename without requiring four
+      # separate CI/CD ID variables.
+      RHSM_SECURE_FILE_ID="$(
+        /busybox/tr -d '\n\r\t ' < "${SECURE_FILES_METADATA}" |
+        /busybox/tr '{' '\n' |
+        /busybox/grep -F "\"name\":\"${RHSM_SECURE_FILE_NAME}\"" |
+        /busybox/sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p' |
+        /busybox/head -n 1
+      )"
+
+      if [ -z "${RHSM_SECURE_FILE_ID}" ]; then
+        echo "ERROR: Could not find Secure File ${RHSM_SECURE_FILE_NAME}."
+        echo "Confirm that the file is uploaded under Settings > CI/CD > Secure Files."
+        echo
+        echo "GitLab API response:"
+        cat "${SECURE_FILES_METADATA}"
+        exit 1
+      fi
+
+      echo "Resolved ${RHSM_SECURE_FILE_NAME} to Secure File ID ${RHSM_SECURE_FILE_ID}."
+
+      # Download the protected RHSM/Satellite entitlement bundle.
+      /busybox/wget \
+        -q \
+        --header="PRIVATE-TOKEN: ${SECURE_FILES_TOKEN}" \
+        --output-document="${CI_PROJECT_DIR}/build-inputs/rhsm-bundle.tar.gz" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/secure_files/${RHSM_SECURE_FILE_ID}/download"
+
+      test -s "${CI_PROJECT_DIR}/build-inputs/rhsm-bundle.tar.gz" || {
+        echo "ERROR: Downloaded RHSM bundle is empty."
+        exit 1
+      }
+
+      # Confirm that the downloaded file is actually a readable gzip
+      # tar archive before passing it into the image build.
+      if ! /busybox/tar \
+        -tzf "${CI_PROJECT_DIR}/build-inputs/rhsm-bundle.tar.gz" \
+        >/dev/null 2>&1; then
+        echo "ERROR: ${RHSM_SECURE_FILE_NAME} is not a valid gzip tar archive."
+        exit 1
+      fi
+
+      chmod 0600 \
+        "${CI_PROJECT_DIR}/build-inputs/rhsm-bundle.tar.gz"
+
+      rm -f "${SECURE_FILES_METADATA}"
+
+      echo "Secure Satellite bundle is ready for the RHEL ${RHEL_MAJOR} build."
+
+  script:
+    - |
+      set -eu
+
+      IMAGE_REPOSITORY="${CI_REGISTRY_IMAGE}/ubi${RHEL_MAJOR}-init-satellite"
+
+      # Every build gets immutable commit and pipeline tags.
+      set -- \
+        "--destination=${IMAGE_REPOSITORY}:sha-${CI_COMMIT_SHORT_SHA}" \
+        "--destination=${IMAGE_REPOSITORY}:pipeline-${CI_PIPELINE_IID}"
+
+      # Main also receives latest.
+      if [ "${CI_COMMIT_BRANCH:-}" = "${CI_DEFAULT_BRANCH}" ]; then
+        set -- \
+          "$@" \
+          "--destination=${IMAGE_REPOSITORY}:latest"
+
+      # Feature branches receive a branch-name tag.
+      elif [ -n "${CI_COMMIT_REF_SLUG:-}" ]; then
+        set -- \
+          "$@" \
+          "--destination=${IMAGE_REPOSITORY}:${CI_COMMIT_REF_SLUG}"
+      fi
+
+      echo "Building Satellite-enabled UBI ${RHEL_MAJOR} image."
+      echo "Base image: ${BASE_IMAGE}"
+      echo "Destination repository: ${IMAGE_REPOSITORY}"
+
+      /kaniko/executor \
+        --context="${CI_PROJECT_DIR}" \
+        --dockerfile="${CI_PROJECT_DIR}/Containerfile" \
+        --build-arg="BASE_IMAGE=${BASE_IMAGE}" \
+        --build-arg="RHEL_MAJOR=${RHEL_MAJOR}" \
+        --build-arg="SATELLITE_HOST=${SATELLITE_HOST}" \
+        --build-arg="SOURCE_URL=${CI_PROJECT_URL}" \
+        --build-arg="VCS_REF=${CI_COMMIT_SHA}" \
+        --build-arg="BUILD_DATE=$(/busybox/date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "$@" \
+        --cache=false \
+        --cleanup
+
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+build_satellite_images:
+  extends: .build_satellite_image
+
+  parallel:
+    matrix:
+      - RHEL_MAJOR: "7"
+        BASE_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/base-images/ubi7-init:latest"
+
+      - RHEL_MAJOR: "8"
+        BASE_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/base-images/ubi8-init:latest"
+
+      - RHEL_MAJOR: "9"
+        BASE_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/base-images/ubi9-init:latest"
+
+      - RHEL_MAJOR: "10"
+        BASE_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/base-images/ubi10-init:latest"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #!/usr/bin/env bash
 
