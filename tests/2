@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+COMPONENT="${1:-}"
+
+case "${COMPONENT}" in
+    main|restricted|universe|multiverse)
+        ;;
+    *)
+        echo "Usage: $0 {main|restricted|universe|multiverse}" >&2
+        exit 2
+        ;;
+esac
+
+VERSION="26.04"
+CODENAME="resolute"
+ARCH="amd64"
+
+MIRROR_ROOT="/srv/ubuntu-mirror/${VERSION}"
+MIRROR_DIR="${MIRROR_ROOT}/${COMPONENT}"
+
+SHARED_ROOT="/mnt/hgfs/Storage"
+OUTPUT_ROOT="${SHARED_ROOT}/ubuntu-${VERSION}-repo-tars"
+OUTPUT_DIR="${OUTPUT_ROOT}/${COMPONENT}"
+
+TAR_NAME="ubuntu-${VERSION}-${ARCH}-${COMPONENT}.tar"
+TAR_FILE="${OUTPUT_DIR}/${TAR_NAME}"
+SHA_FILE="${TAR_FILE}.sha256"
+
+echo
+echo "=================================================="
+echo "Ubuntu version : ${VERSION}"
+echo "Suites         : ${CODENAME}, updates, security"
+echo "Architecture   : ${ARCH}"
+echo "Component      : ${COMPONENT}"
+echo "Local mirror   : ${MIRROR_DIR}"
+echo "Output tar     : ${TAR_FILE}"
+echo "=================================================="
+echo
+
+if ! mountpoint -q /mnt/hgfs; then
+    echo "ERROR: /mnt/hgfs is not mounted." >&2
+    exit 1
+fi
+
+if [[ ! -d "${SHARED_ROOT}" ]]; then
+    echo "ERROR: VMware share ${SHARED_ROOT} does not exist." >&2
+    exit 1
+fi
+
+sudo mkdir -p "${MIRROR_DIR}"
+sudo mkdir -p "${OUTPUT_DIR}"
+sudo chown -R "${USER}:${USER}" "${MIRROR_ROOT}"
+
+echo "Current free space:"
+df -h /
+
+echo
+echo "Starting debmirror..."
+echo
+
+debmirror \
+    --method=http \
+    --host=archive.ubuntu.com \
+    --root=ubuntu \
+    --dist="${CODENAME},${CODENAME}-updates,${CODENAME}-security" \
+    --section="${COMPONENT}" \
+    --arch="${ARCH}" \
+    --nosource \
+    --rsync-extra=none \
+    --keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg \
+    --progress \
+    "${MIRROR_DIR}"
+
+echo
+echo "Checking mirror structure..."
+
+test -d "${MIRROR_DIR}/dists/${CODENAME}/${COMPONENT}/binary-${ARCH}"
+test -d "${MIRROR_DIR}/pool/${COMPONENT}"
+
+echo
+echo "Repository package indexes:"
+find "${MIRROR_DIR}/dists" \
+    -path "*/${COMPONENT}/binary-${ARCH}/Packages*" \
+    -type f \
+    | head -20
+
+echo
+echo "Sample DEB packages:"
+find "${MIRROR_DIR}/pool/${COMPONENT}" \
+    -type f \
+    -name '*.deb' \
+    | head -10
+
+echo
+echo "Creating tar directly on the Windows shared folder..."
+
+sudo rm -f "${TAR_FILE}" "${SHA_FILE}"
+
+sudo tar \
+    --numeric-owner \
+    -C "${MIRROR_DIR}" \
+    -cpf "${TAR_FILE}" \
+    dists \
+    pool
+
+echo
+echo "Validating tar..."
+
+sudo tar -tf "${TAR_FILE}" >/dev/null
+
+HASH="$(sudo sha256sum "${TAR_FILE}" | awk '{print $1}')"
+
+printf '%s  %s\n' "${HASH}" "${TAR_NAME}" \
+    | sudo tee "${SHA_FILE}" >/dev/null
+
+echo
+echo "Completed successfully:"
+sudo ls -lh "${TAR_FILE}" "${SHA_FILE}"
+
+echo
+echo "The local mirror is still stored here:"
+echo "${MIRROR_DIR}"
+echo
+echo "After verifying the tar on Windows, remove the local mirror with:"
+echo "sudo rm -rf '${MIRROR_DIR}'"
