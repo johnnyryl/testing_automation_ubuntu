@@ -1,4 +1,124 @@
 
+
+
+
+PYTHON_COMMAND="$(
+    command -v python3 2>/dev/null ||
+    command -v python3.12 2>/dev/null ||
+    true
+)"
+
+test -n "$PYTHON_COMMAND" ||
+    fail "Python is required to filter the repository configuration"
+
+"$PYTHON_COMMAND" - \
+    "$DEFAULT_REPO_FILE" \
+    "$SATELLITE_REPO_FILE" \
+    "$SATELLITE_HOST" <<'PYTHON'
+import re
+import sys
+from pathlib import Path
+
+source_file = Path(sys.argv[1])
+destination_file = Path(sys.argv[2])
+satellite_host = sys.argv[3]
+
+lines = source_file.read_text(encoding="utf-8").splitlines(keepends=True)
+
+section_pattern = re.compile(r"^\s*\[([^\]]+)\]\s*$")
+
+preamble: list[str] = []
+sections: list[tuple[str, list[str]]] = []
+
+current_name: str | None = None
+current_lines: list[str] = []
+
+for line in lines:
+    match = section_pattern.match(line)
+
+    if match:
+        if current_name is not None:
+            sections.append((current_name, current_lines))
+
+        current_name = match.group(1).strip()
+        current_lines = [line]
+        continue
+
+    if current_name is None:
+        preamble.append(line)
+    else:
+        current_lines.append(line)
+
+if current_name is not None:
+    sections.append((current_name, current_lines))
+
+kept_sections: list[str] = []
+kept_names: set[str] = set()
+removed_names: list[str] = []
+
+for section_name, section_lines in sections:
+    section_text = "".join(section_lines)
+
+    is_satellite_repository = satellite_host in section_text
+    is_cdn_repository = "cdn.redhat.com" in section_text
+    is_duplicate = section_name in kept_names
+
+    if (
+        is_satellite_repository
+        and not is_cdn_repository
+        and not is_duplicate
+    ):
+        kept_sections.append(section_text)
+        kept_names.add(section_name)
+    else:
+        removed_names.append(section_name)
+
+if not kept_sections:
+    raise SystemExit(
+        f"No repository sections backed by {satellite_host} were found"
+    )
+
+destination_file.write_text(
+    "".join(preamble) + "".join(kept_sections),
+    encoding="utf-8",
+)
+
+print(
+    f"Kept {len(kept_sections)} Satellite repository sections and "
+    f"excluded {len(removed_names)} CDN, non-Satellite, or duplicate sections."
+)
+PYTHON
+
+chmod 0644 "$SATELLITE_REPO_FILE"
+
+if grep -Fq "cdn.redhat.com" "$SATELLITE_REPO_FILE"; then
+    fail "Filtered repository file still references cdn.redhat.com"
+fi
+
+for required_repository in \
+    rhel-10-for-x86_64-baseos-rpms \
+    rhel-10-for-x86_64-appstream-rpms
+do
+    grep -Fq "[${required_repository}]" "$SATELLITE_REPO_FILE" ||
+        fail "No Satellite-backed ${required_repository} repository remains"
+done
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #!/bin/sh
 
 set -eu
