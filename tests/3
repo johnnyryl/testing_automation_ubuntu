@@ -1,3 +1,165 @@
+
+#!/bin/sh
+
+set -eu
+
+SATELLITE_HOST="${SATELLITE_HOST:-orecchiette.external.lmco.com}"
+
+DEFAULT_REPO_FILE="/etc/yum.repos.d/redhat.repo"
+
+# microdnf can regenerate or overwrite redhat.repo in UBI minimal images.
+# Preserve the bundled Satellite configuration in a separate repository
+# directory that only this image will use.
+SATELLITE_REPOS_DIR="/etc/yum.repos.d/lmco-satellite"
+SATELLITE_REPO_FILE="${SATELLITE_REPOS_DIR}/lmco-satellite.repo"
+
+DNF_CONFIG="/etc/dnf/dnf.conf"
+
+ENTITLEMENT_DIRECTORY="/etc/pki/entitlement"
+SATELLITE_CA_DIRECTORY="/etc/rhsm/ca"
+
+fail()
+{
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+configure_microdnf_satellite_repositories()
+{
+    test -s "$DEFAULT_REPO_FILE" ||
+        fail "Missing bundled Satellite repository file: $DEFAULT_REPO_FILE"
+
+    echo "Preserving the Satellite repository configuration for microdnf."
+
+    mkdir -p "$SATELLITE_REPOS_DIR"
+
+    cp -f \
+        "$DEFAULT_REPO_FILE" \
+        "$SATELLITE_REPO_FILE"
+
+    chmod 0644 "$SATELLITE_REPO_FILE"
+
+    # Make this the permanent repository directory for future microdnf
+    # commands executed from images based on this image.
+    mkdir -p /etc/dnf
+
+    if [ ! -f "$DNF_CONFIG" ]; then
+        printf '[main]\nreposdir=%s\n' \
+            "$SATELLITE_REPOS_DIR" \
+            > "$DNF_CONFIG"
+
+    elif grep -Eq \
+        '^[[:space:]]*reposdir[[:space:]]*=' \
+        "$DNF_CONFIG"; then
+
+        sed -ri \
+            's#^[[:space:]]*reposdir[[:space:]]*=.*#reposdir=/etc/yum.repos.d/lmco-satellite#' \
+            "$DNF_CONFIG"
+
+    elif grep -Eq \
+        '^[[:space:]]*\[main\][[:space:]]*$' \
+        "$DNF_CONFIG"; then
+
+        sed -ri \
+            '/^[[:space:]]*\[main\][[:space:]]*$/a reposdir=/etc/yum.repos.d/lmco-satellite' \
+            "$DNF_CONFIG"
+
+    else
+        printf '\n[main]\nreposdir=%s\n' \
+            "$SATELLITE_REPOS_DIR" \
+            >> "$DNF_CONFIG"
+    fi
+
+    # microdnf might regenerate this path later, but it will no longer be
+    # searched because reposdir now points only to the preserved directory.
+    rm -f "$DEFAULT_REPO_FILE"
+}
+
+# The standard/init images use dnf and can continue using redhat.repo.
+# The minimal Python image uses microdnf and needs the isolated repository.
+if command -v microdnf >/dev/null 2>&1 &&
+   ! command -v dnf >/dev/null 2>&1; then
+
+    if [ ! -s "$SATELLITE_REPO_FILE" ]; then
+        configure_microdnf_satellite_repositories
+    fi
+
+    REPO_FILE="$SATELLITE_REPO_FILE"
+else
+    REPO_FILE="$DEFAULT_REPO_FILE"
+fi
+
+test -s "$REPO_FILE" ||
+    fail "Missing or empty $REPO_FILE"
+
+test -d "$ENTITLEMENT_DIRECTORY" ||
+    fail "Missing $ENTITLEMENT_DIRECTORY"
+
+test -d "$SATELLITE_CA_DIRECTORY" ||
+    fail "Missing $SATELLITE_CA_DIRECTORY"
+
+ls "$ENTITLEMENT_DIRECTORY"/*.pem >/dev/null 2>&1 ||
+    fail "No entitlement certificate was found"
+
+ls "$ENTITLEMENT_DIRECTORY"/*-key.pem >/dev/null 2>&1 ||
+    fail "No entitlement private key was found"
+
+grep -Fq "$SATELLITE_HOST" "$REPO_FILE" ||
+    fail "$REPO_FILE does not reference $SATELLITE_HOST"
+
+grep -Eq \
+    '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*1' \
+    "$REPO_FILE" ||
+    fail "No enabled repositories were found in $REPO_FILE"
+
+echo "Checking Satellite repository access through $SATELLITE_HOST"
+echo "Repository configuration: $REPO_FILE"
+
+if command -v dnf >/dev/null 2>&1; then
+    dnf -q repolist --enabled
+    dnf -q makecache --refresh
+
+elif command -v microdnf >/dev/null 2>&1; then
+    microdnf \
+        --setopt="reposdir=${SATELLITE_REPOS_DIR}" \
+        repolist
+
+    microdnf \
+        --setopt="reposdir=${SATELLITE_REPOS_DIR}" \
+        makecache
+
+elif command -v yum >/dev/null 2>&1; then
+    yum -q repolist enabled
+    yum -q makecache fast
+
+else
+    fail "Neither dnf, microdnf, nor yum is installed"
+fi
+
+echo "Satellite repository verification succeeded."
+
+
+
+
+
+
+
+
+elif command -v microdnf >/dev/null 2>&1; then \
+    microdnf \
+        --setopt="reposdir=/etc/yum.repos.d/lmco-satellite" \
+        clean all; \
+
+
+
+
+
+
+
+
+
+
+
 Good—this is a much simpler failure.
 
 The RHSM bundle is now downloading and extracting correctly. The build reaches:
