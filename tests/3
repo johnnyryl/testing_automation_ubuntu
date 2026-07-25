@@ -1,0 +1,169 @@
+Good—this is a much simpler failure.
+
+The RHSM bundle is now downloading and extracting correctly. The build reaches:
+
+Checking Satellite repository access through orecchiette.external.lmco.com
+ERROR: Neither dnf nor yum is installed
+
+Your new base image is:
+
+ubi10-python3.12:20260724
+
+That is a minimal Python runtime image, so it uses microdnf, not full dnf or yum. Red Hat’s UBI 10 minimal documentation specifically identifies microdnf as the package manager for minimal images. 
+
+Fix scripts/verify-satellite.sh
+
+Replace this section:
+
+if command -v dnf >/dev/null 2>&1; then
+    dnf -q repolist --enabled
+    dnf -q makecache --refresh
+elif command -v yum >/dev/null 2>&1; then
+    yum -q repolist enabled
+    yum -q makecache fast
+else
+    fail "Neither dnf nor yum is installed"
+fi
+
+with:
+
+if command -v dnf >/dev/null 2>&1; then
+    dnf -q repolist --enabled
+    dnf -q makecache --refresh
+elif command -v microdnf >/dev/null 2>&1; then
+    microdnf repolist
+    microdnf makecache
+elif command -v yum >/dev/null 2>&1; then
+    yum -q repolist enabled
+    yum -q makecache fast
+else
+    fail "Neither dnf, microdnf, nor yum is installed"
+fi
+
+Also fix the cleanup logic in the Containerfile
+
+Your existing cleanup only handles dnf and yum:
+
+if command -v dnf >/dev/null 2>&1; then \
+    dnf clean all; \
+elif command -v yum >/dev/null 2>&1; then \
+    yum clean all; \
+fi;
+
+Change it to:
+
+if command -v dnf >/dev/null 2>&1; then \
+    dnf clean all; \
+elif command -v microdnf >/dev/null 2>&1; then \
+    microdnf clean all; \
+elif command -v yum >/dev/null 2>&1; then \
+    yum clean all; \
+fi;
+
+And keep:
+
+rm -rf \
+    /var/cache/dnf \
+    /var/cache/yum \
+    /tmp/*
+
+Full corrected verify-satellite.sh
+
+#!/bin/sh
+set -eu
+SATELLITE_HOST="${SATELLITE_HOST:-orecchiette.external.lmco.com}"
+REPO_FILE="/etc/yum.repos.d/redhat.repo"
+ENTITLEMENT_DIRECTORY="/etc/pki/entitlement"
+SATELLITE_CA_DIRECTORY="/etc/rhsm/ca"
+fail()
+{
+    echo "ERROR: $*" >&2
+    exit 1
+}
+test -s "$REPO_FILE" ||
+    fail "Missing or empty $REPO_FILE"
+test -d "$ENTITLEMENT_DIRECTORY" ||
+    fail "Missing $ENTITLEMENT_DIRECTORY"
+test -d "$SATELLITE_CA_DIRECTORY" ||
+    fail "Missing $SATELLITE_CA_DIRECTORY"
+ls "$ENTITLEMENT_DIRECTORY"/*.pem >/dev/null 2>&1 ||
+    fail "No entitlement certificate was found"
+ls "$ENTITLEMENT_DIRECTORY"/*-key.pem >/dev/null 2>&1 ||
+    fail "No entitlement private key was found"
+grep -Fq "$SATELLITE_HOST" "$REPO_FILE" ||
+    fail "$REPO_FILE does not reference $SATELLITE_HOST"
+grep -Eq \
+    '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*1' \
+    "$REPO_FILE" ||
+    fail "No enabled repositories were found in $REPO_FILE"
+echo "Checking Satellite repository access through $SATELLITE_HOST"
+if command -v dnf >/dev/null 2>&1; then
+    echo "Using dnf."
+    dnf -q repolist --enabled
+    dnf -q makecache --refresh
+elif command -v microdnf >/dev/null 2>&1; then
+    echo "Using microdnf."
+    microdnf repolist
+    microdnf makecache
+elif command -v yum >/dev/null 2>&1; then
+    echo "Using yum."
+    yum -q repolist enabled
+    yum -q makecache fast
+else
+    fail "Neither dnf, microdnf, nor yum is installed"
+fi
+echo "Satellite repository verification succeeded."
+
+One more important change
+
+You currently have two matrix entries with:
+
+RHEL_MAJOR: "10"
+
+That means both publish to the same destination:
+
+ubi10-init-satellite
+
+The regular UBI 10 init image and the Python 3.12 minimal image will overwrite or race against each other on tags such as:
+
+latest
+pipeline-...
+sha-...
+
+You need a separate output repository name for the Python image.
+
+Change the script from:
+
+IMAGE_REPOSITORY="${CI_REGISTRY_IMAGE}/ubi${RHEL_MAJOR}-init-satellite"
+
+to:
+
+IMAGE_REPOSITORY="${CI_REGISTRY_IMAGE}/${OUTPUT_IMAGE_NAME}"
+
+Then define the matrix like this:
+
+build_satellite_images:
+  extends: .build_satellite_image
+  parallel:
+    matrix:
+      - RHEL_MAJOR: "7"
+        OUTPUT_IMAGE_NAME: "ubi7-init-satellite"
+        BASE_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/base-images/ubi7-init:latest"
+      - RHEL_MAJOR: "8"
+        OUTPUT_IMAGE_NAME: "ubi8-init-satellite"
+        BASE_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/base-images/ubi8-init:latest"
+      - RHEL_MAJOR: "9"
+        OUTPUT_IMAGE_NAME: "ubi9-init-satellite"
+        BASE_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/base-images/ubi9-init:latest"
+      - RHEL_MAJOR: "10"
+        OUTPUT_IMAGE_NAME: "ubi10-init-satellite"
+        BASE_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/base-images/ubi10-init:latest"
+      - RHEL_MAJOR: "10"
+        OUTPUT_IMAGE_NAME: "ubi10-python3.12-satellite"
+        BASE_IMAGE: "registry.gitlab.us.lmco.com/lit/containers/images/base-images/ubi10-python3.12:20260724"
+
+That will publish the new image separately as:
+
+image-builder/ubi10-python3.12-satellite:latest
+
+So the immediate build fix is microdnf; the destination-name fix prevents the Python image from colliding with your existing UBI 10 init image.
