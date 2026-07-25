@@ -1,0 +1,150 @@
+#!/bin/sh
+
+set -eu
+
+SATELLITE_HOST="${SATELLITE_HOST:-orecchiette.external.lmco.com}"
+
+DEFAULT_REPO_FILE="/etc/yum.repos.d/redhat.repo"
+SATELLITE_REPOS_DIR="/etc/yum.repos.d/lmco-satellite"
+SATELLITE_REPO_FILE="${SATELLITE_REPOS_DIR}/lmco-satellite.repo"
+DNF_CONFIG="/etc/dnf/dnf.conf"
+
+ENTITLEMENT_DIRECTORY="/etc/pki/entitlement"
+SATELLITE_CA_DIRECTORY="/etc/rhsm/ca"
+
+fail()
+{
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+configure_microdnf_satellite_repositories()
+{
+    test -s "$DEFAULT_REPO_FILE" ||
+        fail "Missing bundled Satellite repository file: $DEFAULT_REPO_FILE"
+
+    echo "Configuring static Satellite repositories for microdnf."
+
+    mkdir -p \
+        "$SATELLITE_REPOS_DIR" \
+        /etc/dnf
+
+    # Preserve the repository file extracted from the RHSM bundle before
+    # microdnf or an RHSM plugin can generate another repository set.
+    cp -f \
+        "$DEFAULT_REPO_FILE" \
+        "$SATELLITE_REPO_FILE"
+
+    chmod 0644 "$SATELLITE_REPO_FILE"
+
+    grep -Fq "$SATELLITE_HOST" "$SATELLITE_REPO_FILE" ||
+        fail "$SATELLITE_REPO_FILE does not reference $SATELLITE_HOST"
+
+    if grep -Fq "cdn.redhat.com" "$SATELLITE_REPO_FILE"; then
+        fail "Bundled Satellite repository file references cdn.redhat.com"
+    fi
+
+    for required_repository in \
+        rhel-10-for-x86_64-baseos-rpms \
+        rhel-10-for-x86_64-appstream-rpms
+    do
+        grep -Fq "[${required_repository}]" "$SATELLITE_REPO_FILE" ||
+            fail "Missing required Satellite repository: ${required_repository}"
+    done
+
+    # Make the isolated Satellite directory authoritative for future
+    # microdnf commands. Disable plugins so subscription/RHSM processing
+    # cannot inject a second repository set backed by the public CDN.
+    cat > "$DNF_CONFIG" <<EOF_DNF
+[main]
+reposdir=${SATELLITE_REPOS_DIR}
+plugins=0
+EOF_DNF
+
+    chmod 0644 "$DNF_CONFIG"
+
+    # The isolated copy is now authoritative. Removing the original prevents
+    # it from being loaded alongside the preserved repository file.
+    rm -f "$DEFAULT_REPO_FILE"
+
+    # Remove repository metadata inherited from the base image. This prevents
+    # the matching repository IDs from reusing cached public-CDN information.
+    rm -rf \
+        /var/cache/dnf \
+        /var/cache/yum
+
+    echo "Static Satellite repository configuration is ready."
+    echo "Repository file: $SATELLITE_REPO_FILE"
+    echo "DNF configuration: $DNF_CONFIG"
+}
+
+# Standard/init images contain dnf and can continue using redhat.repo.
+# The minimal Python image contains microdnf and needs the isolated,
+# plugin-free repository configuration.
+if command -v microdnf >/dev/null 2>&1 &&
+   ! command -v dnf >/dev/null 2>&1; then
+
+    configure_microdnf_satellite_repositories
+    REPO_FILE="$SATELLITE_REPO_FILE"
+else
+    REPO_FILE="$DEFAULT_REPO_FILE"
+fi
+
+test -s "$REPO_FILE" ||
+    fail "Missing or empty $REPO_FILE"
+
+test -d "$ENTITLEMENT_DIRECTORY" ||
+    fail "Missing $ENTITLEMENT_DIRECTORY"
+
+test -d "$SATELLITE_CA_DIRECTORY" ||
+    fail "Missing $SATELLITE_CA_DIRECTORY"
+
+ls "$ENTITLEMENT_DIRECTORY"/*.pem >/dev/null 2>&1 ||
+    fail "No entitlement certificate was found"
+
+ls "$ENTITLEMENT_DIRECTORY"/*-key.pem >/dev/null 2>&1 ||
+    fail "No entitlement private key was found"
+
+grep -Fq "$SATELLITE_HOST" "$REPO_FILE" ||
+    fail "$REPO_FILE does not reference $SATELLITE_HOST"
+
+grep -Eq \
+    '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*1' \
+    "$REPO_FILE" ||
+    fail "No enabled repositories were found in $REPO_FILE"
+
+echo "Checking Satellite repository access through $SATELLITE_HOST"
+echo "Repository configuration: $REPO_FILE"
+
+if command -v dnf >/dev/null 2>&1; then
+    dnf -q repolist --enabled
+    dnf -q makecache --refresh
+
+elif command -v microdnf >/dev/null 2>&1; then
+    echo "Using microdnf with plugins disabled."
+
+    microdnf \
+        --noplugins \
+        --setopt="reposdir=${SATELLITE_REPOS_DIR}" \
+        repolist
+
+    # Verify only the two core RHEL 10 repositories. The other internal
+    # repositories remain available, but they do not all need to download
+    # metadata merely to validate this image.
+    microdnf \
+        --noplugins \
+        --setopt="reposdir=${SATELLITE_REPOS_DIR}" \
+        --disablerepo='*' \
+        --enablerepo='rhel-10-for-x86_64-baseos-rpms' \
+        --enablerepo='rhel-10-for-x86_64-appstream-rpms' \
+        makecache
+
+elif command -v yum >/dev/null 2>&1; then
+    yum -q repolist enabled
+    yum -q makecache fast
+
+else
+    fail "Neither dnf, microdnf, nor yum is installed"
+fi
+
+echo "Satellite repository verification succeeded."
