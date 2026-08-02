@@ -1,3 +1,66 @@
+push_3pc_image_to_harbor_global:
+  stage: deploy
+
+  image:
+    name: registry.gitlab.us.lmco.com/lit/containers/images/ansible-molecule:2026.07
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
+      when: on_success
+
+    # Temporary testing option for non-default branches.
+    - when: manual
+
+  script:
+    - |
+      set -eu
+
+      command -v skopeo >/dev/null 2>&1 || {
+        echo "ERROR: skopeo is not installed in the job image."
+        exit 1
+      }
+
+      skopeo --version
+
+      IMAGE_TAG="sha-${CI_COMMIT_SHORT_SHA}-p${CI_PIPELINE_IID}"
+
+      SOURCE_IMAGE="${CI_REGISTRY_IMAGE}/3pc-scancode:${IMAGE_TAG}"
+      HARBOR_VERSIONED_IMAGE="${HARBOR_IMAGE}:${IMAGE_TAG}"
+
+      if [ "${CI_COMMIT_BRANCH}" = "${CI_DEFAULT_BRANCH}" ]; then
+        HARBOR_MOVING_IMAGE="${HARBOR_IMAGE}:latest"
+      else
+        HARBOR_MOVING_IMAGE="${HARBOR_IMAGE}:test-${CI_COMMIT_REF_SLUG}"
+      fi
+
+      : "${CI_REGISTRY_USER:?CI_REGISTRY_USER is not configured}"
+      : "${CI_REGISTRY_PASSWORD:?CI_REGISTRY_PASSWORD is not configured}"
+      : "${HARBOR_BOT_USERNAME:?HARBOR_BOT_USERNAME is not configured}"
+      : "${HARBOR_BOT_PASSWORD:?HARBOR_BOT_PASSWORD is not configured}"
+
+      echo "Copying image to immutable Harbor tag:"
+      echo "  ${SOURCE_IMAGE}"
+      echo "  -> ${HARBOR_VERSIONED_IMAGE}"
+
+      skopeo copy \
+        --src-creds "${CI_REGISTRY_USER}:${CI_REGISTRY_PASSWORD}" \
+        --dest-creds "${HARBOR_BOT_USERNAME}:${HARBOR_BOT_PASSWORD}" \
+        "docker://${SOURCE_IMAGE}" \
+        "docker://${HARBOR_VERSIONED_IMAGE}"
+
+      echo "Copying image to moving Harbor tag:"
+      echo "  ${SOURCE_IMAGE}"
+      echo "  -> ${HARBOR_MOVING_IMAGE}"
+
+      skopeo copy \
+        --src-creds "${CI_REGISTRY_USER}:${CI_REGISTRY_PASSWORD}" \
+        --dest-creds "${HARBOR_BOT_USERNAME}:${HARBOR_BOT_PASSWORD}" \
+        "docker://${SOURCE_IMAGE}" \
+        "docker://${HARBOR_MOVING_IMAGE}"
+
+
+
+
 variables:
   # Keep your existing DOCKER_AUTH_CONFIG,
   # CONTAINER_FROM_IMAGE, and PIP_INDEX_URL variables.
