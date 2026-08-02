@@ -1,0 +1,85 @@
+variables:
+  # Keep your existing DOCKER_AUTH_CONFIG,
+  # CONTAINER_FROM_IMAGE, and PIP_INDEX_URL variables.
+
+  HARBOR_IMAGE: "harbor.global.lmco.com/lmc.aero.3pc/3pc-image"
+
+
+build_3pc_image:
+  stage: build
+
+  image:
+    name: registry.gitlab.us.lmco.com/lit/containers/images/kaniko/kaniko:v1.23.0-debug
+    entrypoint: [""]
+
+  script:
+    - |
+      set -eu
+
+      IMAGE_TAG="sha-${CI_COMMIT_SHORT_SHA}-p${CI_PIPELINE_IID}"
+      SOURCE_IMAGE="${CI_REGISTRY_IMAGE}/3pc-scancode:${IMAGE_TAG}"
+
+      echo "Building image:"
+      echo "  ${SOURCE_IMAGE}"
+
+      /kaniko/executor \
+        --context "${CI_PROJECT_DIR}" \
+        --dockerfile "${CI_PROJECT_DIR}/Containerfile" \
+        --build-arg "CONTAINER_FROM_IMAGE=${CONTAINER_FROM_IMAGE}" \
+        --build-arg "NEXUS_GLOBAL_USERNAME=${NEXUS_GLOBAL_USERNAME}" \
+        --build-arg "NEXUS_GLOBAL_PASSWORD=${NEXUS_GLOBAL_PASSWORD}" \
+        --build-arg "PIP_INDEX_URL=${PIP_INDEX_URL}" \
+        --destination "${SOURCE_IMAGE}" \
+        --cache=false
+
+
+push_3pc_image_to_harbor_global:
+  stage: deploy
+
+  image:
+    name: registry.gitlab.us.lmco.com/lit/containers/images/ansible-molecule:2026.07
+
+  before_script:
+    # Log in to the GitLab registry so this job can pull
+    # the exact image previously built by Kaniko.
+    - |
+      printf '%s' "${CI_REGISTRY_PASSWORD}" |
+        podman login "${CI_REGISTRY}" \
+          --username "${CI_REGISTRY_USER}" \
+          --password-stdin
+
+    # Log in to Harbor using protected CI/CD variables.
+    - |
+      printf '%s' "${HARBOR_BOT_PASSWORD}" |
+        podman login "harbor.global.lmco.com" \
+          --username "${HARBOR_BOT_USERNAME}" \
+          --password-stdin
+
+  script:
+    - |
+      set -eu
+
+      IMAGE_TAG="sha-${CI_COMMIT_SHORT_SHA}-p${CI_PIPELINE_IID}"
+
+      SOURCE_IMAGE="${CI_REGISTRY_IMAGE}/3pc-scancode:${IMAGE_TAG}"
+      HARBOR_VERSIONED_IMAGE="${HARBOR_IMAGE}:${IMAGE_TAG}"
+      HARBOR_LATEST_IMAGE="${HARBOR_IMAGE}:latest"
+
+      echo "Pulling exact Kaniko-built image:"
+      echo "  ${SOURCE_IMAGE}"
+      podman pull "${SOURCE_IMAGE}"
+
+      echo "Publishing immutable Harbor image:"
+      echo "  ${HARBOR_VERSIONED_IMAGE}"
+      podman tag "${SOURCE_IMAGE}" "${HARBOR_VERSIONED_IMAGE}"
+      podman push "${HARBOR_VERSIONED_IMAGE}"
+
+      echo "Publishing stable Harbor image:"
+      echo "  ${HARBOR_LATEST_IMAGE}"
+      podman tag "${SOURCE_IMAGE}" "${HARBOR_LATEST_IMAGE}"
+      podman push "${HARBOR_LATEST_IMAGE}"
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
+      when: on_success
+    - when: never
